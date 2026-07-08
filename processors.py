@@ -59,7 +59,7 @@ FIELD_ALIASES = {
 
     # 追溯字段
     "工作单号": ["工作单号", "工作单", "运单号", "订单号", "SO", "SO号"],
-    "柜号": ["柜号", "箱号", "Container", "Container No"],
+    "柜号": ["柜号", "箱号", "Container", "Container No", "ContainerNo", "Container Number"],
 
     # 平台字段
     "平台仓点": ["平台仓点", "平台仓", "平台仓库", "仓点名称"],
@@ -100,6 +100,10 @@ EXCLUDE_FBX_KEYWORDS = [
 
 LOW_VOLUME_TICKET_THRESHOLD = 2
 LOW_VOLUME_SHARE_THRESHOLD = 0.005
+
+# 标准柜号：4个英文字母 + 7位数字；第4位设备识别码允许 U / J / Z。
+# 例：HMMU9041870、UETU5417684、SMCU1167267、CAIU4361683。
+CONTAINER_NO_PATTERN = re.compile(r"^[A-Z]{3}[UJZ]\d{7}$")
 
 
 # =========================
@@ -174,6 +178,54 @@ def safe_divide(numerator, denominator):
     return numerator / denominator
 
 
+def normalize_container_no(value):
+    """
+    标准化柜号：
+    - 转大写
+    - 去掉空格、横杠、中文空格
+    - 保留原有字母数字结构
+    """
+    if pd.isna(value):
+        return ""
+
+    value = str(value).strip().upper()
+    value = re.sub(r"[\s\-　]+", "", value)
+
+    if value in ["", "NAN", "NONE", "NULL", "-"]:
+        return ""
+
+    return value
+
+
+def is_valid_container_no(value):
+    """
+    标准柜号识别：
+    只认可 4个英文字母 + 7位数字 的柜号格式。
+    第4位设备识别码允许 U / J / Z。
+    非柜号记录，如“FBA19GPXCJFX/操作”“6月下PUW卡板费”等会被识别为无效。
+    """
+    container_no = normalize_container_no(value)
+    return bool(CONTAINER_NO_PATTERN.match(container_no))
+
+
+def filter_valid_container_rows(df, module_name):
+    """
+    提柜 / 拆柜专用柜号清洗：
+    - 新增 标准柜号、柜号是否有效、柜号异常原因
+    - 剔除非标准柜号行，避免卡板费、操作费等非柜记录污染柜量和时效
+    """
+    df = df.copy()
+
+    require_columns(df, ["柜号"], module_name)
+
+    df["标准柜号"] = df["柜号"].apply(normalize_container_no)
+    df["柜号是否有效"] = df["标准柜号"].apply(is_valid_container_no)
+    df["柜号异常原因"] = ""
+    df.loc[~df["柜号是否有效"], "柜号异常原因"] = "非标准柜号，已剔除"
+
+    return df[df["柜号是否有效"]].copy()
+
+
 def prepare_base_df(df):
     df = normalize_columns(df)
 
@@ -189,7 +241,6 @@ def prepare_base_df(df):
     if "客户名称" not in df.columns:
         df["客户名称"] = np.nan
 
-    df["客户类型"] = df.apply(classify_customer_type, axis=1)
     df["T渠道类型"] = df["产品渠道"].apply(classify_t_channel)
 
     return df
@@ -255,14 +306,13 @@ def check_product_channel_available(df, module_name):
 # 3. 客户类型 / T渠道逻辑
 # =========================
 
-def classify_customer_type(row):
+def classify_customer_type_for_volume(row):
     """
-    客户类型划分规则：
+    货量 / 派送类分析客户类型：联宇 / 非联宇 / 美国本土客户。
+    规则：
     1. 产品渠道为空：美国本土客户
-    2. 产品渠道不为空，且客户名称为 深圳劲港跨境物流有限公司：联宇
-    3. 产品渠道不为空，且客户名称以 联宇 开头：联宇
-    4. 产品渠道不为空，且客户名称以 盈仓 开头：联宇
-    5. 其他产品渠道不为空：非联宇
+    2. 产品渠道不为空，客户名称包含“劲港”或“联宇”：联宇
+    3. 产品渠道不为空，其余客户：非联宇
     """
     product_channel = row.get("产品渠道", np.nan)
     customer_name = row.get("客户名称", "")
@@ -272,13 +322,21 @@ def classify_customer_type(row):
 
     customer_name = "" if pd.isna(customer_name) else str(customer_name).strip()
 
-    if customer_name == "深圳劲港跨境物流有限公司":
+    if ("劲港" in customer_name) or ("联宇" in customer_name):
         return "联宇"
 
-    if customer_name.startswith("联宇"):
-        return "联宇"
+    return "非联宇"
 
-    if customer_name.startswith("盈仓"):
+
+def classify_customer_type_for_time_ops(row):
+    """
+    提柜 / 拆柜分析客户类型：只分联宇 / 非联宇。
+    规则：客户名称包含“劲港”或“联宇”即为联宇，否则为非联宇。
+    """
+    customer_name = row.get("客户名称", "")
+    customer_name = "" if pd.isna(customer_name) else str(customer_name).strip()
+
+    if ("劲港" in customer_name) or ("联宇" in customer_name):
         return "联宇"
 
     return "非联宇"
@@ -412,7 +470,7 @@ def extract_fba_code(text):
 
 def add_customer_mix_columns(result_df, detail_df, group_cols):
     """
-    在仓点排行结果中增加客户结构字段：
+    在货量排行结果中增加客户结构字段：
     联宇票数、非联宇票数、美国本土客户票数。
     不改变主排行粒度。
     """
@@ -494,6 +552,7 @@ def add_rank_and_share(result_df, sort_col="总体积"):
 def process_fba_warehouse_rank(df, warehouse, product_type, period_type):
     df = prepare_base_df(df)
     df = filter_warehouse(df, warehouse)
+    df["客户类型"] = df.apply(classify_customer_type_for_volume, axis=1)
 
     require_columns(df, ["出库时间", "目的地"], "FBA仓点货量排行")
 
@@ -551,6 +610,7 @@ def process_fba_warehouse_rank(df, warehouse, product_type, period_type):
 def process_fbx_platform_volume(df, warehouse, product_type, period_type):
     df = prepare_base_df(df)
     df = filter_warehouse(df, warehouse)
+    df["客户类型"] = df.apply(classify_customer_type_for_volume, axis=1)
 
     require_columns(df, ["出库时间", "目的地"], "FBX平台仓点货量分析")
 
@@ -615,7 +675,7 @@ def process_fbx_platform_volume(df, warehouse, product_type, period_type):
 
 
 # =========================
-# 8. 派送时效分析
+# 8. 时效分析通用函数
 # =========================
 
 def mark_duration_abnormal(df, duration_col, start_col, end_col, min_days, max_days):
@@ -684,9 +744,14 @@ def build_duration_summary(df, group_cols, duration_col, total_name, valid_name)
     return result_df
 
 
+# =========================
+# 9. 派送时效分析
+# =========================
+
 def process_delivery_timing(df, warehouse, product_type, period_type):
     df = prepare_base_df(df)
     df = filter_warehouse(df, warehouse)
+    df["客户类型"] = df.apply(classify_customer_type_for_volume, axis=1)
 
     require_columns(df, ["出库时间", "签收时间"], "派送时效分析")
 
@@ -740,7 +805,7 @@ def process_delivery_timing(df, warehouse, product_type, period_type):
 
 
 # =========================
-# 9. 提柜时效分析：按产品渠道 T1/T2/T3 分析
+# 10. 提柜时效分析
 # =========================
 
 def process_pickup_timing(df, warehouse, product_type, period_type):
@@ -750,13 +815,18 @@ def process_pickup_timing(df, warehouse, product_type, period_type):
     DAL：实际抵仓时间 - 提柜时间
 
     汇总维度：
-    仓库 + 统计周期 + T渠道类型
+    仓库 + 统计周期 + T渠道类型 + 客户类型
+
+    提柜模块会先剔除非标准柜号行，避免卡板费 / 操作费等非柜记录污染统计。
     """
     df = prepare_base_df(df)
     df = filter_warehouse(df, warehouse)
+    df["客户类型"] = df.apply(classify_customer_type_for_time_ops, axis=1)
 
-    require_columns(df, ["提柜时间", "实际抵仓时间"], "提柜时效分析")
+    require_columns(df, ["柜号", "提柜时间", "实际抵仓时间"], "提柜时效分析")
     check_product_channel_available(df, "提柜时效分析")
+
+    df = filter_valid_container_rows(df, "提柜时效分析")
 
     df["提柜时间"] = pd.to_datetime(df["提柜时间"], errors="coerce")
     df["实际抵仓时间"] = pd.to_datetime(df["实际抵仓时间"], errors="coerce")
@@ -796,7 +866,7 @@ def process_pickup_timing(df, warehouse, product_type, period_type):
     detail_df = df.copy()
     detail_df.loc[~detail_df["是否有效"], "提柜时效"] = np.nan
 
-    group_cols = ["仓库", "统计周期", "T渠道类型"]
+    group_cols = ["仓库", "统计周期", "T渠道类型", "客户类型"]
 
     result_df = build_duration_summary(
         detail_df,
@@ -817,15 +887,15 @@ def process_pickup_timing(df, warehouse, product_type, period_type):
     )
 
     result_df = result_df.sort_values(
-        ["仓库", "统计周期", "T渠道类型"],
-        ascending=[True, True, True]
+        ["仓库", "统计周期", "T渠道类型", "客户类型"],
+        ascending=[True, True, True, True]
     )
 
     return detail_df, result_df
 
 
 # =========================
-# 10. 拆柜时效分析：按产品渠道 T1/T2/T3 分析
+# 11. 拆柜时效分析
 # =========================
 
 def process_unload_timing(df, warehouse, product_type, period_type):
@@ -834,13 +904,18 @@ def process_unload_timing(df, warehouse, product_type, period_type):
     拆柜完成时间 - 实际抵仓时间
 
     汇总维度：
-    仓库 + 统计周期 + T渠道类型
+    仓库 + 统计周期 + T渠道类型 + 客户类型
+
+    拆柜模块会先剔除非标准柜号行，避免卡板费 / 操作费等非柜记录污染统计。
     """
     df = prepare_base_df(df)
     df = filter_warehouse(df, warehouse)
+    df["客户类型"] = df.apply(classify_customer_type_for_time_ops, axis=1)
 
-    require_columns(df, ["实际抵仓时间", "拆柜完成时间"], "拆柜时效分析")
+    require_columns(df, ["柜号", "实际抵仓时间", "拆柜完成时间"], "拆柜时效分析")
     check_product_channel_available(df, "拆柜时效分析")
+
+    df = filter_valid_container_rows(df, "拆柜时效分析")
 
     df["实际抵仓时间"] = pd.to_datetime(df["实际抵仓时间"], errors="coerce")
     df["拆柜完成时间"] = pd.to_datetime(df["拆柜完成时间"], errors="coerce")
@@ -866,7 +941,7 @@ def process_unload_timing(df, warehouse, product_type, period_type):
     detail_df = df.copy()
     detail_df.loc[~detail_df["是否有效"], "拆柜时效"] = np.nan
 
-    group_cols = ["仓库", "统计周期", "T渠道类型"]
+    group_cols = ["仓库", "统计周期", "T渠道类型", "客户类型"]
 
     result_df = build_duration_summary(
         detail_df,
@@ -887,15 +962,15 @@ def process_unload_timing(df, warehouse, product_type, period_type):
     )
 
     result_df = result_df.sort_values(
-        ["仓库", "统计周期", "T渠道类型"],
-        ascending=[True, True, True]
+        ["仓库", "统计周期", "T渠道类型", "客户类型"],
+        ascending=[True, True, True, True]
     )
 
     return detail_df, result_df
 
 
 # =========================
-# 11. 总入口函数：给 app.py 调用
+# 12. 总入口函数：给 app.py 调用
 # =========================
 
 def process_uploaded_file(
