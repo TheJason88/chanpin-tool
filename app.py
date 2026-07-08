@@ -1,9 +1,15 @@
-import streamlit as st
-import pandas as pd
+import importlib
 from io import BytesIO
 from datetime import date, datetime
 
-from processors import process_uploaded_file
+import pandas as pd
+import streamlit as st
+
+import processors
+
+# Streamlit rerun sometimes keeps imported modules in memory.
+# Reload processors so GitHub updates to processors.py are picked up together with app.py.
+importlib.reload(processors)
 
 
 st.set_page_config(
@@ -66,7 +72,7 @@ uploaded_file = st.file_uploader(
 
 st.caption(
     "说明：网页工具会按所选时间范围筛选数据，再按月或按周汇总。"
-    "各模块使用的筛选日期字段为：FBA/FBX/派送=出库时间；提柜=提柜时间；拆柜=拆柜完成时间。"
+    "各模块使用的筛选日期字段为：FBA/FBX/派送=出库时间；提柜=实际抵仓时间；拆柜=拆柜完成时间。"
 )
 
 
@@ -104,7 +110,7 @@ if uploaded_file is not None:
             else:
                 uploaded_file.seek(0)
 
-                detail_df, result_df, final_module = process_uploaded_file(
+                detail_df, result_df, final_module = processors.process_uploaded_file(
                     uploaded_file=uploaded_file,
                     sheet_name=sheet_name,
                     warehouse=warehouse,
