@@ -226,6 +226,32 @@ def filter_valid_container_rows(df, module_name):
     return df[df["柜号是否有效"]].copy()
 
 
+def filter_date_range(df, date_col, start_date=None, end_date=None):
+    """
+    按页面选择的时间范围筛选数据。
+    起止日期均为闭区间；如果原始日期带具体时间，则结束日会保留到当天 23:59:59。
+    """
+    df = df.copy()
+
+    if start_date is None and end_date is None:
+        return df
+
+    if date_col not in df.columns:
+        raise ValueError(f"时间范围筛选缺少日期字段：{date_col}")
+
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+
+    if start_date is not None:
+        start_ts = pd.to_datetime(start_date)
+        df = df[df[date_col] >= start_ts]
+
+    if end_date is not None:
+        end_ts = pd.to_datetime(end_date) + pd.Timedelta(days=1)
+        df = df[df[date_col] < end_ts]
+
+    return df.copy()
+
+
 def prepare_base_df(df):
     df = normalize_columns(df)
 
@@ -549,13 +575,14 @@ def add_rank_and_share(result_df, sort_col="总体积"):
 # 6. FBA 仓点货量排行
 # =========================
 
-def process_fba_warehouse_rank(df, warehouse, product_type, period_type):
+def process_fba_warehouse_rank(df, warehouse, product_type, period_type, start_date=None, end_date=None):
     df = prepare_base_df(df)
     df = filter_warehouse(df, warehouse)
     df["客户类型"] = df.apply(classify_customer_type_for_volume, axis=1)
 
     require_columns(df, ["出库时间", "目的地"], "FBA仓点货量排行")
 
+    df = filter_date_range(df, "出库时间", start_date, end_date)
     df = add_period_column(df, period_type, "出库时间")
     df = apply_transfer_destination(df)
 
@@ -607,13 +634,14 @@ def process_fba_warehouse_rank(df, warehouse, product_type, period_type):
 # 7. FBX 平台仓点货量分析
 # =========================
 
-def process_fbx_platform_volume(df, warehouse, product_type, period_type):
+def process_fbx_platform_volume(df, warehouse, product_type, period_type, start_date=None, end_date=None):
     df = prepare_base_df(df)
     df = filter_warehouse(df, warehouse)
     df["客户类型"] = df.apply(classify_customer_type_for_volume, axis=1)
 
     require_columns(df, ["出库时间", "目的地"], "FBX平台仓点货量分析")
 
+    df = filter_date_range(df, "出库时间", start_date, end_date)
     df = add_period_column(df, period_type, "出库时间")
     df = apply_transfer_destination(df)
 
@@ -748,12 +776,14 @@ def build_duration_summary(df, group_cols, duration_col, total_name, valid_name)
 # 9. 派送时效分析
 # =========================
 
-def process_delivery_timing(df, warehouse, product_type, period_type):
+def process_delivery_timing(df, warehouse, product_type, period_type, start_date=None, end_date=None):
     df = prepare_base_df(df)
     df = filter_warehouse(df, warehouse)
     df["客户类型"] = df.apply(classify_customer_type_for_volume, axis=1)
 
     require_columns(df, ["出库时间", "签收时间"], "派送时效分析")
+
+    df = filter_date_range(df, "出库时间", start_date, end_date)
 
     if "目的地" in df.columns:
         df = apply_transfer_destination(df)
@@ -808,7 +838,7 @@ def process_delivery_timing(df, warehouse, product_type, period_type):
 # 10. 提柜时效分析
 # =========================
 
-def process_pickup_timing(df, warehouse, product_type, period_type):
+def process_pickup_timing(df, warehouse, product_type, period_type, start_date=None, end_date=None):
     """
     提柜时效口径：
     LA/NJ/SAV：实际抵仓时间 - Available时间
@@ -826,6 +856,7 @@ def process_pickup_timing(df, warehouse, product_type, period_type):
     require_columns(df, ["柜号", "提柜时间", "实际抵仓时间"], "提柜时效分析")
     check_product_channel_available(df, "提柜时效分析")
 
+    df = filter_date_range(df, "提柜时间", start_date, end_date)
     df = filter_valid_container_rows(df, "提柜时效分析")
 
     df["提柜时间"] = pd.to_datetime(df["提柜时间"], errors="coerce")
@@ -898,7 +929,7 @@ def process_pickup_timing(df, warehouse, product_type, period_type):
 # 11. 拆柜时效分析
 # =========================
 
-def process_unload_timing(df, warehouse, product_type, period_type):
+def process_unload_timing(df, warehouse, product_type, period_type, start_date=None, end_date=None):
     """
     拆柜时效口径：
     拆柜完成时间 - 实际抵仓时间
@@ -915,6 +946,7 @@ def process_unload_timing(df, warehouse, product_type, period_type):
     require_columns(df, ["柜号", "实际抵仓时间", "拆柜完成时间"], "拆柜时效分析")
     check_product_channel_available(df, "拆柜时效分析")
 
+    df = filter_date_range(df, "拆柜完成时间", start_date, end_date)
     df = filter_valid_container_rows(df, "拆柜时效分析")
 
     df["实际抵仓时间"] = pd.to_datetime(df["实际抵仓时间"], errors="coerce")
@@ -979,7 +1011,9 @@ def process_uploaded_file(
     warehouse,
     product_type,
     analysis_module,
-    period_type
+    period_type,
+    start_date=None,
+    end_date=None
 ):
     uploaded_file.seek(0)
     df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
@@ -989,7 +1023,9 @@ def process_uploaded_file(
             df=df,
             warehouse=warehouse,
             product_type=product_type,
-            period_type=period_type
+            period_type=period_type,
+            start_date=start_date,
+            end_date=end_date
         )
 
     elif analysis_module == "FBX平台仓点货量分析":
@@ -997,7 +1033,9 @@ def process_uploaded_file(
             df=df,
             warehouse=warehouse,
             product_type=product_type,
-            period_type=period_type
+            period_type=period_type,
+            start_date=start_date,
+            end_date=end_date
         )
 
     elif analysis_module == "派送时效分析":
@@ -1005,7 +1043,9 @@ def process_uploaded_file(
             df=df,
             warehouse=warehouse,
             product_type=product_type,
-            period_type=period_type
+            period_type=period_type,
+            start_date=start_date,
+            end_date=end_date
         )
 
     elif analysis_module == "提柜时效分析":
@@ -1013,7 +1053,9 @@ def process_uploaded_file(
             df=df,
             warehouse=warehouse,
             product_type=product_type,
-            period_type=period_type
+            period_type=period_type,
+            start_date=start_date,
+            end_date=end_date
         )
 
     elif analysis_module == "拆柜时效分析":
@@ -1021,7 +1063,9 @@ def process_uploaded_file(
             df=df,
             warehouse=warehouse,
             product_type=product_type,
-            period_type=period_type
+            period_type=period_type,
+            start_date=start_date,
+            end_date=end_date
         )
 
     else:
