@@ -51,6 +51,7 @@ EXCLUDE_FBX_KEYWORDS = [
 
 LOW_VOLUME_TICKET_THRESHOLD = 2
 LOW_VOLUME_SHARE_THRESHOLD = 0.005
+RESULT_DECIMALS = 2
 CONTAINER_NO_PATTERN = re.compile(r"^[A-Z]{3}[UJZ]\d{7}$")
 
 
@@ -204,6 +205,18 @@ def check_product_channel_available(df, module_name):
         raise ValueError(f"{module_name}需要字段：产品渠道。该字段用于识别 T1 / T2 / T3。")
     if df["产品渠道"].apply(is_blank).all():
         raise ValueError(f"{module_name}中产品渠道字段全为空，无法按 T1 / T2 / T3 分析。")
+
+
+def round_output_numbers(df, decimals=RESULT_DECIMALS):
+    """
+    统一结果表数字格式：现有和未来新增的数值型计算结果统一保留两位小数。
+    整数类计数字段仍保持整数显示。
+    """
+    df = df.copy()
+    float_cols = df.select_dtypes(include=["float", "float64", "float32"]).columns
+    if len(float_cols) > 0:
+        df[float_cols] = df[float_cols].round(decimals)
+    return df
 
 
 # =========================
@@ -655,7 +668,6 @@ def process_uploaded_file(
     else:
         raise ValueError(f"暂不支持该分析模块：{analysis_module}")
 
-    for col in result_df.select_dtypes(include=["float", "float64"]).columns:
-        result_df[col] = result_df[col].round(4)
+    result_df = round_output_numbers(result_df, RESULT_DECIMALS)
 
     return detail_df, result_df, analysis_module
