@@ -11,6 +11,16 @@ import processors
 # Reload processors so GitHub updates to processors.py are picked up together with app.py.
 importlib.reload(processors)
 
+# 仓点筛选必须优先识别“入库仓库”。
+# 鲲运导出表常用字段是“入库仓库”，页面第一项选择 LA/NJ/SAV/DAL 时，
+# 需要先把入库仓库标准化为仓库，再执行仓点筛选。
+WAREHOUSE_ALIASES = [
+    "仓库", "仓点", "仓库名称", "所属仓", "目的仓",
+    "入库仓库", "入库仓", "到仓仓库", "抵仓仓库", "实际入库仓库",
+    "Warehouse", "Inbound Warehouse"
+]
+processors.FIELD_ALIASES["仓库"] = WAREHOUSE_ALIASES
+
 
 st.set_page_config(
     page_title="美盈产品数据处理工具",
@@ -72,6 +82,7 @@ uploaded_file = st.file_uploader(
 st.caption(
     "说明：网页工具会按所选时间范围筛选数据，再按月或按周汇总。"
     "各模块使用的筛选日期字段为：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间；派送=出库时间。"
+    "仓点筛选字段优先识别入库仓库，并统一映射：美西二号仓=LA，达拉斯盈仓=DAL，新泽西二号仓=NJ，萨凡纳盈仓=SAV。"
 )
 
 
