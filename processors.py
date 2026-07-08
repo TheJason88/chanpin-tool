@@ -119,8 +119,27 @@ def safe_divide(numerator, denominator):
     return numerator / denominator
 
 
-def format_ratio(*values):
-    return ":".join("0.00" if pd.isna(v) else f"{float(v):.2f}" for v in values)
+def normalized_ratio_values(counts, decimals=RESULT_DECIMALS):
+    """
+    按给定分类内部计算占比，输出占比之和固定为 1.00。
+    例如 T1/T2/T3 占比只在 T1+T2+T3 范围内计算，不再除以总柜量。
+    """
+    counts = [0 if pd.isna(v) else float(v) for v in counts]
+    total = sum(counts)
+    if total <= 0:
+        return [0.0 for _ in counts]
+
+    raw = [v / total for v in counts]
+    rounded = [round(v, decimals) for v in raw]
+
+    if len(rounded) >= 2:
+        rounded[-1] = round(1 - sum(rounded[:-1]), decimals)
+
+    return rounded
+
+
+def format_ratio_values(values):
+    return ":".join(f"{float(v):.{RESULT_DECIMALS}f}" for v in values)
 
 
 def normalize_container_no(value):
@@ -408,6 +427,7 @@ def add_rank_and_share(result_df, sort_col="总体积"):
 def build_volume_one_row_summary(df, include_us_customer=True):
     """
     柜量类结果：每个仓库 + 统计周期一行。
+    占比口径：只在展示的分类内部计算，确保对应“比”加总等于 1.00。
     """
     group_cols = ["仓库", "统计周期"]
     base_cols = group_cols + ["总柜量", "联宇柜量", "非联宇柜量"]
@@ -445,18 +465,16 @@ def build_volume_one_row_summary(df, include_us_customer=True):
         row["非联宇柜量"] = non_ly
         if include_us_customer:
             row["美国本土客户柜量"] = us
-
-        ly_rate = safe_divide(ly, total)
-        non_ly_rate = safe_divide(non_ly, total)
-        us_rate = safe_divide(us, total) if include_us_customer else np.nan
-
-        row["联宇柜量占比"] = ly_rate
-        row["非联宇柜量占比"] = non_ly_rate
-        if include_us_customer:
-            row["美国本土客户柜量占比"] = us_rate
-            row["客户柜量比"] = format_ratio(ly_rate, non_ly_rate, us_rate)
+            customer_rates = normalized_ratio_values([ly, non_ly, us])
+            row["联宇柜量占比"] = customer_rates[0]
+            row["非联宇柜量占比"] = customer_rates[1]
+            row["美国本土客户柜量占比"] = customer_rates[2]
+            row["客户柜量比"] = format_ratio_values(customer_rates)
         else:
-            row["客户柜量比"] = format_ratio(ly_rate, non_ly_rate)
+            customer_rates = normalized_ratio_values([ly, non_ly])
+            row["联宇柜量占比"] = customer_rates[0]
+            row["非联宇柜量占比"] = customer_rates[1]
+            row["客户柜量比"] = format_ratio_values(customer_rates)
 
         t1 = int((group["T渠道类型"] == "T1").sum())
         t2 = int((group["T渠道类型"] == "T2").sum())
@@ -466,13 +484,11 @@ def build_volume_one_row_summary(df, include_us_customer=True):
         row["T2柜量"] = t2
         row["T3柜量"] = t3
 
-        t1_rate = safe_divide(t1, total)
-        t2_rate = safe_divide(t2, total)
-        t3_rate = safe_divide(t3, total)
-        row["T1柜量占比"] = t1_rate
-        row["T2柜量占比"] = t2_rate
-        row["T3柜量占比"] = t3_rate
-        row["T渠道柜量比"] = format_ratio(t1_rate, t2_rate, t3_rate)
+        t_rates = normalized_ratio_values([t1, t2, t3])
+        row["T1柜量占比"] = t_rates[0]
+        row["T2柜量占比"] = t_rates[1]
+        row["T3柜量占比"] = t_rates[2]
+        row["T渠道柜量比"] = format_ratio_values(t_rates)
 
         rows.append(row)
 
