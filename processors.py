@@ -166,6 +166,23 @@ def filter_valid_container_rows(df, module_name):
     return df[df["柜号是否有效"]].copy()
 
 
+def deduplicate_by_container_no(df, sort_col=None):
+    """
+    柜量统计必须按“标准柜号”去重。
+    目的：避免同一个柜号因多条费用、状态或明细记录被重复计入柜量。
+    """
+    df = df.copy()
+
+    if "标准柜号" not in df.columns:
+        df["标准柜号"] = df["柜号"].apply(normalize_container_no)
+
+    if sort_col and sort_col in df.columns:
+        df[sort_col] = pd.to_datetime(df[sort_col], errors="coerce")
+        df = df.sort_values(sort_col)
+
+    return df.drop_duplicates(subset=["标准柜号"], keep="last").copy()
+
+
 def filter_date_range(df, date_col, start_date=None, end_date=None):
     df = df.copy()
     if start_date is None and end_date is None:
@@ -538,6 +555,7 @@ def process_volume_analysis(df, warehouse, product_type, period_type, start_date
     产品视角货量分析：
     - 时间范围 / 统计周期字段：ETA
     - 基于标准柜号清洗
+    - 柜量按标准柜号去重
     - 输出总柜量、客户柜量结构、T渠道柜量结构及占比
     """
     df = prepare_base_df(df)
@@ -547,6 +565,7 @@ def process_volume_analysis(df, warehouse, product_type, period_type, start_date
 
     df = filter_date_range(df, "ETA", start_date, end_date)
     df = filter_valid_container_rows(df, "货量分析")
+    df = deduplicate_by_container_no(df, sort_col="ETA")
     df = add_period_column(df, period_type, "ETA")
 
     df["客户类型"] = df.apply(classify_customer_type_for_product_volume, axis=1)
@@ -742,8 +761,7 @@ def process_pickup_timing(df, warehouse, product_type, period_type, start_date=N
     else:
         df["Available时间"] = pd.NaT
 
-    if "工作单号" in df.columns:
-        df = df.sort_values("提柜时间").drop_duplicates("工作单号", keep="last")
+    df = deduplicate_by_container_no(df, sort_col="实际抵仓时间")
 
     df = add_period_column(df, period_type, "实际抵仓时间")
     df["T渠道类型"] = df["产品渠道"].apply(classify_t_channel)
@@ -775,6 +793,8 @@ def process_unload_timing(df, warehouse, product_type, period_type, start_date=N
 
     df["实际抵仓时间"] = pd.to_datetime(df["实际抵仓时间"], errors="coerce")
     df["拆柜完成时间"] = pd.to_datetime(df["拆柜完成时间"], errors="coerce")
+    df = deduplicate_by_container_no(df, sort_col="拆柜完成时间")
+
     df = add_period_column(df, period_type, "拆柜完成时间")
     df["T渠道类型"] = df["产品渠道"].apply(classify_t_channel)
     df["开始时间"] = df["实际抵仓时间"]
