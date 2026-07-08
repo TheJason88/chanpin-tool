@@ -12,8 +12,8 @@ import processors
 importlib.reload(processors)
 
 # 仓点筛选必须优先识别“入库仓库”。
-# 鲲运导出表常用字段是“入库仓库”，页面第一项选择 LA/NJ/SAV/DAL 时，
-# 需要先把入库仓库标准化为仓库，再执行仓点筛选。
+# 鲲运导出表常用字段是“入库仓库”，页面第一项选择 LA/NJ/SAV/DAL/全部时，
+# 需要先把入库仓库标准化为仓库，再执行仓点筛选或分仓统计。
 WAREHOUSE_ALIASES = [
     "仓库", "仓点", "仓库名称", "所属仓", "目的仓",
     "入库仓库", "入库仓", "到仓仓库", "抵仓仓库", "实际入库仓库",
@@ -37,7 +37,7 @@ PLACEHOLDER = "请填入"
 
 warehouse = st.selectbox(
     "1. 选择仓点",
-    [PLACEHOLDER, "LA", "NJ", "SAV", "DAL", "四仓合并"],
+    [PLACEHOLDER, "LA", "NJ", "SAV", "DAL", "全部"],
     index=0
 )
 
@@ -83,6 +83,7 @@ st.caption(
     "说明：网页工具会按所选时间范围筛选数据，再按月或按周汇总。"
     "各模块使用的筛选日期字段为：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间；派送=出库时间。"
     "仓点筛选字段优先识别入库仓库，并统一映射：美西二号仓=LA，达拉斯盈仓=DAL，新泽西二号仓=NJ，萨凡纳盈仓=SAV。"
+    "如果仓点选择“全部”，系统不会把四仓合并成一行，而是先按入库仓库识别 LA/DAL/NJ/SAV，再分别输出各仓结果。"
 )
 
 
@@ -120,10 +121,12 @@ if uploaded_file is not None:
             else:
                 uploaded_file.seek(0)
 
+                warehouse_for_processing = "四仓合并" if warehouse == "全部" else warehouse
+
                 detail_df, result_df, final_module = processors.process_uploaded_file(
                     uploaded_file=uploaded_file,
                     sheet_name=sheet_name,
-                    warehouse=warehouse,
+                    warehouse=warehouse_for_processing,
                     product_type=product_type,
                     analysis_module=analysis_module,
                     period_type=period_type,
