@@ -844,6 +844,8 @@ def process_pickup_timing(df, warehouse, product_type, period_type, start_date=N
     LA/NJ/SAV：实际抵仓时间 - Available时间
     DAL：实际抵仓时间 - 提柜时间
 
+    时间范围筛选字段：实际抵仓时间
+
     汇总维度：
     仓库 + 统计周期 + T渠道类型 + 客户类型
 
@@ -856,7 +858,7 @@ def process_pickup_timing(df, warehouse, product_type, period_type, start_date=N
     require_columns(df, ["柜号", "提柜时间", "实际抵仓时间"], "提柜时效分析")
     check_product_channel_available(df, "提柜时效分析")
 
-    df = filter_date_range(df, "提柜时间", start_date, end_date)
+    df = filter_date_range(df, "实际抵仓时间", start_date, end_date)
     df = filter_valid_container_rows(df, "提柜时效分析")
 
     df["提柜时间"] = pd.to_datetime(df["提柜时间"], errors="coerce")
@@ -870,7 +872,7 @@ def process_pickup_timing(df, warehouse, product_type, period_type, start_date=N
     if "工作单号" in df.columns:
         df = df.sort_values("提柜时间").drop_duplicates("工作单号", keep="last")
 
-    df = add_period_column(df, period_type, "提柜时间")
+    df = add_period_column(df, period_type, "实际抵仓时间")
 
     df["T渠道类型"] = df["产品渠道"].apply(classify_t_channel)
 
@@ -933,6 +935,8 @@ def process_unload_timing(df, warehouse, product_type, period_type, start_date=N
     """
     拆柜时效口径：
     拆柜完成时间 - 实际抵仓时间
+
+    时间范围筛选字段：拆柜完成时间
 
     汇总维度：
     仓库 + 统计周期 + T渠道类型 + 客户类型
