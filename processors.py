@@ -18,6 +18,7 @@ FIELD_ALIASES = {
     "仓库": ["仓库", "仓点", "仓库名称", "所属仓", "目的仓", "Warehouse"],
     "客户名称": ["客户名称", "客户", "客户名", "客户公司", "Customer", "Customer Name"],
     "产品渠道": ["产品渠道", "渠道", "T渠道", "服务渠道", "产品通道"],
+    "ETA": ["ETA", "eta", "预计到仓时间", "预计抵仓时间", "预计到港时间", "预计到达时间"],
 
     "出库时间": ["出库时间", "实际出库时间", "发车时间", "Outbound Time", "Ship Time"],
     "签收时间": ["签收时间", "实际签收时间", "POD时间", "妥投时间", "Delivered Time", "Delivery Time"],
@@ -53,6 +54,7 @@ LOW_VOLUME_TICKET_THRESHOLD = 2
 LOW_VOLUME_SHARE_THRESHOLD = 0.005
 RESULT_DECIMALS = 2
 CONTAINER_NO_PATTERN = re.compile(r"^[A-Z]{3}[UJZ]\d{7}$")
+CHINESE_PATTERN = re.compile(r"[\u4e00-\u9fff]")
 
 
 # =========================
@@ -84,6 +86,12 @@ def is_blank(value):
     return str(value).strip() in ["", "nan", "NaN", "None", "none", "null", "NULL", "-"]
 
 
+def has_chinese(value):
+    if pd.isna(value):
+        return False
+    return bool(CHINESE_PATTERN.search(str(value)))
+
+
 def standardize_warehouse(value):
     if pd.isna(value):
         return np.nan
@@ -109,6 +117,10 @@ def safe_divide(numerator, denominator):
     if denominator == 0 or pd.isna(denominator):
         return np.nan
     return numerator / denominator
+
+
+def format_ratio(*values):
+    return ":".join("0.00" if pd.isna(v) else f"{float(v):.2f}" for v in values)
 
 
 def normalize_container_no(value):
@@ -208,10 +220,6 @@ def check_product_channel_available(df, module_name):
 
 
 def round_output_numbers(df, decimals=RESULT_DECIMALS):
-    """
-    统一结果表数字格式：现有和未来新增的数值型计算结果统一保留两位小数。
-    整数类计数字段仍保持整数显示。
-    """
     df = df.copy()
     float_cols = df.select_dtypes(include=["float", "float64", "float32"]).columns
     if len(float_cols) > 0:
@@ -223,7 +231,28 @@ def round_output_numbers(df, decimals=RESULT_DECIMALS):
 # 3. 客户类型 / T渠道逻辑
 # =========================
 
+def classify_customer_type_for_product_volume(row):
+    """
+    货量分析客户分类：
+    - 客户名称包含“劲港”或“联宇” → 联宇
+    - 剩下的中文客户 → 非联宇
+    - 英文/无中文客户 → 美国本土客户
+    """
+    customer_name = row.get("客户名称", "")
+    customer_name = "" if pd.isna(customer_name) else str(customer_name).strip()
+
+    if ("劲港" in customer_name) or ("联宇" in customer_name):
+        return "联宇"
+    if has_chinese(customer_name):
+        return "非联宇"
+    return "美国本土客户"
+
+
 def classify_customer_type_for_volume(row):
+    """
+    旧货量/派送客户分类口径，保留用于 FBA/FBX 旧模块：
+    产品渠道为空 → 美国本土客户；产品渠道不为空再按客户名称判断联宇/非联宇。
+    """
     product_channel = row.get("产品渠道", np.nan)
     customer_name = row.get("客户名称", "")
     if is_blank(product_channel):
@@ -235,6 +264,9 @@ def classify_customer_type_for_volume(row):
 
 
 def classify_customer_type_for_time_ops(row):
+    """
+    提柜 / 拆柜分析客户类型：只分联宇 / 非联宇。
+    """
     customer_name = row.get("客户名称", "")
     customer_name = "" if pd.isna(customer_name) else str(customer_name).strip()
     if ("劲港" in customer_name) or ("联宇" in customer_name):
@@ -370,7 +402,147 @@ def add_rank_and_share(result_df, sort_col="总体积"):
 
 
 # =========================
-# 6. FBA 仓点货量排行
+# 6. 汇总构造函数
+# =========================
+
+def build_volume_one_row_summary(df, include_us_customer=True):
+    """
+    柜量类结果：每个仓库 + 统计周期一行。
+    """
+    group_cols = ["仓库", "统计周期"]
+    base_cols = group_cols + ["总柜量", "联宇柜量", "非联宇柜量"]
+    if include_us_customer:
+        base_cols += ["美国本土客户柜量"]
+
+    ratio_cols = ["联宇柜量占比", "非联宇柜量占比"]
+    if include_us_customer:
+        ratio_cols += ["美国本土客户柜量占比"]
+    ratio_cols += ["客户柜量比"]
+
+    channel_cols = [
+        "T1柜量", "T2柜量", "T3柜量",
+        "T1柜量占比", "T2柜量占比", "T3柜量占比", "T渠道柜量比"
+    ]
+
+    output_cols = base_cols + ratio_cols + channel_cols
+
+    if df.empty:
+        return pd.DataFrame(columns=output_cols)
+
+    rows = []
+    for keys, group in df.groupby(group_cols, dropna=False):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        row = dict(zip(group_cols, keys))
+        total = int(len(group))
+        row["总柜量"] = total
+
+        ly = int((group["客户类型"] == "联宇").sum())
+        non_ly = int((group["客户类型"] == "非联宇").sum())
+        us = int((group["客户类型"] == "美国本土客户").sum()) if include_us_customer else 0
+
+        row["联宇柜量"] = ly
+        row["非联宇柜量"] = non_ly
+        if include_us_customer:
+            row["美国本土客户柜量"] = us
+
+        ly_rate = safe_divide(ly, total)
+        non_ly_rate = safe_divide(non_ly, total)
+        us_rate = safe_divide(us, total) if include_us_customer else np.nan
+
+        row["联宇柜量占比"] = ly_rate
+        row["非联宇柜量占比"] = non_ly_rate
+        if include_us_customer:
+            row["美国本土客户柜量占比"] = us_rate
+            row["客户柜量比"] = format_ratio(ly_rate, non_ly_rate, us_rate)
+        else:
+            row["客户柜量比"] = format_ratio(ly_rate, non_ly_rate)
+
+        t1 = int((group["T渠道类型"] == "T1").sum())
+        t2 = int((group["T渠道类型"] == "T2").sum())
+        t3 = int((group["T渠道类型"] == "T3").sum())
+
+        row["T1柜量"] = t1
+        row["T2柜量"] = t2
+        row["T3柜量"] = t3
+
+        t1_rate = safe_divide(t1, total)
+        t2_rate = safe_divide(t2, total)
+        t3_rate = safe_divide(t3, total)
+        row["T1柜量占比"] = t1_rate
+        row["T2柜量占比"] = t2_rate
+        row["T3柜量占比"] = t3_rate
+        row["T渠道柜量比"] = format_ratio(t1_rate, t2_rate, t3_rate)
+
+        rows.append(row)
+
+    return pd.DataFrame(rows, columns=output_cols).sort_values(group_cols).reset_index(drop=True)
+
+
+def build_time_ops_one_row_summary(df, duration_col, duration_label):
+    """
+    提柜 / 拆柜结果专用：一行呈现柜量结构 + 占比 + 时效结构。
+    每行粒度为：仓库 + 统计周期。
+    """
+    result_df = build_volume_one_row_summary(df, include_us_customer=False)
+
+    duration_cols = [
+        f"总平均{duration_label}时效",
+        f"T1平均{duration_label}时效",
+        f"T2平均{duration_label}时效",
+        f"T3平均{duration_label}时效",
+    ]
+
+    if result_df.empty:
+        for col in duration_cols:
+            result_df[col] = np.nan
+        return result_df
+
+    duration_rows = []
+    for keys, group in df.groupby(["仓库", "统计周期"], dropna=False):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        row = {"仓库": keys[0], "统计周期": keys[1]}
+        row[f"总平均{duration_label}时效"] = group[duration_col].mean()
+        row[f"T1平均{duration_label}时效"] = group.loc[group["T渠道类型"] == "T1", duration_col].mean()
+        row[f"T2平均{duration_label}时效"] = group.loc[group["T渠道类型"] == "T2", duration_col].mean()
+        row[f"T3平均{duration_label}时效"] = group.loc[group["T渠道类型"] == "T3", duration_col].mean()
+        duration_rows.append(row)
+
+    duration_df = pd.DataFrame(duration_rows)
+    return result_df.merge(duration_df, on=["仓库", "统计周期"], how="left")
+
+
+# =========================
+# 7. 货量分析
+# =========================
+
+def process_volume_analysis(df, warehouse, product_type, period_type, start_date=None, end_date=None):
+    """
+    产品视角货量分析：
+    - 时间范围 / 统计周期字段：ETA
+    - 基于标准柜号清洗
+    - 输出总柜量、客户柜量结构、T渠道柜量结构及占比
+    """
+    df = prepare_base_df(df)
+    df = filter_warehouse(df, warehouse)
+    require_columns(df, ["柜号", "ETA", "客户名称"], "货量分析")
+    check_product_channel_available(df, "货量分析")
+
+    df = filter_date_range(df, "ETA", start_date, end_date)
+    df = filter_valid_container_rows(df, "货量分析")
+    df = add_period_column(df, period_type, "ETA")
+
+    df["客户类型"] = df.apply(classify_customer_type_for_product_volume, axis=1)
+    df["T渠道类型"] = df["产品渠道"].apply(classify_t_channel)
+
+    detail_df = df.copy()
+    result_df = build_volume_one_row_summary(detail_df, include_us_customer=True)
+    return detail_df, result_df
+
+
+# =========================
+# 8. FBA / FBX 旧货量模块
 # =========================
 
 def process_fba_warehouse_rank(df, warehouse, product_type, period_type, start_date=None, end_date=None):
@@ -407,10 +579,6 @@ def process_fba_warehouse_rank(df, warehouse, product_type, period_type, start_d
     result_df = add_rank_and_share(result_df, sort_col="总体积")
     return detail_df, result_df
 
-
-# =========================
-# 7. FBX 平台仓点货量分析
-# =========================
 
 def process_fbx_platform_volume(df, warehouse, product_type, period_type, start_date=None, end_date=None):
     df = prepare_base_df(df)
@@ -459,7 +627,7 @@ def process_fbx_platform_volume(df, warehouse, product_type, period_type, start_
 
 
 # =========================
-# 8. 时效分析通用函数
+# 9. 时效分析通用函数
 # =========================
 
 def mark_duration_abnormal(df, duration_col, start_col, end_col, min_days, max_days):
@@ -502,49 +670,15 @@ def build_duration_summary(df, group_cols, duration_col, total_name, valid_name)
     return result_df
 
 
-def build_time_ops_one_row_summary(df, duration_col, duration_label):
-    """
-    提柜 / 拆柜结果专用：一行呈现柜量结构 + 时效结构。
-    每行粒度为：仓库 + 统计周期。
-    """
-    group_cols = ["仓库", "统计周期"]
-    output_cols = group_cols + [
-        "总柜量", "联宇柜量", "非联宇柜量", "T1柜量", "T2柜量", "T3柜量",
-        f"总平均{duration_label}时效", f"T1平均{duration_label}时效", f"T2平均{duration_label}时效", f"T3平均{duration_label}时效",
-    ]
-
-    if df.empty:
-        return pd.DataFrame(columns=output_cols)
-
-    rows = []
-    for keys, group in df.groupby(group_cols, dropna=False):
-        if not isinstance(keys, tuple):
-            keys = (keys,)
-        row = dict(zip(group_cols, keys))
-        row["总柜量"] = int(len(group))
-        row["联宇柜量"] = int((group["客户类型"] == "联宇").sum())
-        row["非联宇柜量"] = int((group["客户类型"] == "非联宇").sum())
-        row["T1柜量"] = int((group["T渠道类型"] == "T1").sum())
-        row["T2柜量"] = int((group["T渠道类型"] == "T2").sum())
-        row["T3柜量"] = int((group["T渠道类型"] == "T3").sum())
-        row[f"总平均{duration_label}时效"] = group[duration_col].mean()
-        row[f"T1平均{duration_label}时效"] = group.loc[group["T渠道类型"] == "T1", duration_col].mean()
-        row[f"T2平均{duration_label}时效"] = group.loc[group["T渠道类型"] == "T2", duration_col].mean()
-        row[f"T3平均{duration_label}时效"] = group.loc[group["T渠道类型"] == "T3", duration_col].mean()
-        rows.append(row)
-
-    return pd.DataFrame(rows, columns=output_cols).sort_values(group_cols).reset_index(drop=True)
-
-
 # =========================
-# 9. 派送时效分析
+# 10. 派送分析
 # =========================
 
 def process_delivery_timing(df, warehouse, product_type, period_type, start_date=None, end_date=None):
     df = prepare_base_df(df)
     df = filter_warehouse(df, warehouse)
     df["客户类型"] = df.apply(classify_customer_type_for_volume, axis=1)
-    require_columns(df, ["出库时间", "签收时间"], "派送时效分析")
+    require_columns(df, ["出库时间", "签收时间"], "派送分析")
     df = filter_date_range(df, "出库时间", start_date, end_date)
 
     if "目的地" in df.columns:
@@ -572,7 +706,7 @@ def process_delivery_timing(df, warehouse, product_type, period_type, start_date
 
 
 # =========================
-# 10. 提柜时效分析
+# 11. 提柜分析
 # =========================
 
 def process_pickup_timing(df, warehouse, product_type, period_type, start_date=None, end_date=None):
@@ -580,10 +714,10 @@ def process_pickup_timing(df, warehouse, product_type, period_type, start_date=N
     df = filter_warehouse(df, warehouse)
     df["客户类型"] = df.apply(classify_customer_type_for_time_ops, axis=1)
 
-    require_columns(df, ["柜号", "提柜时间", "实际抵仓时间"], "提柜时效分析")
-    check_product_channel_available(df, "提柜时效分析")
+    require_columns(df, ["柜号", "提柜时间", "实际抵仓时间"], "提柜分析")
+    check_product_channel_available(df, "提柜分析")
     df = filter_date_range(df, "实际抵仓时间", start_date, end_date)
-    df = filter_valid_container_rows(df, "提柜时效分析")
+    df = filter_valid_container_rows(df, "提柜分析")
 
     df["提柜时间"] = pd.to_datetime(df["提柜时间"], errors="coerce")
     df["实际抵仓时间"] = pd.to_datetime(df["实际抵仓时间"], errors="coerce")
@@ -610,7 +744,7 @@ def process_pickup_timing(df, warehouse, product_type, period_type, start_date=N
 
 
 # =========================
-# 11. 拆柜时效分析
+# 12. 拆柜分析
 # =========================
 
 def process_unload_timing(df, warehouse, product_type, period_type, start_date=None, end_date=None):
@@ -618,10 +752,10 @@ def process_unload_timing(df, warehouse, product_type, period_type, start_date=N
     df = filter_warehouse(df, warehouse)
     df["客户类型"] = df.apply(classify_customer_type_for_time_ops, axis=1)
 
-    require_columns(df, ["柜号", "实际抵仓时间", "拆柜完成时间"], "拆柜时效分析")
-    check_product_channel_available(df, "拆柜时效分析")
+    require_columns(df, ["柜号", "实际抵仓时间", "拆柜完成时间"], "拆柜分析")
+    check_product_channel_available(df, "拆柜分析")
     df = filter_date_range(df, "拆柜完成时间", start_date, end_date)
-    df = filter_valid_container_rows(df, "拆柜时效分析")
+    df = filter_valid_container_rows(df, "拆柜分析")
 
     df["实际抵仓时间"] = pd.to_datetime(df["实际抵仓时间"], errors="coerce")
     df["拆柜完成时间"] = pd.to_datetime(df["拆柜完成时间"], errors="coerce")
@@ -639,7 +773,7 @@ def process_unload_timing(df, warehouse, product_type, period_type, start_date=N
 
 
 # =========================
-# 12. 总入口函数：给 app.py 调用
+# 13. 总入口函数：给 app.py 调用
 # =========================
 
 def process_uploaded_file(
@@ -655,19 +789,20 @@ def process_uploaded_file(
     uploaded_file.seek(0)
     df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
 
-    if analysis_module == "FBA仓点货量排行":
+    if analysis_module == "货量分析":
+        detail_df, result_df = process_volume_analysis(df, warehouse, product_type, period_type, start_date, end_date)
+    elif analysis_module in ["提柜分析", "提柜时效分析"]:
+        detail_df, result_df = process_pickup_timing(df, warehouse, product_type, period_type, start_date, end_date)
+    elif analysis_module in ["拆柜分析", "拆柜时效分析"]:
+        detail_df, result_df = process_unload_timing(df, warehouse, product_type, period_type, start_date, end_date)
+    elif analysis_module in ["派送分析", "派送时效分析"]:
+        detail_df, result_df = process_delivery_timing(df, warehouse, product_type, period_type, start_date, end_date)
+    elif analysis_module == "FBA仓点货量排行":
         detail_df, result_df = process_fba_warehouse_rank(df, warehouse, product_type, period_type, start_date, end_date)
     elif analysis_module == "FBX平台仓点货量分析":
         detail_df, result_df = process_fbx_platform_volume(df, warehouse, product_type, period_type, start_date, end_date)
-    elif analysis_module == "派送时效分析":
-        detail_df, result_df = process_delivery_timing(df, warehouse, product_type, period_type, start_date, end_date)
-    elif analysis_module == "提柜时效分析":
-        detail_df, result_df = process_pickup_timing(df, warehouse, product_type, period_type, start_date, end_date)
-    elif analysis_module == "拆柜时效分析":
-        detail_df, result_df = process_unload_timing(df, warehouse, product_type, period_type, start_date, end_date)
     else:
         raise ValueError(f"暂不支持该分析模块：{analysis_module}")
 
     result_df = round_output_numbers(result_df, RESULT_DECIMALS)
-
     return detail_df, result_df, analysis_module
