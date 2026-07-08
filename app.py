@@ -21,6 +21,8 @@ WAREHOUSE_ALIASES = [
 ]
 processors.FIELD_ALIASES["仓库"] = WAREHOUSE_ALIASES
 
+VALID_WAREHOUSES = ["LA", "NJ", "SAV", "DAL"]
+
 
 st.set_page_config(
     page_title="美盈产品数据处理工具",
@@ -91,6 +93,41 @@ def selected_date_range_is_valid(value):
     return isinstance(value, (tuple, list)) and len(value) == 2 and value[0] is not None and value[1] is not None
 
 
+def validate_uploaded_warehouse(uploaded_file, sheet_name, selected_warehouse):
+    """
+    页面层仓点校验：
+    1. 如果选择 LA/NJ/SAV/DAL，且文件里存在入库仓库/仓库相关字段，则文件仓库必须全部等于页面选择。
+    2. 如果选择“全部”，文件必须存在入库仓库/仓库相关字段，并且可映射为 LA/NJ/SAV/DAL。
+    3. 这样可以避免先筛空数据，再误报“产品渠道字段全为空”。
+    """
+    uploaded_file.seek(0)
+    preview_df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+    preview_df = processors.normalize_columns(preview_df)
+
+    if "仓库" not in preview_df.columns:
+        if selected_warehouse == "全部":
+            raise ValueError("仓点选择为“全部”，但文件中没有识别到入库仓库/仓库字段，无法按 LA/DAL/NJ/SAV 分仓分析。")
+        return
+
+    raw_values = sorted([str(x) for x in preview_df["仓库"].dropna().unique()])
+    standardized = preview_df["仓库"].apply(processors.standardize_warehouse)
+    actual_known = sorted([str(x) for x in standardized.dropna().unique() if str(x) in VALID_WAREHOUSES])
+
+    if selected_warehouse == "全部":
+        if not actual_known:
+            raise ValueError(f"仓点选择为“全部”，但文件仓库值无法映射到 LA/DAL/NJ/SAV。文件仓库值：{raw_values}")
+        return
+
+    if selected_warehouse in VALID_WAREHOUSES:
+        if not actual_known:
+            raise ValueError(f"页面选择仓点为 {selected_warehouse}，但文件仓库值无法映射到 LA/DAL/NJ/SAV。文件仓库值：{raw_values}")
+        if set(actual_known) != {selected_warehouse}:
+            raise ValueError(
+                f"仓点选择不匹配：页面选择的是 {selected_warehouse}，"
+                f"但文件入库仓库识别为 {actual_known}。请改选正确仓点，或上传对应仓点的数据源。"
+            )
+
+
 selection_complete = all(
     item != PLACEHOLDER
     for item in [warehouse, product_type, analysis_module, period_type]
@@ -119,8 +156,9 @@ if uploaded_file is not None:
             elif date_range[0] > date_range[1]:
                 st.warning("开始日期不能晚于结束日期。")
             else:
-                uploaded_file.seek(0)
+                validate_uploaded_warehouse(uploaded_file, sheet_name, warehouse)
 
+                uploaded_file.seek(0)
                 warehouse_for_processing = "四仓合并" if warehouse == "全部" else warehouse
 
                 detail_df, result_df, final_module = processors.process_uploaded_file(
