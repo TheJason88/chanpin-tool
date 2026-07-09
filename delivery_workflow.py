@@ -14,8 +14,6 @@ LINEHAUL_RULES = pd.DataFrame([
     {"干线区域": "Savannah, GA", "专线线路": "LA-SAV", "邮编规则": "314xx", "地区规则": "Savannah / GA"},
 ])
 
-# 四仓派送区域规则：由 Rules_区域邮编规则确认版.xlsx 确认后内置。
-# LA：S.CA(900-935)=Local；N.CA(936-961)=中短途。
 REGION_ZIP_RULES = {
     "LA": [
         {"区域": "Local", "来源州/区域": "S.CA", "ranges": [(900, 935)]},
@@ -59,7 +57,7 @@ def truthy(value):
     return str(value).strip().lower() in TRUE_VALUES
 
 
-def is_invalid_batch_status(value):
+def text_contains_invalid_keyword(value):
     if processors.is_blank(value):
         return False
     return any(keyword in str(value) for keyword in INVALID_BATCH_KEYWORDS)
@@ -231,11 +229,19 @@ def apply_region_rules_second_part(df):
 def remove_invalid_stage1_rows(stage1_detail):
     df = stage1_detail.copy()
     mask_truck = df.get("是否进入卡车派送分析", pd.Series(False, index=df.index)).apply(truthy)
-    mask_valid_status = ~df["批次状态"].apply(is_invalid_batch_status) if "批次状态" in df.columns else pd.Series(True, index=df.index)
+    mask_valid_status = ~df["批次状态"].apply(text_contains_invalid_keyword) if "批次状态" in df.columns else pd.Series(True, index=df.index)
+    mask_valid_remark = ~df["备注"].apply(text_contains_invalid_keyword) if "备注" in df.columns else pd.Series(True, index=df.index)
+
     df["无效批次剔除原因"] = ""
-    df.loc[~mask_truck, "无效批次剔除原因"] = df.loc[~mask_truck, "排除原因"].astype(str) if "排除原因" in df.columns else "非卡车派送"
-    df.loc[~mask_valid_status, "无效批次剔除原因"] = "批次状态无效"
-    return df[mask_truck & mask_valid_status].copy(), df[~(mask_truck & mask_valid_status)].copy()
+    if "排除原因" in df.columns:
+        df.loc[~mask_truck, "无效批次剔除原因"] = df.loc[~mask_truck, "排除原因"].astype(str)
+    else:
+        df.loc[~mask_truck, "无效批次剔除原因"] = "非卡车派送"
+    df.loc[~mask_valid_status, "无效批次剔除原因"] = df.loc[~mask_valid_status, "无效批次剔除原因"].replace("", "批次状态含无效关键词")
+    df.loc[~mask_valid_remark, "无效批次剔除原因"] = df.loc[~mask_valid_remark, "无效批次剔除原因"].apply(lambda x: (x + "; 备注含无效关键词") if str(x).strip() else "备注含无效关键词")
+
+    valid_mask = mask_truck & mask_valid_status & mask_valid_remark
+    return df[valid_mask].copy(), df[~valid_mask].copy()
 
 
 def resolve_group_loading(series):
@@ -390,7 +396,7 @@ def build_stage1_summary(cleaned_batches, invalid_detail, zip_audit_df):
 def read_stage1_cleaned_batches(excel_file):
     excel_file.seek(0)
     xls = pd.ExcelFile(excel_file)
-    sheet_name = "派送一_清洗合并数据" if "派送一_清洗合并数据" in xls.sheet_names else xls.sheet_names[0]
+    sheet_name = "清洗后数据" if "清洗后数据" in xls.sheet_names else ("派送一_清洗合并数据" if "派送一_清洗合并数据" in xls.sheet_names else xls.sheet_names[0])
     excel_file.seek(0)
     return pd.read_excel(excel_file, sheet_name=sheet_name, dtype=str)
 
