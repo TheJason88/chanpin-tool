@@ -6,9 +6,11 @@ import pandas as pd
 import streamlit as st
 
 import processors
+import delivery_reference
 
 # Streamlit rerun sometimes keeps imported modules in memory.
 importlib.reload(processors)
+importlib.reload(delivery_reference)
 
 VALID_WAREHOUSES = ["LA", "NJ", "SAV", "DAL"]
 PLACEHOLDER = "请填入"
@@ -73,6 +75,7 @@ date_range = st.date_input(
 st.caption(
     "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间；派送原数据处理=出库时间。"
     "派送已经拆成两步：第一步上传一个或多个鲲运原始导出文件做合并清洗；第二步上传第一步结果和人工补充目的地文件，补齐邮编后再做完整派送指标。"
+    "工具已内置FBA仓点邮编表和平台仓邮编表，会自动补充FBA/平台仓目的地邮编；商业/私人地址仍通过第二步批次匹配补充。"
     "邮编列会按文本处理；四位邮编会自动补0。FTL车型缺失默认53尺大车；同车次装车类型同时出现卡板和地板时，聚合后按地板。"
 )
 
@@ -166,6 +169,10 @@ def build_stage1_summary(stage1_df, exclude_df, zip_audit_df):
         counts = stage1_df["系统产品类型"].value_counts(dropna=False)
         for key, value in counts.items():
             rows.append({"项目": f"系统产品类型-{key}", "数量": int(value)})
+    if "规则匹配类型" in stage1_df.columns:
+        counts = stage1_df["规则匹配类型"].replace("", "无内置匹配").value_counts(dropna=False)
+        for key, value in counts.items():
+            rows.append({"项目": f"内置规则匹配-{key}", "数量": int(value)})
     return pd.DataFrame(rows)
 
 
@@ -217,6 +224,10 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
                     start_date=date_range[0],
                     end_date=date_range[1]
                 )
+
+                stage1_df = delivery_reference.apply_delivery_reference_memory(stage1_df)
+                exclude_df = stage1_df[~stage1_df["是否进入卡车派送分析"].astype(str).isin(["True", "true", "1", "是", "卡车派送"]) & (stage1_df["是否进入卡车派送分析"] != True)].copy()
+                zip_audit_df = stage1_df[stage1_df["目的地邮编待补充"]].copy()
                 summary_df = build_stage1_summary(stage1_df, exclude_df, zip_audit_df)
 
                 st.subheader("派送一处理结果预览")
@@ -229,6 +240,8 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
                     "派送一_清洗明细": stage1_df,
                     "派送一_排除数据审核": exclude_df,
                     "派送一_邮编异常审核": zip_audit_df,
+                    "内置FBA邮编表": delivery_reference.FBA_REFERENCE_DF,
+                    "内置平台仓邮编表": delivery_reference.PLATFORM_REFERENCE_DF,
                 }
                 output = write_sheets_to_excel(sheets)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -266,6 +279,8 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
                 st.warning("请同时上传派送一结果文件和人工匹配文件。")
             else:
                 stage1_df = processors.read_stage1_sheet(stage1_file)
+                stage1_df = delivery_reference.apply_delivery_reference_memory(stage1_df)
+
                 match_file.seek(0)
                 match_xls = pd.ExcelFile(match_file)
                 match_sheet = match_xls.sheet_names[0]
@@ -273,6 +288,9 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
                 match_df = pd.read_excel(match_file, sheet_name=match_sheet, dtype=str)
 
                 metrics = processors.process_delivery_stage2_with_match(stage1_df, match_df, period_type=period_type)
+                metrics["派送一_匹配后明细"] = delivery_reference.apply_delivery_reference_memory(metrics["派送一_匹配后明细"])
+                metrics["内置FBA邮编表"] = delivery_reference.FBA_REFERENCE_DF
+                metrics["内置平台仓邮编表"] = delivery_reference.PLATFORM_REFERENCE_DF
 
                 st.subheader("派送二批次/车次聚合预览")
                 st.dataframe(metrics["派送二_批次车次聚合"].head(100), use_container_width=True)
