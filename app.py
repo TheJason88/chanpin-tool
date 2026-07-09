@@ -80,6 +80,7 @@ date_range = st.date_input(
 st.caption(
     "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间；派送原数据处理=出库时间。"
     "派送拆成两步：第一步合并多个鲲运源文件、剔除无效批次、识别FTL/LTL、FTL按车次号合并，并识别FBA/FBX与邮编；未匹配邮编放到结果底部。"
+    "无效批次审核包含非卡车派送、批次状态无效，以及派送方式为卡车配送但备注含废单/取消/作废/无效/删除/关闭等关键词的记录。"
     "第二步“派送数据匹配及分析”上传第一步结果和人工补充目的地文件，补齐商业/私人地址邮编后，再严格按周/月输出Excel分析报告。"
     "工具已内置FBA仓点邮编表、平台仓邮编表和干线识别规则。干线只对LA仓派送分析生效：NJ=070-089，Dallas=750-753，Chicago=606xx，Savannah=314xx。"
     "LTL不计入发车数，只参与方数结构；邮编列按文本处理；四位邮编自动补0。FTL车型缺失默认53尺大车；同车次装车类型同时出现卡板和地板时，聚合后按地板。"
@@ -109,7 +110,6 @@ def validate_uploaded_warehouse_for_df(df, selected_warehouse):
 
     if selected_warehouse in VALID_WAREHOUSES:
         if not actual_known:
-            # 没有可识别仓点时，单仓文件允许用页面选择作为默认发货仓。
             return
         if set(actual_known) != {selected_warehouse}:
             raise ValueError(
@@ -166,7 +166,6 @@ if analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
     selection_complete = selection_complete and product_type != PLACEHOLDER and period_type != PLACEHOLDER
 elif analysis_module == DELIVERY_STAGE2_MODULE:
     selection_complete = selection_complete and period_type != PLACEHOLDER
-# 派送原数据处理不需要按周/按月。
 
 date_range_valid = selected_date_range_is_valid(date_range)
 
@@ -212,21 +211,18 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
                     start_date=date_range[0],
                     end_date=date_range[1]
                 )
-                summary_df = delivery_workflow.build_stage1_summary(cleaned_batches, invalid_detail, zip_audit_df)
 
-                st.subheader("派送一清洗合并结果预览")
+                st.subheader("清洗后数据预览")
                 st.dataframe(cleaned_batches.head(100), use_container_width=True)
-                st.subheader("待补邮编数据预览")
+                st.subheader("邮编异常数据预览")
                 st.dataframe(zip_audit_df.head(100), use_container_width=True)
+                st.subheader("无效数据预览")
+                st.dataframe(invalid_detail.head(100), use_container_width=True)
 
                 sheets = {
-                    "派送一_处理摘要": summary_df,
-                    "派送一_清洗合并数据": cleaned_batches,
-                    "派送一_剔除无效明细": invalid_detail,
-                    "派送一_邮编异常审核": zip_audit_df,
-                    "派送一_原明细参考": raw_detail,
-                    "内置FBA邮编表": delivery_reference.FBA_REFERENCE_DF,
-                    "内置平台仓邮编表": delivery_reference.PLATFORM_REFERENCE_DF,
+                    "清洗后数据": cleaned_batches,
+                    "邮编异常数据": zip_audit_df,
+                    "无效数据": invalid_detail,
                 }
                 output = write_sheets_to_excel(sheets)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
