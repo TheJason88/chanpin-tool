@@ -7,17 +7,18 @@ import streamlit as st
 
 import processors
 import delivery_reference
+import delivery_workflow
 
 # Streamlit rerun sometimes keeps imported modules in memory.
 importlib.reload(processors)
 importlib.reload(delivery_reference)
+importlib.reload(delivery_workflow)
 
 VALID_WAREHOUSES = ["LA", "NJ", "SAV", "DAL"]
 PLACEHOLDER = "请填入"
 DELIVERY_STAGE1_MODULE = "派送原数据处理"
 DELIVERY_STAGE2_MODULE = "派送数据匹配"
 NORMAL_MODULES = ["货量分析", "提柜分析", "拆柜分析"]
-DELIVERY_MODULES = [DELIVERY_STAGE1_MODULE, DELIVERY_STAGE2_MODULE]
 
 st.set_page_config(
     page_title="美盈产品数据处理工具",
@@ -74,9 +75,10 @@ date_range = st.date_input(
 
 st.caption(
     "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间；派送原数据处理=出库时间。"
-    "派送已经拆成两步：第一步上传一个或多个鲲运原始导出文件做合并清洗；第二步上传第一步结果和人工补充目的地文件，补齐邮编后再做完整派送指标。"
-    "工具已内置FBA仓点邮编表和平台仓邮编表，会自动补充FBA/平台仓目的地邮编；商业/私人地址仍通过第二步批次匹配补充。"
-    "邮编列会按文本处理；四位邮编会自动补0。FTL车型缺失默认53尺大车；同车次装车类型同时出现卡板和地板时，聚合后按地板。"
+    "派送拆成两步：第一步合并多个鲲运源文件、剔除无效批次、识别FTL/LTL、FTL按车次号合并，并识别FBA/FBX与邮编；未匹配邮编放到结果底部。"
+    "第二步上传第一步结果和人工补充目的地文件，补齐商业/私人地址邮编后，再做干线区域识别和完整派送分析。"
+    "工具已内置FBA仓点邮编表、平台仓邮编表和干线识别规则。干线规则：NJ=070-089，Dallas=750-753，Chicago=606xx，Savannah=314xx。"
+    "邮编列按文本处理；四位邮编自动补0。FTL车型缺失默认53尺大车；同车次装车类型同时出现卡板和地板时，聚合后按地板。"
 )
 
 
@@ -155,27 +157,6 @@ def write_sheets_to_excel(sheets):
     return output
 
 
-def build_stage1_summary(stage1_df, exclude_df, zip_audit_df):
-    rows = [
-        {"项目": "派送一总行数", "数量": len(stage1_df)},
-        {"项目": "非卡车派送/排除行数", "数量": len(exclude_df)},
-        {"项目": "待补目的地邮编行数", "数量": len(zip_audit_df)},
-    ]
-    if "标准运输类型" in stage1_df.columns:
-        counts = stage1_df["标准运输类型"].value_counts(dropna=False)
-        for key, value in counts.items():
-            rows.append({"项目": f"运输类型-{key}", "数量": int(value)})
-    if "系统产品类型" in stage1_df.columns:
-        counts = stage1_df["系统产品类型"].value_counts(dropna=False)
-        for key, value in counts.items():
-            rows.append({"项目": f"系统产品类型-{key}", "数量": int(value)})
-    if "规则匹配类型" in stage1_df.columns:
-        counts = stage1_df["规则匹配类型"].replace("", "无内置匹配").value_counts(dropna=False)
-        for key, value in counts.items():
-            rows.append({"项目": f"内置规则匹配-{key}", "数量": int(value)})
-    return pd.DataFrame(rows)
-
-
 selection_complete = warehouse != PLACEHOLDER and analysis_module != PLACEHOLDER and period_type != PLACEHOLDER
 if analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
     selection_complete = selection_complete and product_type != PLACEHOLDER
@@ -217,29 +198,26 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
                     file_dfs.append((file.name, df))
 
                 warehouse_for_processing = "四仓合并" if warehouse == "全部" else warehouse
-                stage1_df, exclude_df, zip_audit_df = processors.process_delivery_stage1_from_files(
+                cleaned_batches, invalid_detail, zip_audit_df, raw_detail = delivery_workflow.process_stage1_raw_files_to_cleaned_batches(
                     file_dfs=file_dfs,
                     warehouse=warehouse_for_processing,
                     period_type=period_type,
                     start_date=date_range[0],
                     end_date=date_range[1]
                 )
+                summary_df = delivery_workflow.build_stage1_summary(cleaned_batches, invalid_detail, zip_audit_df)
 
-                stage1_df = delivery_reference.apply_delivery_reference_memory(stage1_df)
-                exclude_df = stage1_df[~stage1_df["是否进入卡车派送分析"].astype(str).isin(["True", "true", "1", "是", "卡车派送"]) & (stage1_df["是否进入卡车派送分析"] != True)].copy()
-                zip_audit_df = stage1_df[stage1_df["目的地邮编待补充"]].copy()
-                summary_df = build_stage1_summary(stage1_df, exclude_df, zip_audit_df)
-
-                st.subheader("派送一处理结果预览")
-                st.dataframe(stage1_df.head(100), use_container_width=True)
+                st.subheader("派送一清洗合并结果预览")
+                st.dataframe(cleaned_batches.head(100), use_container_width=True)
                 st.subheader("待补邮编数据预览")
                 st.dataframe(zip_audit_df.head(100), use_container_width=True)
 
                 sheets = {
                     "派送一_处理摘要": summary_df,
-                    "派送一_清洗明细": stage1_df,
-                    "派送一_排除数据审核": exclude_df,
+                    "派送一_清洗合并数据": cleaned_batches,
+                    "派送一_剔除无效明细": invalid_detail,
                     "派送一_邮编异常审核": zip_audit_df,
+                    "派送一_原明细参考": raw_detail,
                     "内置FBA邮编表": delivery_reference.FBA_REFERENCE_DF,
                     "内置平台仓邮编表": delivery_reference.PLATFORM_REFERENCE_DF,
                 }
@@ -257,7 +235,7 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
             st.exception(e)
 
 # =========================
-# 派送数据匹配：上传派送一结果 + 人工目的地匹配表
+# 派送数据匹配：上传派送一清洗合并结果 + 人工目的地匹配表
 # =========================
 elif analysis_module == DELIVERY_STAGE2_MODULE:
     stage1_file = st.file_uploader(
@@ -278,8 +256,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
             elif not stage1_file or not match_file:
                 st.warning("请同时上传派送一结果文件和人工匹配文件。")
             else:
-                stage1_df = processors.read_stage1_sheet(stage1_file)
-                stage1_df = delivery_reference.apply_delivery_reference_memory(stage1_df)
+                cleaned_batches = delivery_workflow.read_stage1_cleaned_batches(stage1_file)
 
                 match_file.seek(0)
                 match_xls = pd.ExcelFile(match_file)
@@ -287,13 +264,10 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
                 match_file.seek(0)
                 match_df = pd.read_excel(match_file, sheet_name=match_sheet, dtype=str)
 
-                metrics = processors.process_delivery_stage2_with_match(stage1_df, match_df, period_type=period_type)
-                metrics["派送一_匹配后明细"] = delivery_reference.apply_delivery_reference_memory(metrics["派送一_匹配后明细"])
-                metrics["内置FBA邮编表"] = delivery_reference.FBA_REFERENCE_DF
-                metrics["内置平台仓邮编表"] = delivery_reference.PLATFORM_REFERENCE_DF
+                metrics = delivery_workflow.process_stage2_analysis(cleaned_batches, match_df, period_type=period_type)
 
-                st.subheader("派送二批次/车次聚合预览")
-                st.dataframe(metrics["派送二_批次车次聚合"].head(100), use_container_width=True)
+                st.subheader("派送二匹配后合并数据预览")
+                st.dataframe(metrics["派送二_匹配后合并数据"].head(100), use_container_width=True)
                 st.subheader("FBA/FBX货量比")
                 st.dataframe(metrics["FBA_FBX货量比"], use_container_width=True)
                 st.subheader("发车汇总")
