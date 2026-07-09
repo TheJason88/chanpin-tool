@@ -24,6 +24,70 @@ processors.FIELD_ALIASES["仓库"] = WAREHOUSE_ALIASES
 VALID_WAREHOUSES = ["LA", "NJ", "SAV", "DAL"]
 
 
+def process_delivery_timing_for_truck_delivery(df, warehouse, product_type, period_type, start_date=None, end_date=None):
+    """
+    派送分析专用口径：
+    - 派送数据源没有产品渠道、客户名称，不按 T渠道 / 客户类型拆分。
+    - 固定新增字段：派送方式 = 卡车配送。
+    - 时间范围和统计周期字段：出库时间。
+    - 派送时效 = 签收时间 - 出库时间。
+    """
+    df = processors.prepare_base_df(df)
+    df = processors.filter_warehouse(df, warehouse)
+
+    processors.require_columns(df, ["出库时间", "签收时间"], "派送分析")
+    df = processors.filter_date_range(df, "出库时间", start_date, end_date)
+
+    df["派送方式"] = "卡车配送"
+
+    if "目的地" in df.columns:
+        df = processors.apply_transfer_destination(df)
+        df["系统产品类型"] = df["修正后目的地"].apply(processors.classify_system_product_type)
+        df = processors.filter_by_product_type(df, product_type)
+    else:
+        df["系统产品类型"] = "未知"
+
+    df = processors.add_period_column(df, period_type, "出库时间")
+    df["出库时间"] = pd.to_datetime(df["出库时间"], errors="coerce")
+    df["签收时间"] = pd.to_datetime(df["签收时间"], errors="coerce")
+    df["派送时效"] = (df["签收时间"] - df["出库时间"]).dt.total_seconds() / 86400
+
+    df = processors.mark_duration_abnormal(
+        df,
+        "派送时效",
+        "出库时间",
+        "签收时间",
+        min_days=0.01,
+        max_days=30,
+    )
+
+    detail_df = df.copy()
+    detail_df.loc[~detail_df["是否有效"], "派送时效"] = pd.NA
+
+    group_cols = ["仓库", "统计周期", "系统产品类型", "派送方式"]
+    result_df = processors.build_duration_summary(
+        detail_df,
+        group_cols,
+        "派送时效",
+        total_name="总票数",
+        valid_name="有效票数",
+    )
+
+    result_df = result_df.rename(columns={
+        "平均时效": "平均派送时效",
+        "P80时效": "P80派送时效",
+        "P90时效": "P90派送时效",
+        "最小时效": "最小派送时效",
+        "最大时效": "最大派送时效",
+    })
+
+    return detail_df, result_df
+
+
+# 覆盖 processors 中的派送函数，确保页面执行时采用最新派送口径。
+processors.process_delivery_timing = process_delivery_timing_for_truck_delivery
+
+
 st.set_page_config(
     page_title="美盈产品数据处理工具",
     layout="wide"
@@ -84,6 +148,7 @@ uploaded_file = st.file_uploader(
 st.caption(
     "说明：网页工具会按所选时间范围筛选数据，再按月或按周汇总。"
     "各模块使用的筛选日期字段为：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间；派送=出库时间。"
+    "派送分析不按产品渠道或客户名称拆分，固定派送方式为卡车配送。"
     "仓点筛选字段优先识别入库仓库，并统一映射：美西二号仓=LA，达拉斯盈仓=DAL，新泽西二号仓=NJ，萨凡纳盈仓=SAV。"
     "如果仓点选择“全部”，系统不会把四仓合并成一行，而是先按入库仓库识别 LA/DAL/NJ/SAV，再分别输出各仓结果。"
 )
