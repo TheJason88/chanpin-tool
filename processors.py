@@ -15,7 +15,11 @@ WAREHOUSE_MAP = {
 }
 
 FIELD_ALIASES = {
-    "仓库": ["仓库", "仓点", "仓库名称", "所属仓", "目的仓", "Warehouse"],
+    "仓库": [
+        "仓库", "仓点", "仓库名称", "所属仓", "目的仓",
+        "入库仓库", "入库仓", "到仓仓库", "抵仓仓库", "实际入库仓库",
+        "Warehouse", "Inbound Warehouse"
+    ],
     "客户名称": ["客户名称", "客户", "客户名", "客户公司", "Customer", "Customer Name"],
     "产品渠道": ["产品渠道", "渠道", "T渠道", "服务渠道", "产品通道"],
     "ETA": ["ETA", "eta", "预计到仓时间", "预计抵仓时间", "预计到港时间", "预计到达时间"],
@@ -119,11 +123,14 @@ def safe_divide(numerator, denominator):
     return numerator / denominator
 
 
+def safe_p80(series):
+    clean_series = pd.to_numeric(series, errors="coerce").dropna()
+    if clean_series.empty:
+        return np.nan
+    return clean_series.quantile(0.8)
+
+
 def normalized_ratio_values(counts, decimals=RESULT_DECIMALS):
-    """
-    按给定分类内部计算占比，输出占比之和固定为 1.00。
-    例如 T1/T2/T3 占比只在 T1+T2+T3 范围内计算，不再除以总柜量。
-    """
     counts = [0 if pd.isna(v) else float(v) for v in counts]
     total = sum(counts)
     if total <= 0:
@@ -131,10 +138,8 @@ def normalized_ratio_values(counts, decimals=RESULT_DECIMALS):
 
     raw = [v / total for v in counts]
     rounded = [round(v, decimals) for v in raw]
-
     if len(rounded) >= 2:
         rounded[-1] = round(1 - sum(rounded[:-1]), decimals)
-
     return rounded
 
 
@@ -167,12 +172,7 @@ def filter_valid_container_rows(df, module_name):
 
 
 def deduplicate_by_container_no(df, sort_col=None):
-    """
-    柜量统计必须按“标准柜号”去重。
-    目的：避免同一个柜号因多条费用、状态或明细记录被重复计入柜量。
-    """
     df = df.copy()
-
     if "标准柜号" not in df.columns:
         df["标准柜号"] = df["柜号"].apply(normalize_container_no)
 
@@ -268,12 +268,6 @@ def round_output_numbers(df, decimals=RESULT_DECIMALS):
 # =========================
 
 def classify_customer_type_for_product_volume(row):
-    """
-    货量分析客户分类：
-    - 客户名称包含“劲港”或“联宇” → 联宇
-    - 剩下的中文客户 → 非联宇
-    - 英文/无中文客户 → 美国本土客户
-    """
     customer_name = row.get("客户名称", "")
     customer_name = "" if pd.isna(customer_name) else str(customer_name).strip()
 
@@ -285,10 +279,6 @@ def classify_customer_type_for_product_volume(row):
 
 
 def classify_customer_type_for_volume(row):
-    """
-    旧货量/派送客户分类口径，保留用于 FBA/FBX 旧模块：
-    产品渠道为空 → 美国本土客户；产品渠道不为空再按客户名称判断联宇/非联宇。
-    """
     product_channel = row.get("产品渠道", np.nan)
     customer_name = row.get("客户名称", "")
     if is_blank(product_channel):
@@ -300,9 +290,6 @@ def classify_customer_type_for_volume(row):
 
 
 def classify_customer_type_for_time_ops(row):
-    """
-    提柜 / 拆柜分析客户类型：只分联宇 / 非联宇。
-    """
     customer_name = row.get("客户名称", "")
     customer_name = "" if pd.isna(customer_name) else str(customer_name).strip()
     if ("劲港" in customer_name) or ("联宇" in customer_name):
@@ -442,10 +429,6 @@ def add_rank_and_share(result_df, sort_col="总体积"):
 # =========================
 
 def build_volume_one_row_summary(df, include_us_customer=True):
-    """
-    柜量类结果：每个仓库 + 统计周期一行。
-    占比口径：只在展示的分类内部计算，确保对应“比”加总等于 1.00。
-    """
     group_cols = ["仓库", "统计周期"]
     base_cols = group_cols + ["总柜量", "联宇柜量", "非联宇柜量"]
     if include_us_customer:
@@ -462,7 +445,6 @@ def build_volume_one_row_summary(df, include_us_customer=True):
     ]
 
     output_cols = base_cols + ratio_cols + channel_cols
-
     if df.empty:
         return pd.DataFrame(columns=output_cols)
 
@@ -514,16 +496,16 @@ def build_volume_one_row_summary(df, include_us_customer=True):
 
 def build_time_ops_one_row_summary(df, duration_col, duration_label):
     """
-    提柜 / 拆柜结果专用：一行呈现柜量结构 + 占比 + 时效结构。
+    提柜 / 拆柜结果专用：一行呈现柜量结构 + 占比 + 平均时效 + P80时效。
     每行粒度为：仓库 + 统计周期。
     """
     result_df = build_volume_one_row_summary(df, include_us_customer=False)
 
     duration_cols = [
-        f"总平均{duration_label}时效",
-        f"T1平均{duration_label}时效",
-        f"T2平均{duration_label}时效",
-        f"T3平均{duration_label}时效",
+        f"总平均{duration_label}时效", f"总P80{duration_label}时效",
+        f"T1平均{duration_label}时效", f"T1P80{duration_label}时效",
+        f"T2平均{duration_label}时效", f"T2P80{duration_label}时效",
+        f"T3平均{duration_label}时效", f"T3P80{duration_label}时效",
     ]
 
     if result_df.empty:
@@ -536,10 +518,15 @@ def build_time_ops_one_row_summary(df, duration_col, duration_label):
         if not isinstance(keys, tuple):
             keys = (keys,)
         row = {"仓库": keys[0], "统计周期": keys[1]}
+
         row[f"总平均{duration_label}时效"] = group[duration_col].mean()
-        row[f"T1平均{duration_label}时效"] = group.loc[group["T渠道类型"] == "T1", duration_col].mean()
-        row[f"T2平均{duration_label}时效"] = group.loc[group["T渠道类型"] == "T2", duration_col].mean()
-        row[f"T3平均{duration_label}时效"] = group.loc[group["T渠道类型"] == "T3", duration_col].mean()
+        row[f"总P80{duration_label}时效"] = safe_p80(group[duration_col])
+
+        for channel in ["T1", "T2", "T3"]:
+            channel_series = group.loc[group["T渠道类型"] == channel, duration_col]
+            row[f"{channel}平均{duration_label}时效"] = channel_series.mean()
+            row[f"{channel}P80{duration_label}时效"] = safe_p80(channel_series)
+
         duration_rows.append(row)
 
     duration_df = pd.DataFrame(duration_rows)
@@ -551,13 +538,6 @@ def build_time_ops_one_row_summary(df, duration_col, duration_label):
 # =========================
 
 def process_volume_analysis(df, warehouse, product_type, period_type, start_date=None, end_date=None):
-    """
-    产品视角货量分析：
-    - 时间范围 / 统计周期字段：ETA
-    - 基于标准柜号清洗
-    - 柜量按标准柜号去重
-    - 输出总柜量、客户柜量结构、T渠道柜量结构及占比
-    """
     df = prepare_base_df(df)
     df = filter_warehouse(df, warehouse)
     require_columns(df, ["柜号", "ETA", "客户名称"], "货量分析")
@@ -694,8 +674,8 @@ def build_duration_summary(df, group_cols, duration_col, total_name, valid_name)
             total_name: ("原始行号", "count"),
             valid_name: ("是否有效", "sum"),
             "平均时效": (duration_col, "mean"),
-            "P80时效": (duration_col, lambda x: x.dropna().quantile(0.8) if x.dropna().shape[0] else np.nan),
-            "P90时效": (duration_col, lambda x: x.dropna().quantile(0.9) if x.dropna().shape[0] else np.nan),
+            "P80时效": (duration_col, lambda x: safe_p80(x)),
+            "P90时效": (duration_col, lambda x: pd.to_numeric(x, errors="coerce").dropna().quantile(0.9) if pd.to_numeric(x, errors="coerce").dropna().shape[0] else np.nan),
             "最小时效": (duration_col, "min"),
             "最大时效": (duration_col, "max"),
         }
