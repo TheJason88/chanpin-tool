@@ -137,27 +137,18 @@ def read_first_sheet(uploaded_file):
     return pd.read_excel(uploaded_file, sheet_name=sheet_name, dtype=str)
 
 
-def normalized_column_signature(df):
-    normalized = processors.normalize_columns(df.copy())
-    return tuple(str(c).strip() for c in normalized.columns)
-
-
 def combine_uploaded_match_files(match_files):
     """6B匹配文件多文件合并：同结构直接纵向合并；不同结构按字段并集合并。"""
     if not match_files:
         return pd.DataFrame(), "未上传6B匹配文件"
-
     frames = []
     signatures = []
-    source_names = []
     for file in match_files:
         df = read_first_sheet(file)
         df = processors.normalize_columns(df.copy())
         df["来源匹配文件"] = getattr(file, "name", "匹配文件")
         frames.append(df)
         signatures.append(tuple([c for c in df.columns if c != "来源匹配文件"]))
-        source_names.append(getattr(file, "name", "匹配文件"))
-
     same_structure = len(set(signatures)) == 1
     combined = pd.concat(frames, ignore_index=True, sort=False)
     if same_structure:
@@ -165,6 +156,19 @@ def combine_uploaded_match_files(match_files):
     else:
         message = f"已合并 {len(match_files)} 个6B匹配文件；文件结构不完全一致，已按字段并集合并，并保留来源匹配文件列。"
     return combined, message
+
+
+def sanitize_stage2_input_df(df):
+    """
+    派送二中会把邮编补齐标记从 True/False 反复改写。
+    Excel读出来的列有时是 pandas string dtype，直接写 bool 会报错；这里统一改成object，避免 dtype 冲突。
+    """
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    for col in out.columns:
+        out[col] = out[col].astype(object)
+    return out
 
 
 selection_complete = warehouse != PLACEHOLDER and analysis_module != PLACEHOLDER
@@ -239,7 +243,9 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
                 st.warning("请先上传派送一结果或已补充邮编异常审核的派送二报告。")
             else:
                 cleaned_batches = delivery_workflow.read_stage1_cleaned_batches(stage1_file)
+                cleaned_batches = sanitize_stage2_input_df(cleaned_batches)
                 match_df, merge_message = combine_uploaded_match_files(match_files)
+                match_df = sanitize_stage2_input_df(match_df)
                 if match_files:
                     st.info(merge_message)
                 metrics = delivery_workflow.process_stage2_analysis(cleaned_batches, match_df, period_type=period_type)
