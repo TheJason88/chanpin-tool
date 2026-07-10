@@ -27,6 +27,7 @@ PLACEHOLDER = "请填入"
 DELIVERY_STAGE1_MODULE = "派送原数据处理"
 DELIVERY_STAGE2_MODULE = "派送数据匹配及分析"
 NORMAL_MODULES = ["货量分析", "提柜分析", "拆柜分析"]
+DEFAULT_PRODUCT_TYPE = "全部"
 
 st.set_page_config(page_title="美盈产品数据处理工具", layout="wide")
 st.title("美盈产品数据处理工具")
@@ -40,28 +41,29 @@ analysis_module = st.selectbox(
     index=0,
 )
 
-if analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
-    product_type = st.selectbox("3. 选择产品类型", [PLACEHOLDER, "FBA", "FBX", "全部"], index=0)
-else:
-    product_type = "全部"
-    st.info("派送模块不按产品渠道或客户名称拆分，产品类型固定按派送规则自动识别。")
+# 产品类型筛选已移除：目前各功能没有可靠依据按页面选择的产品类型筛数据，统一按全部数据处理。
+product_type = DEFAULT_PRODUCT_TYPE
 
+period_type = "不适用"
+date_range = None
 if analysis_module == DELIVERY_STAGE1_MODULE:
-    period_type = "不适用"
-    date_range = None
-    st.info("派送原数据处理执行全量清洗，不按时间范围筛选；只负责合并、清洗、FTL/LTL识别、FTL车次合并、FBA/FBX与邮编识别。")
-else:
-    period_type = st.selectbox("4. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0)
+    st.info("派送原数据处理执行全量清洗，不按时间范围筛选，也不按产品类型筛选。")
+elif analysis_module == DELIVERY_STAGE2_MODULE:
+    period_type = st.selectbox("3. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0)
+    st.info("派送数据匹配及分析按统计周期生成报告；产品类型由目的地规则自动识别，不使用页面筛选。")
+elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
+    period_type = st.selectbox("3. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0)
     today = date.today()
     month_start = today.replace(day=1)
-    date_range = st.date_input("5. 选择时间范围", value=(month_start, today), format="YYYY-MM-DD")
+    date_range = st.date_input("4. 选择时间范围", value=(month_start, today), format="YYYY-MM-DD")
 
 st.caption(
-    "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间；派送原数据处理=全量出库数据清洗，不做时间筛选。"
-    "派送拆成两步：第一步合并多个鲲运源文件、剔除无效批次、识别FTL/LTL、FTL按车次号合并，并识别FBA/FBX与邮编；未匹配邮编放到结果底部。"
+    "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间。"
+    "产品类型筛选已移除，所有功能统一按上传文件中的全部有效数据处理。"
+    "派送原数据处理=全量出库数据清洗，不做时间筛选；只负责合并、剔除无效批次、识别FTL/LTL、FTL按车次号合并、识别FBA/FBX与邮编。"
     "同一FTL车次混多个目的地时，目的地识别字段按该车次内出库体积最大的明细行覆盖。"
-    "第二步支持两种输入：一是派送一结果+一个或多个鲲运匹配列表；二是上一次派送二报告，在邮编异常审核表中补充邮编后直接重新上传。"
-    "6B支持多文件上传；结构完全相同的匹配文件会默认纵向合并，结构不同的文件会按字段并集合并并保留来源文件名。"
+    "派送数据匹配及分析支持两种输入：一是派送一结果+一个或多个鲲运匹配列表；二是上一次派送二报告，在邮编异常审核表中补充邮编后直接重新上传。"
+    "6B支持多文件上传；结构完全相同的匹配文件默认纵向合并，结构不同的文件按字段并集合并并保留来源文件名。"
     "邮编异常审核表请填写“补充标准邮编”，可选填写“补充目的州”。工具会把补入邮编的数据合并回分析主表重新计算。"
     "干线识别优先读车次/批次备注中的 NJ / SAV / DAL，再读调拨目标仓和邮编规则。干线只对LA仓派送分析生效。"
     "LTL不计入发车数，只参与方数结构；邮编列按文本处理；四位邮编自动补0。FTL车型缺失默认53尺大车；同车次装车类型同时出现卡板和地板时，聚合后按地板。"
@@ -107,6 +109,7 @@ def read_first_sheet(uploaded_file):
 
 
 def combine_uploaded_match_files(match_files):
+    """6B匹配文件多文件合并：同结构直接纵向合并；不同结构按字段并集合并。"""
     if not match_files:
         return pd.DataFrame(), "未上传6B匹配文件"
     frames = []
@@ -126,16 +129,18 @@ def combine_uploaded_match_files(match_files):
     return combined, message
 
 
+def sanitize_stage2_input_df(df):
+    return tool_common.ensure_object_df(df)
+
+
 selection_complete = warehouse != PLACEHOLDER and analysis_module != PLACEHOLDER
 if analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
-    selection_complete = selection_complete and product_type != PLACEHOLDER and period_type != PLACEHOLDER
+    selection_complete = selection_complete and period_type != PLACEHOLDER
 elif analysis_module == DELIVERY_STAGE2_MODULE:
     selection_complete = selection_complete and period_type != PLACEHOLDER
 
-date_range_valid = True if analysis_module == DELIVERY_STAGE1_MODULE else selected_date_range_is_valid(date_range)
-
 if analysis_module == DELIVERY_STAGE1_MODULE:
-    raw_files = st.file_uploader("6. 上传派送原始数据文件（可多选，格式需一致）", type=["xlsx", "xls"], accept_multiple_files=True)
+    raw_files = st.file_uploader("3. 上传派送原始数据文件（可多选，格式需一致）", type=["xlsx", "xls"], accept_multiple_files=True)
     if raw_files:
         st.success(f"已上传 {len(raw_files)} 个文件。")
     if st.button("开始处理派送原数据", type="primary"):
@@ -172,19 +177,19 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
                 file_name = tool_common.build_output_filename(warehouse, DELIVERY_STAGE1_MODULE)
                 st.download_button("下载派送一结果 Excel", output, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         except Exception as e:
-            st.error("派送原数据处理失败，请检查文件字段或仓点选择。")
+            st.error("派送原数据处理失败，请检查文件字段、仓点选择或源数据格式。")
             st.exception(e)
 
 elif analysis_module == DELIVERY_STAGE2_MODULE:
-    stage1_file = st.file_uploader("6A. 上传派送一结果，或上传已补充邮编异常审核的派送二报告", type=["xlsx", "xls"], key="stage1_result_file")
+    stage1_file = st.file_uploader("4A. 上传派送一结果，或上传已补充邮编异常审核的派送二报告", type=["xlsx", "xls"], key="stage1_result_file")
     match_files = st.file_uploader(
-        "6B. 上传人工匹配文件（可选，可多选；鲲运导出列表也可，需含批次号 + 邮编/目的地邮编/标准邮编，可含省/州）",
+        "4B. 上传人工匹配文件（可选，可多选；鲲运导出列表也可，需含批次号 + 邮编/目的地邮编/标准邮编，可含省/州）",
         type=["xlsx", "xls"],
         accept_multiple_files=True,
         key="manual_match_file",
     )
     if match_files:
-        st.success(f"6B已上传 {len(match_files)} 个匹配文件。结构相同会自动按行合并。")
+        st.success(f"4B已上传 {len(match_files)} 个匹配文件。结构相同会自动按行合并。")
 
     if st.button("开始匹配并生成派送分析报告", type="primary"):
         try:
@@ -194,9 +199,9 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
                 st.warning("请先上传派送一结果或已补充邮编异常审核的派送二报告。")
             else:
                 cleaned_batches = delivery_workflow.read_stage1_cleaned_batches(stage1_file)
-                cleaned_batches = tool_common.ensure_object_df(cleaned_batches)
+                cleaned_batches = sanitize_stage2_input_df(cleaned_batches)
                 match_df, merge_message = combine_uploaded_match_files(match_files)
-                match_df = tool_common.ensure_object_df(match_df)
+                match_df = sanitize_stage2_input_df(match_df)
                 if match_files:
                     st.info(merge_message)
                 metrics = delivery_workflow.process_stage2_analysis(cleaned_batches, match_df, period_type=period_type)
@@ -210,7 +215,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
             st.exception(e)
 
 else:
-    uploaded_file = st.file_uploader("6. 上传 Excel", type=["xlsx", "xls"])
+    uploaded_file = st.file_uploader("5. 上传 Excel", type=["xlsx", "xls"])
     if uploaded_file is not None:
         try:
             uploaded_file.seek(0)
@@ -220,8 +225,8 @@ else:
             st.success(f"文件上传成功，当前工作表：{sheet_name}")
             if st.button("开始分析", type="primary"):
                 if not selection_complete:
-                    st.warning("请先把仓点、产品类型、分析模块、统计周期都选择完整。")
-                elif not date_range_valid:
+                    st.warning("请先把仓点、分析模块、统计周期都选择完整。")
+                elif not selected_date_range_is_valid(date_range):
                     st.warning("请选择完整的开始日期和结束日期。")
                 elif date_range[0] > date_range[1]:
                     st.warning("开始日期不能晚于结束日期。")
@@ -233,7 +238,7 @@ else:
                         uploaded_file=uploaded_file,
                         sheet_name=sheet_name,
                         warehouse=warehouse_for_processing,
-                        product_type=product_type,
+                        product_type=DEFAULT_PRODUCT_TYPE,
                         analysis_module=analysis_module,
                         period_type=period_type,
                         start_date=date_range[0],
@@ -244,7 +249,7 @@ else:
                     st.subheader("清洗后的数据集预览")
                     st.dataframe(detail_df.head(100), use_container_width=True)
                     output = tool_common.write_sheets_to_excel({"清洗后的数据集": detail_df, "数据处理结果": result_df})
-                    file_name = tool_common.build_output_filename(warehouse, final_module, product_type, period_type)
+                    file_name = tool_common.build_output_filename(warehouse, final_module, period_type)
                     st.download_button("下载结果 Excel", output, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         except Exception as e:
             st.error("处理失败，请检查文件字段、工作表、时间范围或分析模块是否匹配。")
