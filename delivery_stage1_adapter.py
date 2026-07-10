@@ -15,9 +15,53 @@ COST_CANDIDATES = [
     "派送成本", "成本", "派送费用", "DeliveryCost", "Delivery Cost", "Cost", "cost"
 ]
 
-
 NUMERIC_COLS = ["出库体积", "出库卡板数", "派送成本"]
 RECALC_COLS = ["出库体积", "出库卡板数", "派送成本", "FBA出库体积", "FBX出库体积"]
+
+# 仓间调拨目的地强制覆盖规则。
+# 只要出库类型为调拨，或调入仓库不为空，就以“调入仓库”为实际目的地，不能再按原目的地/FBA/平台仓识别。
+TRANSFER_WAREHOUSE_INFO = {
+    "LA": {
+        "display": "LA盈仓",
+        "zip": "91708",
+        "zip3": "917",
+        "state": "CA",
+        "line": "LA",
+        "keywords": ["LA", "美西", "洛杉矶", "CHINO", "SAN ANTONIO"],
+    },
+    "NJ": {
+        "display": "新泽西盈仓",
+        "zip": "08857",
+        "zip3": "088",
+        "state": "NJ",
+        "line": "LA-NJ",
+        "keywords": ["NJ", "新泽西", "NEW JERSEY", "OLD BRIDGE", "JAKE BROWN"],
+    },
+    "SAV": {
+        "display": "萨凡纳盈仓",
+        "zip": "31408",
+        "zip3": "314",
+        "state": "GA",
+        "line": "LA-SAV",
+        "keywords": ["SAV", "萨凡纳", "SAVANNAH", "GARDEN CITY", "PROSPERITY"],
+    },
+    "DAL": {
+        "display": "达拉斯盈仓",
+        "zip": "75180",
+        "zip3": "751",
+        "state": "TX",
+        "line": "LA-DAL",
+        "keywords": ["DAL", "达拉斯", "DALLAS", "BALCH SPRINGS", "PEACHTREE"],
+    },
+}
+
+
+TRANSFER_TEXT_COLS = ["出库类型", "业务场景", "调入仓库", "目的地", "修正后目的地", "备注", "车次号", "批次号集合"]
+DESTINATION_OVERRIDE_COLS = [
+    "实际目的地", "修正后目的地", "目的地", "调入仓库", "标准邮编集合", "邮编前三位集合", "目的州",
+    "邮编来源", "系统产品类型", "主产品类型", "平台名称", "平台仓代码集合", "FBA仓点代码集合",
+    "FBA出库体积", "FBX出库体积", "目的地邮编待补充", "专线线路", "专线识别方式",
+]
 
 
 def _clean_header(value):
@@ -105,6 +149,81 @@ def _prepare_recalc_columns(df):
     return out
 
 
+def _text_value(value):
+    if processors.is_blank(value):
+        return ""
+    return str(value).strip()
+
+
+def _infer_transfer_target_from_text(text):
+    upper = str(text).upper()
+    for target, info in TRANSFER_WAREHOUSE_INFO.items():
+        for keyword in info["keywords"]:
+            if str(keyword).upper() in upper:
+                return target, info
+    return "", None
+
+
+def _row_is_transfer(row):
+    outbound_type = _text_value(row.get("出库类型", ""))
+    business_scene = _text_value(row.get("业务场景", ""))
+    transfer_to = _text_value(row.get("调入仓库", ""))
+    combined = " ".join([outbound_type, business_scene, transfer_to])
+    return bool(transfer_to) or ("调拨" in combined) or ("仓间" in combined) or ("调入" in combined)
+
+
+def _infer_transfer_target_from_row(row):
+    # 调入仓库优先级最高；其次再看出库类型、业务场景、目的地等文本。
+    for col in ["调入仓库", "出库类型", "业务场景", "实际目的地", "修正后目的地", "目的地", "备注", "车次号", "批次号集合"]:
+        if col in row.index:
+            target, info = _infer_transfer_target_from_text(row.get(col, ""))
+            if info:
+                return target, info
+    combined = " ".join(_text_value(row.get(c, "")) for c in TRANSFER_TEXT_COLS if c in row.index)
+    return _infer_transfer_target_from_text(combined)
+
+
+def _apply_transfer_destination_override(cleaned_batches):
+    """
+    调拨/调入仓库不为空的行，实际目的地必须覆盖为调入仓库。
+    这一步放在功能一最后，确保邮编异常审核不会再把“调拨到盈仓”的行当成普通目的地异常。
+    """
+    if cleaned_batches is None or cleaned_batches.empty:
+        return cleaned_batches
+    out = cleaned_batches.copy()
+    for col in DESTINATION_OVERRIDE_COLS:
+        if col not in out.columns:
+            out[col] = "" if col not in ["FBA出库体积", "FBX出库体积"] else 0.0
+
+    for idx, row in out.iterrows():
+        if not _row_is_transfer(row):
+            continue
+        target, info = _infer_transfer_target_from_row(row)
+        if not info:
+            continue
+
+        display = info["display"]
+        out.at[idx, "实际目的地"] = display
+        out.at[idx, "修正后目的地"] = display
+        out.at[idx, "目的地"] = display
+        out.at[idx, "调入仓库"] = display
+        out.at[idx, "标准邮编集合"] = info["zip"]
+        out.at[idx, "邮编前三位集合"] = info["zip3"]
+        out.at[idx, "目的州"] = info["state"]
+        out.at[idx, "邮编来源"] = "调拨目标仓地址规则"
+        out.at[idx, "系统产品类型"] = "仓间调拨"
+        out.at[idx, "主产品类型"] = "仓间调拨"
+        out.at[idx, "平台名称"] = "盈仓"
+        out.at[idx, "平台仓代码集合"] = display
+        out.at[idx, "FBA仓点代码集合"] = ""
+        out.at[idx, "FBA出库体积"] = 0.0
+        out.at[idx, "FBX出库体积"] = 0.0
+        out.at[idx, "目的地邮编待补充"] = False
+        out.at[idx, "专线线路"] = info["line"]
+        out.at[idx, "专线识别方式"] = "调入仓库优先覆盖"
+    return out
+
+
 def _force_cleaned_totals_from_detail(cleaned_batches, detail_df):
     """
     用派送一明细里的批次真实方数/板数/成本，强制回填到FTL车次合并结果。
@@ -170,6 +289,7 @@ def patch_delivery_stage1(delivery_workflow_module):
         if isinstance(result, tuple) and len(result) == 4:
             cleaned_batches, invalid_detail, zip_audit_df, raw_detail = result
             cleaned_batches = _force_cleaned_totals_from_detail(cleaned_batches, raw_detail)
+            cleaned_batches = _apply_transfer_destination_override(cleaned_batches)
             if cleaned_batches is not None and not cleaned_batches.empty and "目的地邮编待补充" in cleaned_batches.columns:
                 zip_audit_df = cleaned_batches[cleaned_batches["目的地邮编待补充"]].copy()
             return cleaned_batches, invalid_detail, zip_audit_df, raw_detail
