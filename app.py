@@ -9,13 +9,16 @@ import processors
 import delivery_reference
 import delivery_workflow
 import delivery_match_adapter
+import delivery_stage1_adapter
 
 # Streamlit rerun sometimes keeps imported modules in memory.
 importlib.reload(processors)
 importlib.reload(delivery_reference)
 importlib.reload(delivery_workflow)
 importlib.reload(delivery_match_adapter)
+importlib.reload(delivery_stage1_adapter)
 delivery_match_adapter.patch_delivery_workflow(delivery_workflow)
+delivery_stage1_adapter.patch_delivery_stage1(delivery_workflow)
 
 VALID_WAREHOUSES = ["LA", "NJ", "SAV", "DAL"]
 PLACEHOLDER = "请填入"
@@ -54,6 +57,7 @@ date_range = st.date_input("5. 选择时间范围", value=(month_start, today), 
 st.caption(
     "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间；派送原数据处理=出库时间。"
     "派送拆成两步：第一步合并多个鲲运源文件、剔除无效批次、识别FTL/LTL、FTL按车次号合并，并识别FBA/FBX与邮编；未匹配邮编放到结果底部。"
+    "第一步会自动修复出库体积/出库卡板数/派送成本字段：如果标准列为空或全0，会优先读取方数、体积、板数、卡板数、成本等同义列。"
     "第二步支持两种输入：一是派送一结果+鲲运匹配列表；二是上一次派送二报告，在邮编异常审核表中补充邮编后直接重新上传。"
     "邮编异常审核表请填写“补充标准邮编”，可选填写“补充目的州”。工具会把补入邮编的数据合并回分析主表重新计算。"
     "第二步匹配文件为可选项；如上传，会继续按批次号补充邮编/平台仓代码；如不上传，则只使用报告内已有数据和邮编异常审核人工补充结果。"
