@@ -58,7 +58,8 @@ st.caption(
     "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间；派送原数据处理=出库时间。"
     "派送拆成两步：第一步合并多个鲲运源文件、剔除无效批次、识别FTL/LTL、FTL按车次号合并，并识别FBA/FBX与邮编；未匹配邮编放到结果底部。"
     "第一步会自动修复出库体积/出库卡板数/派送成本字段：如果标准列为空或全0，会优先读取方数、体积、板数、卡板数、成本等同义列。"
-    "第二步支持两种输入：一是派送一结果+鲲运匹配列表；二是上一次派送二报告，在邮编异常审核表中补充邮编后直接重新上传。"
+    "第二步支持两种输入：一是派送一结果+一个或多个鲲运匹配列表；二是上一次派送二报告，在邮编异常审核表中补充邮编后直接重新上传。"
+    "6B支持多文件上传；结构完全相同的匹配文件会默认纵向合并，结构不同的文件会按字段并集合并并保留来源文件名。"
     "邮编异常审核表请填写“补充标准邮编”，可选填写“补充目的州”。工具会把补入邮编的数据合并回分析主表重新计算。"
     "第二步匹配文件为可选项；如上传，会继续按批次号补充邮编/平台仓代码；如不上传，则只使用报告内已有数据和邮编异常审核人工补充结果。"
     "干线识别优先读车次/批次备注中的 NJ / SAV / DAL，再读调拨目标仓和邮编规则。干线只对LA仓派送分析生效。"
@@ -128,6 +129,44 @@ def write_sheets_to_excel(sheets):
     return output
 
 
+def read_first_sheet(uploaded_file):
+    uploaded_file.seek(0)
+    xls = pd.ExcelFile(uploaded_file)
+    sheet_name = xls.sheet_names[0]
+    uploaded_file.seek(0)
+    return pd.read_excel(uploaded_file, sheet_name=sheet_name, dtype=str)
+
+
+def normalized_column_signature(df):
+    normalized = processors.normalize_columns(df.copy())
+    return tuple(str(c).strip() for c in normalized.columns)
+
+
+def combine_uploaded_match_files(match_files):
+    """6B匹配文件多文件合并：同结构直接纵向合并；不同结构按字段并集合并。"""
+    if not match_files:
+        return pd.DataFrame(), "未上传6B匹配文件"
+
+    frames = []
+    signatures = []
+    source_names = []
+    for file in match_files:
+        df = read_first_sheet(file)
+        df = processors.normalize_columns(df.copy())
+        df["来源匹配文件"] = getattr(file, "name", "匹配文件")
+        frames.append(df)
+        signatures.append(tuple([c for c in df.columns if c != "来源匹配文件"]))
+        source_names.append(getattr(file, "name", "匹配文件"))
+
+    same_structure = len(set(signatures)) == 1
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    if same_structure:
+        message = f"已合并 {len(match_files)} 个6B匹配文件；文件结构完全一致，已按行纵向合并。"
+    else:
+        message = f"已合并 {len(match_files)} 个6B匹配文件；文件结构不完全一致，已按字段并集合并，并保留来源匹配文件列。"
+    return combined, message
+
+
 selection_complete = warehouse != PLACEHOLDER and analysis_module != PLACEHOLDER
 if analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
     selection_complete = selection_complete and product_type != PLACEHOLDER and period_type != PLACEHOLDER
@@ -183,7 +222,15 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
 
 elif analysis_module == DELIVERY_STAGE2_MODULE:
     stage1_file = st.file_uploader("6A. 上传派送一结果，或上传已补充邮编异常审核的派送二报告", type=["xlsx", "xls"], key="stage1_result_file")
-    match_file = st.file_uploader("6B. 上传人工匹配文件（可选；鲲运导出列表也可，需含批次号 + 邮编/目的地邮编/标准邮编，可含省/州）", type=["xlsx", "xls"], key="manual_match_file")
+    match_files = st.file_uploader(
+        "6B. 上传人工匹配文件（可选，可多选；鲲运导出列表也可，需含批次号 + 邮编/目的地邮编/标准邮编，可含省/州）",
+        type=["xlsx", "xls"],
+        accept_multiple_files=True,
+        key="manual_match_file",
+    )
+    if match_files:
+        st.success(f"6B已上传 {len(match_files)} 个匹配文件。结构相同会自动按行合并。")
+
     if st.button("开始匹配并生成派送分析报告", type="primary"):
         try:
             if not selection_complete:
@@ -192,14 +239,9 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
                 st.warning("请先上传派送一结果或已补充邮编异常审核的派送二报告。")
             else:
                 cleaned_batches = delivery_workflow.read_stage1_cleaned_batches(stage1_file)
-                if match_file:
-                    match_file.seek(0)
-                    match_xls = pd.ExcelFile(match_file)
-                    match_sheet = match_xls.sheet_names[0]
-                    match_file.seek(0)
-                    match_df = pd.read_excel(match_file, sheet_name=match_sheet, dtype=str)
-                else:
-                    match_df = pd.DataFrame()
+                match_df, merge_message = combine_uploaded_match_files(match_files)
+                if match_files:
+                    st.info(merge_message)
                 metrics = delivery_workflow.process_stage2_analysis(cleaned_batches, match_df, period_type=period_type)
                 st.success("派送分析报告已生成，详细结果请下载Excel查看。")
                 st.write("报告结构：货量、FBA货量排行、FBX平台仓货量、发车量、派送时效、成本。")
