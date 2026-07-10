@@ -17,6 +17,14 @@ REMARK_COLS = ["MEMO", "跟进记录", "内部备注", "备注", "派送区域",
 DROP_REMARK_COLS = ["备注", "备注信息", "匹配备注集合", "专线识别方式", "派送区域识别方式", "备注列"]
 INVALID_LABEL_KEYWORDS = ["盈仓", "未知", "非平台", "其他"]
 
+# 仓间调拨目标仓地址：用于功能二补邮编、识别干线，避免调拨行长期留在邮编异常审核。
+TRANSFER_WAREHOUSE_INFO = {
+    "LA": {"zip": "91708", "state": "CA", "line": "LA", "keywords": ["LA", "美西", "洛杉矶", "CHINO"]},
+    "NJ": {"zip": "08857", "state": "NJ", "line": "LA-NJ", "keywords": ["NJ", "新泽西", "NEW JERSEY", "OLD BRIDGE", "JAKE BROWN"]},
+    "SAV": {"zip": "31408", "state": "GA", "line": "LA-SAV", "keywords": ["SAV", "萨凡纳", "SAVANNAH", "GARDEN CITY", "PROSPERITY"]},
+    "DAL": {"zip": "75180", "state": "TX", "line": "LA-DAL", "keywords": ["DAL", "达拉斯", "DALLAS", "BALCH SPRINGS", "PEACHTREE"]},
+}
+
 
 def _is_blank(value):
     return processors.is_blank(value)
@@ -72,13 +80,26 @@ def _valid_platform_label(value):
     return not any(k in text for k in INVALID_LABEL_KEYWORDS)
 
 
+def _infer_transfer_target(text):
+    upper = str(text).upper()
+    for target, info in TRANSFER_WAREHOUSE_INFO.items():
+        for keyword in info["keywords"]:
+            if str(keyword).upper() in upper:
+                return target, info
+    return "", None
+
+
 def _infer_linehaul_from_text(text):
     upper = str(text).upper()
-    if re.search(r"\bSAV\b|转\s*SAV|SAVANNAH", upper):
+    # 优先中文仓名/英文仓点/车次备注。SAV/DAL/NJ必须在邮编规则前生效。
+    target, info = _infer_transfer_target(upper)
+    if target in ["NJ", "SAV", "DAL"]:
+        return info["line"], f"车次/批次/调入仓库命中{target}"
+    if re.search(r"\bSAV\b|转\s*SAV|SAVANNAH|萨凡纳", upper):
         return "LA-SAV", "车次/批次备注命中SAV"
-    if re.search(r"\bDAL\b|转\s*DAL|DALLAS", upper):
+    if re.search(r"\bDAL\b|转\s*DAL|DALLAS|达拉斯", upper):
         return "LA-DAL", "车次/批次备注命中DAL"
-    if re.search(r"\bNJ\b|转\s*NJ|NEW\s*JERSEY", upper):
+    if re.search(r"\bNJ\b|转\s*NJ|NEW\s*JERSEY|新泽西", upper):
         return "LA-NJ", "车次/批次备注命中NJ"
     return "", ""
 
@@ -144,6 +165,28 @@ def _fill_fba_zip_memory(df):
     return out
 
 
+def _fill_transfer_zip_memory(df):
+    out = df.copy()
+    for col in ["标准邮编集合", "邮编前三位集合", "目的州", "邮编来源", "调入仓库"]:
+        if col not in out.columns:
+            out[col] = ""
+    for idx, row in out.iterrows():
+        text = " ".join(str(row.get(c, "")) for c in ["出库类型", "业务场景", "调入仓库"] if c in out.columns)
+        if not ("调拨" in text or "仓间" in text or "调入" in text):
+            continue
+        target, info = _infer_transfer_target(text)
+        if not info:
+            continue
+        # 调拨的目的地就是目标仓；优先用固定目标仓邮编补齐，避免进入邮编异常。
+        out.at[idx, "标准邮编集合"] = info["zip"]
+        out.at[idx, "邮编前三位集合"] = info["zip"][:3]
+        out.at[idx, "目的州"] = info["state"]
+        out.at[idx, "邮编来源"] = "仓间调拨目标仓地址"
+        out.at[idx, "目的地邮编待补充"] = False
+        out.at[idx, "调入仓库"] = row.get("调入仓库", "") or target
+    return out
+
+
 def prepare_manual_match_flexible(match_df):
     match = processors.normalize_columns(match_df).copy()
     processors.require_columns(match, ["批次号"], "人工目的地匹配文件")
@@ -164,7 +207,7 @@ def prepare_manual_match_flexible(match_df):
         platform = str(row.get(platform_col, "")).strip() if platform_col else ""
         wh_code = str(row.get(warehouse_code_col, "")).strip() if warehouse_code_col else ""
         remarks = [row.get(c, "") for c in remark_cols]
-        entry = grouped.setdefault(batch, {"zips": [], "states": [], "fixes": [], "errors": [], "remarks": [], "platforms": [], "warehouse_codes": []})
+        entry = grouped.setdefault(batch, {"zips": [], "states": [], "fixes": [], "errors": [], "remarks": [], "platforms": [], "warehouse_codes": [], "platform_pairs": []})
         if valid and zip_code:
             if zip_code not in entry["zips"]:
                 entry["zips"].append(zip_code)
@@ -179,6 +222,10 @@ def prepare_manual_match_flexible(match_df):
             entry["platforms"].append(platform)
         if _valid_platform_label(wh_code) and wh_code not in entry["warehouse_codes"]:
             entry["warehouse_codes"].append(wh_code)
+        if _valid_platform_label(platform) and _valid_platform_label(wh_code):
+            pair = f"{platform}||{wh_code}"
+            if pair not in entry["platform_pairs"]:
+                entry["platform_pairs"].append(pair)
         for text in remarks:
             if not _is_blank(text) and str(text).strip() not in entry["remarks"]:
                 entry["remarks"].append(str(text).strip())
@@ -193,24 +240,25 @@ def prepare_manual_match_flexible(match_df):
             "补充邮编异常原因": "" if entry["zips"] else "; ".join(entry["errors"]),
             "补充平台名称": ",".join(entry["platforms"]),
             "补充平台仓代码": ",".join(entry["warehouse_codes"]),
+            "补充平台仓配对": ";".join(entry["platform_pairs"]),
             "匹配备注集合": _combine_unique(entry["remarks"]),
         })
     return pd.DataFrame(rows)
 
 
 def apply_manual_match_to_cleaned_batches_flexible(cleaned_batches, match_df):
-    df = _fill_fba_zip_memory(cleaned_batches)
+    df = _fill_transfer_zip_memory(_fill_fba_zip_memory(cleaned_batches))
     match = prepare_manual_match_flexible(match_df)
     if df.empty or match.empty:
-        return df
+        return _fill_transfer_zip_memory(df)
     match_map = match.set_index("批次号").to_dict("index")
-    for col in ["目的州", "邮编来源", "匹配备注集合", "平台仓代码集合", "平台名称"]:
+    for col in ["目的州", "邮编来源", "匹配备注集合", "平台仓代码集合", "平台仓配对集合", "平台名称"]:
         if col not in df.columns:
             df[col] = ""
     for idx, row in df.iterrows():
         existing_zips = _split_values(row.get("标准邮编集合", ""))
         batch_ids = _split_values(row.get("批次号集合", row.get("批次号", "")))
-        zips, states, remarks, platforms, wh_codes = [], [], [], [], []
+        zips, states, remarks, platforms, wh_codes, pairs = [], [], [], [], [], []
         for batch in batch_ids:
             rec = match_map.get(batch)
             if not rec:
@@ -224,6 +272,9 @@ def apply_manual_match_to_cleaned_batches_flexible(cleaned_batches, match_df):
             for code in _split_values(rec.get("补充平台仓代码", "")):
                 if _valid_platform_label(code) and code not in wh_codes:
                     wh_codes.append(code)
+            for pair in [p for p in str(rec.get("补充平台仓配对", "")).split(";") if p.strip()]:
+                if pair not in pairs:
+                    pairs.append(pair)
             if rec.get("补充邮编是否有效"):
                 for z in _split_values(rec.get("补充标准邮编", "")):
                     if z not in zips:
@@ -235,6 +286,8 @@ def apply_manual_match_to_cleaned_batches_flexible(cleaned_batches, match_df):
             df.at[idx, "匹配备注集合"] = _combine_unique(remarks)
         if wh_codes:
             df.at[idx, "平台仓代码集合"] = ",".join(wh_codes)
+        if pairs:
+            df.at[idx, "平台仓配对集合"] = ";".join(pairs)
         if platforms and (not _valid_platform_label(row.get("平台名称", ""))):
             df.at[idx, "平台名称"] = ",".join(platforms)
         if existing_zips:
@@ -246,6 +299,7 @@ def apply_manual_match_to_cleaned_batches_flexible(cleaned_batches, match_df):
             df.at[idx, "目的地邮编待补充"] = False
         if states:
             df.at[idx, "目的州"] = ",".join(states)
+    df = _fill_transfer_zip_memory(df)
     df["目的地邮编待补充"] = df["标准邮编集合"].apply(lambda x: len(_split_values(x)) == 0)
     return df
 
@@ -294,6 +348,76 @@ def _expand_volume_by_codes(df, code_col, volume_col, warehouse_col="仓库", pe
     return pd.DataFrame(rows)
 
 
+def _expand_cost_by_station(df, object_type):
+    rows = []
+    if df.empty:
+        return pd.DataFrame()
+    for _, row in df.iterrows():
+        vehicle_group = _cost_vehicle_group(row)
+        if vehicle_group not in ["小车", "大车卡板", "大车地板"]:
+            continue
+        volume = pd.to_numeric(row.get("出库体积", 0), errors="coerce")
+        cost = pd.to_numeric(row.get("派送成本", 0), errors="coerce")
+        if pd.isna(volume):
+            volume = 0
+        if pd.isna(cost):
+            cost = 0
+        if volume <= 0 and cost <= 0:
+            continue
+        objects = []
+        if object_type == "FBA":
+            for code in _split_values(row.get("FBA仓点代码集合", "")):
+                if code:
+                    objects.append(("FBA", code))
+        else:
+            pairs = [p for p in str(row.get("平台仓配对集合", "")).split(";") if p.strip() and "||" in p]
+            if pairs:
+                for pair in pairs:
+                    platform, code = pair.split("||", 1)
+                    if _valid_platform_label(platform) and _valid_platform_label(code):
+                        objects.append((platform, code))
+            else:
+                codes = [c for c in _split_values(row.get("平台仓代码集合", "")) if _valid_platform_label(c)]
+                platforms = [p for p in _split_values(row.get("平台名称", "")) if _valid_platform_label(p)]
+                if len(platforms) == len(codes) and len(codes) > 0:
+                    objects.extend(list(zip(platforms, codes)))
+                elif len(codes) > 0:
+                    platform = platforms[0] if len(platforms) == 1 else ""
+                    for code in codes:
+                        objects.append((platform, code))
+        if not objects:
+            continue
+        share_volume = float(volume) / len(objects)
+        share_cost = float(cost) / len(objects)
+        for platform, code in objects:
+            rows.append({
+                "仓库": row.get("仓库", ""),
+                "统计周期": row.get("统计周期", ""),
+                "对象类型": object_type if object_type == "FBA" else "FBX平台仓",
+                "平台": platform if object_type != "FBA" else "FBA",
+                "仓点代码": code,
+                "车型装车分组": vehicle_group,
+                "车次数": 1 / len(objects),
+                "出库体积": share_volume,
+                "派送成本": share_cost,
+            })
+    return pd.DataFrame(rows)
+
+
+def _cost_vehicle_group(row):
+    vehicle = str(row.get("车型标准值", ""))
+    loading = str(row.get("装车类型标准值", ""))
+    if "26" in vehicle or "小车" in vehicle:
+        return "小车"
+    if "53" in vehicle or "大车" in vehicle:
+        if "卡板" in loading:
+            return "大车卡板"
+        if "地板" in loading:
+            return "大车地板"
+        return "大车未知装车"
+    return "未知车型"
+
+
 def build_fba_rank_sheet(matched):
     source = matched[matched.get("FBA出库体积", 0) > 0].copy() if not matched.empty else pd.DataFrame()
     expanded = _expand_volume_by_codes(source, "FBA仓点代码集合", "FBA出库体积", platform_col=None, exclude_invalid=False)
@@ -304,8 +428,7 @@ def build_fba_rank_sheet(matched):
     total = agg.groupby(["仓库", "统计周期"])["出库体积"].transform("sum")
     agg["占比"] = agg["出库体积"] / total
     agg["排名"] = agg.groupby(["仓库", "统计周期"])["出库体积"].rank(method="first", ascending=False).astype(int)
-    agg = agg.rename(columns={"仓点代码": "FBA仓点"})[["仓库", "统计周期", "排名", "FBA仓点", "出库体积", "占比"]]
-    return agg
+    return agg.rename(columns={"仓点代码": "FBA仓点"})[["仓库", "统计周期", "排名", "FBA仓点", "出库体积", "占比"]]
 
 
 def build_fbx_platform_warehouse_sheet(matched):
@@ -322,14 +445,50 @@ def build_fbx_platform_warehouse_sheet(matched):
     total = agg.groupby(["仓库", "统计周期"])["出库体积"].transform("sum")
     agg["占比"] = agg["出库体积"] / total
     agg["排名"] = agg.groupby(["仓库", "统计周期"])["出库体积"].rank(method="first", ascending=False).astype(int)
-    agg = agg.rename(columns={"仓点代码": "平台仓代码"})[["仓库", "统计周期", "排名", "平台", "平台仓代码", "出库体积", "占比"]]
-    return agg
+    return agg.rename(columns={"仓点代码": "平台仓代码"})[["仓库", "统计周期", "排名", "平台", "平台仓代码", "出库体积", "占比"]]
+
+
+def build_station_cost_report(matched):
+    if matched.empty:
+        return pd.DataFrame()
+    ftl = matched[matched.get("是否FTL发车", False)].copy()
+    if ftl.empty:
+        return pd.DataFrame()
+    rows = []
+    full_load = ftl[(ftl["车型标准值"] == "53尺大车") & (ftl["装车类型标准值"] == "地板")].copy()
+    for (warehouse, period), group in full_load.groupby(["仓库", "统计周期"], dropna=False):
+        rows.append({
+            "指标名称": "满载情况", "仓库": warehouse, "统计周期": period,
+            "对象类型": "FTL大车地板", "平台": "全部", "仓点代码": "全部", "车型装车分组": "大车地板",
+            "车次数": len(group), "总出库体积": group["出库体积"].sum(), "总派送成本": group["派送成本"].sum(),
+            "平均整车价": None, "每方平均价": None,
+            "平均每车出库体积": group["出库体积"].mean(), "P80每车出库体积": processors.safe_p80(group["出库体积"]),
+        })
+    cost_source = ftl[ftl["主产品类型"].isin(["FBA", "FBX"])].copy()
+    expanded = pd.concat([
+        _expand_cost_by_station(cost_source[cost_source["主产品类型"] == "FBA"], "FBA"),
+        _expand_cost_by_station(cost_source[cost_source["主产品类型"] == "FBX"], "FBX平台仓"),
+    ], ignore_index=True)
+    if not expanded.empty:
+        grouped = expanded.groupby(["仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组"], dropna=False).agg(
+            车次数=("车次数", "sum"),
+            总出库体积=("出库体积", "sum"),
+            总派送成本=("派送成本", "sum"),
+        ).reset_index()
+        grouped = grouped[(grouped["总出库体积"] > 0) | (grouped["总派送成本"] > 0)]
+        grouped["指标名称"] = "FBA及FBX平台仓成本"
+        grouped["平均整车价"] = grouped["总派送成本"] / grouped["车次数"].replace(0, pd.NA)
+        grouped["每方平均价"] = grouped["总派送成本"] / grouped["总出库体积"].replace(0, pd.NA)
+        grouped["平均每车出库体积"] = grouped["总出库体积"] / grouped["车次数"].replace(0, pd.NA)
+        grouped["P80每车出库体积"] = pd.NA
+        rows_df = grouped[["指标名称", "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组", "车次数", "总出库体积", "总派送成本", "平均整车价", "每方平均价", "平均每车出库体积", "P80每车出库体积"]]
+        rows.extend(rows_df.to_dict("records"))
+    return pd.DataFrame(rows)
 
 
 def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_df, period_type="按周统计"):
     matched = delivery_workflow_module.prepare_stage2_for_report(cleaned_batches, match_df, period_type)
     combined = delivery_workflow_module.build_sheet1_volume_dispatch_time_report(matched)
-    cost = delivery_workflow_module.build_sheet2_cost_report(matched)
     if combined.empty:
         volume = dispatch = timing = combined.copy()
     else:
@@ -337,6 +496,7 @@ def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_d
         volume = volume[~volume["指标名称"].astype(str).isin(["FBA仓点货量排行", "FBX平台仓货量排行"])]
         dispatch = combined[combined["报告部分"].astype(str).str.startswith("2.")].copy()
         timing = combined[combined["报告部分"].astype(str).str.startswith("3.")].copy()
+    cost = build_station_cost_report(matched)
     return {
         "货量": processors.round_output_numbers(_finalize_sheet(volume), processors.RESULT_DECIMALS),
         "FBA货量排行": processors.round_output_numbers(_finalize_sheet(build_fba_rank_sheet(matched)), processors.RESULT_DECIMALS),
