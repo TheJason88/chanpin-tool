@@ -17,6 +17,8 @@ COST_CANDIDATES = [
 
 NUMERIC_COLS = ["出库体积", "出库卡板数", "派送成本"]
 RECALC_COLS = ["出库体积", "出库卡板数", "派送成本", "FBA出库体积", "FBX出库体积"]
+ZIP_FILL_COL = "补充标准邮编"
+STATE_FILL_COL = "补充目的州"
 
 # 仓间调拨目的地强制覆盖规则。
 # 只要出库类型为调拨，或调入仓库不为空，就以“调入仓库”为实际目的地，不能再按原目的地/FBA/平台仓识别。
@@ -54,7 +56,6 @@ TRANSFER_WAREHOUSE_INFO = {
         "keywords": ["DAL", "达拉斯", "DALLAS", "BALCH SPRINGS", "PEACHTREE"],
     },
 }
-
 
 TRANSFER_TEXT_COLS = ["出库类型", "业务场景", "调入仓库", "目的地", "修正后目的地", "备注", "车次号", "批次号集合"]
 DESTINATION_OVERRIDE_COLS = [
@@ -130,6 +131,13 @@ def _split_batch_ids(value):
     return [p.strip() for p in parts if p.strip() and p.strip().lower() not in ["nan", "none", "null"]]
 
 
+def _split_values(value):
+    if processors.is_blank(value):
+        return []
+    parts = re.split(r"[,，;；/\s]+", str(value))
+    return [p.strip() for p in parts if p.strip() and p.strip().lower() not in ["nan", "none", "null", "false", "0"]]
+
+
 def _ensure_numeric(df, cols):
     out = df.copy()
     for col in cols:
@@ -147,6 +155,31 @@ def _prepare_recalc_columns(df):
             out[col] = 0.0
         out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0).astype(float)
     return out
+
+
+def _as_mutable_object_df(df):
+    """把Excel读入的严格string/int列改成object，避免二次补邮编时写入False/小数报dtype错误。"""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    for col in out.columns:
+        out[col] = out[col].astype(object)
+    return out
+
+
+def _normalize_state(value):
+    if processors.is_blank(value):
+        return ""
+    text = str(value).strip()
+    upper = text.upper()
+    aliases = {
+        "CALIFORNIA": "CA", "加州": "CA", "NEW JERSEY": "NJ", "GEORGIA": "GA",
+        "TEXAS": "TX", "FLORIDA": "FL", "NORTH CAROLINA": "NC", "ILLINOIS": "IL",
+    }
+    if upper in aliases:
+        return aliases[upper]
+    match = re.search(r"\b([A-Z]{2})\b", upper)
+    return match.group(1) if match else text
 
 
 def _text_value(value):
@@ -190,7 +223,7 @@ def _apply_transfer_destination_override(cleaned_batches):
     """
     if cleaned_batches is None or cleaned_batches.empty:
         return cleaned_batches
-    out = cleaned_batches.copy()
+    out = _as_mutable_object_df(cleaned_batches)
     for col in DESTINATION_OVERRIDE_COLS:
         if col not in out.columns:
             out[col] = "" if col not in ["FBA出库体积", "FBX出库体积"] else 0.0
@@ -268,6 +301,98 @@ def _force_cleaned_totals_from_detail(cleaned_batches, detail_df):
     return out
 
 
+def _build_stage_key(row):
+    if "分析批次ID" in row.index and not processors.is_blank(row.get("分析批次ID")):
+        return f"ID::{str(row.get('分析批次ID')).strip()}"
+    if "批次号集合" in row.index and not processors.is_blank(row.get("批次号集合")):
+        return f"BATCH::{str(row.get('批次号集合')).strip()}"
+    return ""
+
+
+def _pick_manual_zip_from_audit_row(row):
+    # 只读人工补充列；不再回退读取“标准邮编集合”，避免未补行被误判为已补。
+    for col in [ZIP_FILL_COL, "待填邮编", "补充邮编", "目的地邮编", "邮编", "标准邮编"]:
+        if col not in row.index:
+            continue
+        valid_zips = []
+        for value in _split_values(row.get(col, "")):
+            zip_code, _, valid, _ = processors.normalize_zip_value(value)
+            if valid and zip_code:
+                valid_zips.append(zip_code)
+        if valid_zips:
+            return ",".join(list(dict.fromkeys(valid_zips)))
+    return ""
+
+
+def _apply_zip_audit_updates_safely(main_df, audit_df):
+    if main_df is None or main_df.empty or audit_df is None or audit_df.empty:
+        return _as_mutable_object_df(main_df)
+    df = _as_mutable_object_df(main_df)
+    audit = _as_mutable_object_df(audit_df)
+    for col in ["标准邮编集合", "邮编前三位集合", "目的州", "邮编来源", "目的地邮编待补充"]:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].astype(object)
+
+    main_index = {_build_stage_key(row): idx for idx, row in df.iterrows() if _build_stage_key(row)}
+    for _, row in audit.iterrows():
+        key = _build_stage_key(row)
+        if not key or key not in main_index:
+            continue
+        zip_value = _pick_manual_zip_from_audit_row(row)
+        if not zip_value:
+            continue
+        idx = main_index[key]
+        zips = _split_values(zip_value)
+        df.at[idx, "标准邮编集合"] = ",".join(zips)
+        df.at[idx, "邮编前三位集合"] = ",".join([z[:3] for z in zips if len(z) == 5])
+        state = ""
+        for state_col in [STATE_FILL_COL, "目的州", "州", "省/州"]:
+            if state_col in row.index and not processors.is_blank(row.get(state_col)):
+                state = _normalize_state(row.get(state_col))
+                break
+        if state:
+            df.at[idx, "目的州"] = state
+        df.at[idx, "邮编来源"] = "邮编异常审核人工补充"
+        df.at[idx, "目的地邮编待补充"] = False
+    df["目的地邮编待补充"] = df["标准邮编集合"].apply(lambda x: len(_split_values(x)) == 0)
+    return df
+
+
+def _read_stage1_or_stage2_with_audit_updates_safely(excel_file):
+    excel_file.seek(0)
+    xls = pd.ExcelFile(excel_file)
+    if "派送二_匹配后合并数据" in xls.sheet_names:
+        sheet_name = "派送二_匹配后合并数据"
+    elif "清洗后数据" in xls.sheet_names:
+        sheet_name = "清洗后数据"
+    elif "派送一_清洗合并数据" in xls.sheet_names:
+        sheet_name = "派送一_清洗合并数据"
+    elif "派送二_批次车次聚合" in xls.sheet_names:
+        sheet_name = "派送二_批次车次聚合"
+    else:
+        sheet_name = xls.sheet_names[0]
+    excel_file.seek(0)
+    df = pd.read_excel(excel_file, sheet_name=sheet_name, dtype=object)
+    df = _as_mutable_object_df(df)
+    if "邮编异常审核" in xls.sheet_names:
+        excel_file.seek(0)
+        audit_df = pd.read_excel(excel_file, sheet_name="邮编异常审核", dtype=object)
+        df = _apply_zip_audit_updates_safely(df, audit_df)
+    return df
+
+
+def _wrap_stage2_match_apply(delivery_workflow_module):
+    original_apply = delivery_workflow_module.apply_manual_match_to_cleaned_batches
+
+    def patched_apply_manual_match_to_cleaned_batches(cleaned_batches, match_df):
+        cleaned_batches = _as_mutable_object_df(cleaned_batches)
+        match_df = _as_mutable_object_df(match_df)
+        return original_apply(cleaned_batches, match_df)
+
+    delivery_workflow_module.apply_manual_match_to_cleaned_batches = patched_apply_manual_match_to_cleaned_batches
+
+
 def patch_delivery_stage1(delivery_workflow_module):
     if not hasattr(delivery_workflow_module, "_original_process_stage1_raw_files_to_cleaned_batches"):
         delivery_workflow_module._original_process_stage1_raw_files_to_cleaned_batches = delivery_workflow_module.process_stage1_raw_files_to_cleaned_batches
@@ -297,4 +422,8 @@ def patch_delivery_stage1(delivery_workflow_module):
         return result
 
     delivery_workflow_module.process_stage1_raw_files_to_cleaned_batches = patched_process_stage1_raw_files_to_cleaned_batches
+    # 功能二支持“派送二报告 -> 邮编异常审核补邮编 -> 再上传重新分析”。
+    # 这里覆盖读取和匹配阶段，避免Excel读入的string/bool dtype冲突。
+    delivery_workflow_module.read_stage1_cleaned_batches = _read_stage1_or_stage2_with_audit_updates_safely
+    _wrap_stage2_match_apply(delivery_workflow_module)
     return delivery_workflow_module
