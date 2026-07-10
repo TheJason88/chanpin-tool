@@ -11,18 +11,6 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 import tool_common
 import delivery_runtime
-import delivery_destination_filter
-
-# Streamlit rerun sometimes keeps imported modules in memory.
-importlib.reload(processors)
-importlib.reload(delivery_reference)
-importlib.reload(delivery_workflow)
-importlib.reload(delivery_match_adapter)
-importlib.reload(delivery_stage1_adapter)
-importlib.reload(tool_common)
-importlib.reload(delivery_runtime)
-importlib.reload(delivery_destination_filter)
-delivery_runtime.bootstrap(delivery_workflow)
 
 VALID_WAREHOUSES = ["LA", "NJ", "SAV", "DAL"]
 PLACEHOLDER = "请填入"
@@ -30,11 +18,150 @@ DELIVERY_STAGE1_MODULE = "派送原数据处理"
 DELIVERY_STAGE2_MODULE = "派送数据匹配及分析"
 NORMAL_MODULES = ["货量分析", "提柜分析", "拆柜分析"]
 DEFAULT_PRODUCT_TYPE = "全部"
+DESTINATION_TYPES = ["全部", "FBA", "FBX"]
+
+bootstrap_error = None
+try:
+    # Streamlit rerun sometimes keeps imported modules in memory.
+    importlib.reload(processors)
+    importlib.reload(delivery_reference)
+    importlib.reload(delivery_workflow)
+    importlib.reload(delivery_match_adapter)
+    importlib.reload(delivery_stage1_adapter)
+    importlib.reload(tool_common)
+    importlib.reload(delivery_runtime)
+    delivery_runtime.bootstrap(delivery_workflow)
+except Exception as exc:
+    bootstrap_error = exc
+
+
+def _is_blank(value):
+    return processors.is_blank(value)
+
+
+def _text(value):
+    if _is_blank(value):
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in ["nan", "none", "null", "<na>"] else text
+
+
+def _numeric_value(value):
+    value = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    return 0.0 if pd.isna(value) else float(value)
+
+
+def classify_delivery_destination_type(row):
+    """
+    派送目的地类型口径：
+    FBA = 明确 Amazon/FBA 仓；FBX = 非FBA目的地。
+    同一车次混合目的地时，前置逻辑已按最大出库体积目的地覆盖识别字段。
+    """
+    product_text = " ".join(
+        _text(row.get(col, ""))
+        for col in ["主产品类型", "系统产品类型", "FBA/FBX", "实际目的地", "修正后目的地", "目的地"]
+        if col in row.index
+    ).upper()
+    fba_code_text = " ".join(
+        _text(row.get(col, ""))
+        for col in ["FBA仓点代码", "FBA仓点代码集合", "FBA仓点"]
+        if col in row.index
+    )
+    fba_volume = _numeric_value(row.get("FBA出库体积", 0))
+    fbx_volume = _numeric_value(row.get("FBX出库体积", 0))
+
+    if "仓间调拨" in product_text:
+        return "FBX"
+    if ("FBA" in product_text or "AMAZON" in product_text) and "FBX" not in product_text:
+        return "FBA"
+    if fba_code_text:
+        return "FBA"
+    if fba_volume > 0 and fbx_volume <= 0:
+        return "FBA"
+    return "FBX"
+
+
+def filter_delivery_destination_type(df, destination_type="全部"):
+    if df is None or df.empty or destination_type in [None, "", "全部"]:
+        return df
+    if destination_type not in ["FBA", "FBX"]:
+        return df
+    out = df.copy()
+    out["目的地类型"] = out.apply(classify_delivery_destination_type, axis=1)
+    return out[out["目的地类型"] == destination_type].copy()
+
+
+def rebuild_zip_audit_from_cleaned(cleaned_batches):
+    if cleaned_batches is None or cleaned_batches.empty or "目的地邮编待补充" not in cleaned_batches.columns:
+        return pd.DataFrame()
+    mask = cleaned_batches["目的地邮编待补充"].astype(str).str.lower().isin(["true", "1", "是", "yes"])
+    return cleaned_batches[mask].copy()
+
+
+def get_stage2_report_sheet_names(destination_type="全部"):
+    if destination_type == "FBA":
+        return ["货量", "FBA货量排行", "发车量", "派送时效", "成本", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
+    if destination_type == "FBX":
+        return ["货量", "FBX平台仓货量", "发车量", "派送时效", "成本", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
+    return ["货量", "FBA货量排行", "FBX平台仓货量", "发车量", "派送时效", "成本", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
+
+
+def _split_combined_report(combined):
+    if combined is None or combined.empty:
+        empty = pd.DataFrame()
+        return empty, empty, empty
+    volume = combined[combined["报告部分"].astype(str).str.startswith("1.")].copy()
+    volume = volume[~volume["指标名称"].astype(str).isin(["FBA仓点货量排行", "FBX平台仓货量排行"])]
+    dispatch = combined[combined["报告部分"].astype(str).str.startswith("2.")].copy()
+    timing = combined[combined["报告部分"].astype(str).str.startswith("3.")].copy()
+    return volume, dispatch, timing
+
+
+def build_stage2_report_for_destination(cleaned_batches, match_df=None, period_type="按周统计", destination_type="全部"):
+    matched = delivery_workflow.prepare_stage2_for_report(cleaned_batches, match_df, period_type)
+    matched = filter_delivery_destination_type(matched, destination_type)
+
+    combined = delivery_workflow.build_sheet1_volume_dispatch_time_report(matched)
+    volume, dispatch, timing = _split_combined_report(combined)
+    cost = delivery_match_adapter.build_station_cost_report(matched)
+    zip_audit = matched[matched["目的地邮编待补充"]].copy() if "目的地邮编待补充" in matched.columns else pd.DataFrame()
+
+    report = {"货量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(volume, "货量"), "货量")}
+    if destination_type in ["全部", "FBA"]:
+        report["FBA货量排行"] = delivery_match_adapter._safe_round(
+            delivery_match_adapter._finalize_sheet(delivery_match_adapter.build_fba_rank_sheet(matched), "FBA货量排行"),
+            "FBA货量排行",
+        )
+    if destination_type in ["全部", "FBX"]:
+        report["FBX平台仓货量"] = delivery_match_adapter._safe_round(
+            delivery_match_adapter._finalize_sheet(delivery_match_adapter.build_fbx_platform_warehouse_sheet(matched), "FBX平台仓货量"),
+            "FBX平台仓货量",
+        )
+    report.update({
+        "发车量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(dispatch, "发车量"), "发车量"),
+        "派送时效": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(timing, "派送时效"), "派送时效"),
+        "成本": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(cost, "成本"), "成本"),
+        "派送二_匹配后合并数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(matched, "明细"), "明细"),
+        "邮编异常审核": delivery_match_adapter._finalize_zip_audit_sheet(zip_audit),
+        "区域识别规则": delivery_workflow.REGION_RULES_DF,
+        "干线识别规则": delivery_workflow.LINEHAUL_RULES,
+    })
+
+    ordered = {}
+    for sheet in get_stage2_report_sheet_names(destination_type):
+        if sheet in report:
+            ordered[sheet] = report[sheet]
+    return ordered
+
 
 st.set_page_config(page_title="美盈产品数据处理工具", layout="wide")
 st.title("美盈产品数据处理工具")
 st.write("请选择分析维度并上传对应 Excel，系统将自动清洗、筛选、汇总并生成结果文件。")
 st.divider()
+
+if bootstrap_error is not None:
+    st.error("工具初始化补丁加载失败，页面已进入保护模式。请刷新；如果持续出现，请联系维护。")
+    st.exception(bootstrap_error)
 
 warehouse = st.selectbox("1. 选择仓点", [PLACEHOLDER, "LA", "NJ", "SAV", "DAL", "全部"], index=0)
 analysis_module = st.selectbox(
@@ -43,11 +170,10 @@ analysis_module = st.selectbox(
     index=0,
 )
 
-# 普通模块不做产品类型筛选；派送模块按目的地类型筛选。
 product_type = DEFAULT_PRODUCT_TYPE
 delivery_destination_type = "全部"
 if analysis_module in [DELIVERY_STAGE1_MODULE, DELIVERY_STAGE2_MODULE]:
-    delivery_destination_type = st.selectbox("3. 选择目的地类型", delivery_destination_filter.DESTINATION_TYPES, index=0)
+    delivery_destination_type = st.selectbox("3. 选择目的地类型", DESTINATION_TYPES, index=0)
 
 period_type = "不适用"
 date_range = None
@@ -69,11 +195,10 @@ st.caption(
     "派送原数据处理=全量出库数据清洗，不做时间筛选；只负责合并、剔除无效批次、识别FTL/LTL、FTL按车次号合并、识别FBA/FBX与邮编。"
     "同一FTL车次混多个目的地时，目的地识别字段按该车次内出库体积最大的明细行覆盖。"
     "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
-    "派送数据匹配及分析支持两种输入：一是派送一结果+一个或多个鲲运匹配列表；二是上一次派送二报告，在邮编异常审核表中补充邮编后直接重新上传。"
     "6B支持多文件上传；结构完全相同的匹配文件默认纵向合并，结构不同的文件按字段并集合并并保留来源文件名。"
     "邮编异常审核表请填写“补充标准邮编”，可选填写“补充目的州”。工具会把补入邮编的数据合并回分析主表重新计算。"
-    "干线识别优先读车次/批次备注中的 NJ / SAV / DAL，再读调拨目标仓和邮编规则。干线只对LA仓派送分析生效。"
-    "LTL不计入发车数，只参与方数结构；邮编列按文本处理；四位邮编自动补0。FTL车型缺失默认53尺大车；同车次装车类型同时出现卡板和地板时，聚合后按地板。"
+    "干线识别优先读车次/批次备注中的 NJ / SAV / DAL，再读调拨目标仓和邮编规则。"
+    "LTL不计入发车数，只参与方数结构；邮编列按文本处理；四位邮编自动补0。"
 )
 
 
@@ -116,7 +241,6 @@ def read_first_sheet(uploaded_file):
 
 
 def combine_uploaded_match_files(match_files):
-    """6B匹配文件多文件合并：同结构直接纵向合并；不同结构按字段并集合并。"""
     if not match_files:
         return pd.DataFrame(), "未上传6B匹配文件"
     frames = []
@@ -174,8 +298,8 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
                     start_date=None,
                     end_date=None,
                 )
-                cleaned_batches = delivery_destination_filter.filter_delivery_destination_type(cleaned_batches, delivery_destination_type)
-                zip_audit_df = delivery_destination_filter.rebuild_zip_audit_from_cleaned(cleaned_batches)
+                cleaned_batches = filter_delivery_destination_type(cleaned_batches, delivery_destination_type)
+                zip_audit_df = rebuild_zip_audit_from_cleaned(cleaned_batches)
 
                 st.subheader("清洗后数据预览")
                 st.dataframe(cleaned_batches.head(100), use_container_width=True)
@@ -217,13 +341,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
                 if delivery_destination_type == "全部":
                     metrics = delivery_workflow.process_stage2_analysis(cleaned_batches, match_df, period_type=period_type)
                 else:
-                    metrics = delivery_destination_filter.build_stage2_report_for_destination(
-                        delivery_workflow,
-                        cleaned_batches,
-                        match_df=match_df,
-                        period_type=period_type,
-                        destination_type=delivery_destination_type,
-                    )
+                    metrics = build_stage2_report_for_destination(cleaned_batches, match_df=match_df, period_type=period_type, destination_type=delivery_destination_type)
                 report_sheets = list(metrics.keys())
                 st.success("派送分析报告已生成，详细结果请下载Excel查看。")
                 st.write(f"报告结构：{'、'.join(report_sheets)}。当前目的地类型：{delivery_destination_type}")
