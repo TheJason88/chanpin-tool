@@ -55,7 +55,7 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
     st.info("派送原数据处理执行全量清洗，不按时间范围筛选；可按目的地类型筛选：全部 / FBA / FBX。")
 elif analysis_module == DELIVERY_STAGE2_MODULE:
     period_type = st.selectbox("4. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0)
-    st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。选择全部时结果与原逻辑一致；选择FBA/FBX时会剔除另一类目的地。")
+    st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。选择全部时输出FBA和FBX专项表；选择FBA/FBX时只输出对应目的地的专项表。")
 elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
     period_type = st.selectbox("3. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0)
     today = date.today()
@@ -68,6 +68,7 @@ st.caption(
     "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
     "派送原数据处理=全量出库数据清洗，不做时间筛选；只负责合并、剔除无效批次、识别FTL/LTL、FTL按车次号合并、识别FBA/FBX与邮编。"
     "同一FTL车次混多个目的地时，目的地识别字段按该车次内出库体积最大的明细行覆盖。"
+    "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
     "派送数据匹配及分析支持两种输入：一是派送一结果+一个或多个鲲运匹配列表；二是上一次派送二报告，在邮编异常审核表中补充邮编后直接重新上传。"
     "6B支持多文件上传；结构完全相同的匹配文件默认纵向合并，结构不同的文件按字段并集合并并保留来源文件名。"
     "邮编异常审核表请填写“补充标准邮编”，可选填写“补充目的州”。工具会把补入邮编的数据合并回分析主表重新计算。"
@@ -223,8 +224,9 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
                         period_type=period_type,
                         destination_type=delivery_destination_type,
                     )
+                report_sheets = list(metrics.keys())
                 st.success("派送分析报告已生成，详细结果请下载Excel查看。")
-                st.write(f"报告结构：货量、FBA货量排行、FBX平台仓货量、发车量、派送时效、成本。当前目的地类型：{delivery_destination_type}")
+                st.write(f"报告结构：{'、'.join(report_sheets)}。当前目的地类型：{delivery_destination_type}")
                 output = tool_common.write_sheets_to_excel(metrics)
                 file_name = tool_common.build_output_filename(warehouse, DELIVERY_STAGE2_MODULE, delivery_destination_type, period_type)
                 st.download_button("下载派送分析报告 Excel", output, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
