@@ -4,13 +4,28 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-import processors
-import delivery_reference
-import delivery_workflow
-import delivery_match_adapter
-import delivery_stage1_adapter
-import tool_common
-import delivery_runtime
+st.set_page_config(page_title="美盈产品数据处理工具", layout="wide")
+st.title("美盈产品数据处理工具")
+st.write("请选择分析维度并上传对应 Excel，系统将自动清洗、筛选、汇总并生成结果文件。")
+st.divider()
+
+# 先让页面本身稳定打开；自定义模块导入失败时在页面内显示错误，避免 Streamlit 直接 Oh no 白屏。
+_dependency_error = None
+try:
+    import processors
+    import delivery_reference
+    import delivery_workflow
+    import delivery_match_adapter
+    import delivery_stage1_adapter
+    import tool_common
+    import delivery_runtime
+except Exception as exc:
+    _dependency_error = exc
+
+if _dependency_error is not None:
+    st.error("工具启动失败：基础模块导入失败。页面已进入保护模式，下面是具体错误。")
+    st.exception(_dependency_error)
+    st.stop()
 
 VALID_WAREHOUSES = ["LA", "NJ", "SAV", "DAL"]
 PLACEHOLDER = "请填入"
@@ -20,7 +35,7 @@ NORMAL_MODULES = ["货量分析", "提柜分析", "拆柜分析"]
 DEFAULT_PRODUCT_TYPE = "全部"
 DESTINATION_TYPES = ["全部", "FBA", "FBX"]
 
-bootstrap_error = None
+_bootstrap_error = None
 try:
     # Streamlit rerun sometimes keeps imported modules in memory.
     importlib.reload(processors)
@@ -32,7 +47,12 @@ try:
     importlib.reload(delivery_runtime)
     delivery_runtime.bootstrap(delivery_workflow)
 except Exception as exc:
-    bootstrap_error = exc
+    _bootstrap_error = exc
+
+if _bootstrap_error is not None:
+    st.error("工具启动失败：派送运行时规则加载失败。页面已进入保护模式，下面是具体错误。")
+    st.exception(_bootstrap_error)
+    st.stop()
 
 
 def _is_blank(value):
@@ -154,54 +174,6 @@ def build_stage2_report_for_destination(cleaned_batches, match_df=None, period_t
     return ordered
 
 
-st.set_page_config(page_title="美盈产品数据处理工具", layout="wide")
-st.title("美盈产品数据处理工具")
-st.write("请选择分析维度并上传对应 Excel，系统将自动清洗、筛选、汇总并生成结果文件。")
-st.divider()
-
-if bootstrap_error is not None:
-    st.error("工具初始化补丁加载失败，页面已进入保护模式。请刷新；如果持续出现，请联系维护。")
-    st.exception(bootstrap_error)
-
-warehouse = st.selectbox("1. 选择仓点", [PLACEHOLDER, "LA", "NJ", "SAV", "DAL", "全部"], index=0)
-analysis_module = st.selectbox(
-    "2. 选择分析模块",
-    [PLACEHOLDER, "货量分析", "提柜分析", "拆柜分析", DELIVERY_STAGE1_MODULE, DELIVERY_STAGE2_MODULE],
-    index=0,
-)
-
-product_type = DEFAULT_PRODUCT_TYPE
-delivery_destination_type = "全部"
-if analysis_module in [DELIVERY_STAGE1_MODULE, DELIVERY_STAGE2_MODULE]:
-    delivery_destination_type = st.selectbox("3. 选择目的地类型", DESTINATION_TYPES, index=0)
-
-period_type = "不适用"
-date_range = None
-if analysis_module == DELIVERY_STAGE1_MODULE:
-    st.info("派送原数据处理执行全量清洗，不按时间范围筛选；可按目的地类型筛选：全部 / FBA / FBX。")
-elif analysis_module == DELIVERY_STAGE2_MODULE:
-    period_type = st.selectbox("4. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0)
-    st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。选择全部时输出FBA和FBX专项表；选择FBA/FBX时只输出对应目的地的专项表。")
-elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
-    period_type = st.selectbox("3. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0)
-    today = date.today()
-    month_start = today.replace(day=1)
-    date_range = st.date_input("4. 选择时间范围", value=(month_start, today), format="YYYY-MM-DD")
-
-st.caption(
-    "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间。"
-    "普通模块不做产品类型筛选，统一按上传文件中的全部有效数据处理。"
-    "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
-    "派送原数据处理=全量出库数据清洗，不做时间筛选；只负责合并、剔除无效批次、识别FTL/LTL、FTL按车次号合并、识别FBA/FBX与邮编。"
-    "同一FTL车次混多个目的地时，目的地识别字段按该车次内出库体积最大的明细行覆盖。"
-    "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
-    "6B支持多文件上传；结构完全相同的匹配文件默认纵向合并，结构不同的文件按字段并集合并并保留来源文件名。"
-    "邮编异常审核表请填写“补充标准邮编”，可选填写“补充目的州”。工具会把补入邮编的数据合并回分析主表重新计算。"
-    "干线识别优先读车次/批次备注中的 NJ / SAV / DAL，再读调拨目标仓和邮编规则。"
-    "LTL不计入发车数，只参与方数结构；邮编列按文本处理；四位邮编自动补0。"
-)
-
-
 def selected_date_range_is_valid(value):
     return isinstance(value, (tuple, list)) and len(value) == 2 and value[0] is not None and value[1] is not None
 
@@ -263,6 +235,40 @@ def combine_uploaded_match_files(match_files):
 def sanitize_stage2_input_df(df):
     return tool_common.ensure_object_df(df)
 
+
+warehouse = st.selectbox("1. 选择仓点", [PLACEHOLDER, "LA", "NJ", "SAV", "DAL", "全部"], index=0)
+analysis_module = st.selectbox(
+    "2. 选择分析模块",
+    [PLACEHOLDER, "货量分析", "提柜分析", "拆柜分析", DELIVERY_STAGE1_MODULE, DELIVERY_STAGE2_MODULE],
+    index=0,
+)
+
+product_type = DEFAULT_PRODUCT_TYPE
+delivery_destination_type = "全部"
+if analysis_module in [DELIVERY_STAGE1_MODULE, DELIVERY_STAGE2_MODULE]:
+    delivery_destination_type = st.selectbox("3. 选择目的地类型", DESTINATION_TYPES, index=0)
+
+period_type = "不适用"
+date_range = None
+if analysis_module == DELIVERY_STAGE1_MODULE:
+    st.info("派送原数据处理执行全量清洗，不按时间范围筛选；可按目的地类型筛选：全部 / FBA / FBX。")
+elif analysis_module == DELIVERY_STAGE2_MODULE:
+    period_type = st.selectbox("4. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0)
+    st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。选择全部时输出FBA和FBX专项表；选择FBA/FBX时只输出对应目的地的专项表。")
+elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
+    period_type = st.selectbox("3. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0)
+    today = date.today()
+    month_start = today.replace(day=1)
+    date_range = st.date_input("4. 选择时间范围", value=(month_start, today), format="YYYY-MM-DD")
+
+st.caption(
+    "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间。"
+    "普通模块不做产品类型筛选，统一按上传文件中的全部有效数据处理。"
+    "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
+    "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
+    "6B支持多文件上传；结构完全相同的匹配文件默认纵向合并。"
+    "邮编异常审核表请填写“补充标准邮编”，可选填写“补充目的州”。"
+)
 
 selection_complete = warehouse != PLACEHOLDER and analysis_module != PLACEHOLDER
 if analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
