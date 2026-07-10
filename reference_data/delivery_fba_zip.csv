@@ -1,15 +1,25 @@
 FBA仓点代码,目的地示例,地址,邮编,邮编前三位,州,站点名称
+ABE4,Amazon-ABE4,"城市级候选ZIP，待复核：Easton, PA",18045,180,PA,Amazon/ABE4
 ABE8,Amazon-ABE8,,08518,085,NJ,Amazon/ABE8
 ABQ2,Amazon-ABQ2,,87031,870,NM,Amazon/ABQ2
 ACY2,Amazon-ACY2,1101 E Pearl St,08016,080,NJ,Amazon/ACY2
+AKR1,Amazon-AKR1,"城市级候选ZIP，待复核：Canton / North Canton, OH",44720,447,OH,Amazon/AKR1
 ALB1,Amazon-ALB1,"1835 US Route 9, Castleton, NY",12033,120,NY,Amazon/ALB1
 AVP1,Amazon-AVP1,,18202,182,PA,Amazon/AVP1
 BFI3,Amazon-BFI3,,98327,983,WA,Amazon/BFI3
+BNA2,Amazon-BNA2,"城市级候选ZIP，待复核：Lebanon, TN",37090,370,TN,Amazon/BNA2
 BNA6,Amazon-BNA6,,37040,370,TN,Amazon/BNA6
+BOS7,Amazon-BOS7,"城市级候选ZIP，待复核：Fall River, MA",02720,027,MA,Amazon/BOS7
+BWI4,Amazon-BWI4,"城市级候选ZIP，待复核：Clear Brook, VA",22624,226,VA,Amazon/BWI4
+CHA2,Amazon-CHA2,"城市级候选ZIP，待复核：Charleston, TN",37310,373,TN,Amazon/CHA2
 CLT2,Amazon-CLT2,,28214,282,NC,Amazon/CLT2
+CLT3,Amazon-CLT3,"城市级候选ZIP，待复核：Kannapolis, NC",28083,280,NC,Amazon/CLT3
 CMH2,Amazon-CMH2,"6050 Gateway Court, Groveport, OH",43125,431,OH,Amazon/CMH2
+CMH3,Amazon-CMH3,"城市级候选ZIP，待复核：Monroe, OH",45050,450,OH,Amazon/CMH3
 DCA6,Amazon-DCA6,"6001 Bethlehem Blvd, Baltimore, MD",21219,212,MD,Amazon/DCA6
 DEN8,Amazon-DEN8,,80018,800,CO,Amazon/DEN8
+DET1,Amazon-DET1,"城市级候选ZIP，待复核：Livonia, MI",48150,481,MI,Amazon/DET1
+DET2,Amazon-DET2,"城市级候选ZIP，待复核：Shelby Charter Township, MI",48315,483,MI,Amazon/DET2
 DFW6,Amazon-DFW6,"940 W Bethel Rd, Coppell, TX",75019,750,TX,Amazon/DFW6
 DTW3,Amazon-DTW3,"33701 Prescott Road, MI",48174,481,MI,Amazon/DTW3
 FAT2,Amazon-FAT2,,93291,932,CA,Amazon/FAT2
@@ -21,14 +31,18 @@ FWA4,Amazon-FWA4,,46809,468,IN,Amazon/FWA4
 GEG2,Amazon-GEG2,,99216,992,WA,Amazon/GEG2
 GEU2,Amazon-GEU2,,85307,853,AZ,Amazon/GEU2
 GEU3,Amazon-GEU3,,85396,853,AZ,Amazon/GEU3
+GSO1,Amazon-GSO1,"城市级候选ZIP，待复核：Kernersville, NC",27284,272,NC,Amazon/GSO1
 GYR2,Amazon-GYR2,,85395,853,AZ,Amazon/GYR2
 GYR3,Amazon-GYR3,,85043,850,AZ,Amazon/GYR3
 HEA2,Amazon-HEA2,,18031,180,PA,Amazon/HEA2
+HIA1,Amazon-HIA1,"城市级候选ZIP，待复核：Middletown, PA",17057,170,PA,Amazon/HIA1
 HLI2,Amazon-HLI2,,95023,950,CA,Amazon/HLI2
 HOU8,Amazon-HOU8,"2303 Hurricane Lane, Fresno, TX",77545,775,TX,Amazon/HOU8
+HSV1,Amazon-HSV1,"城市级候选ZIP，待复核：Madison / Huntsville, AL",35756,357,AL,Amazon/HSV1
 IAH3,Amazon-IAH3,,77032,770,TX,Amazon/IAH3
 ICT2,Amazon-ICT2,,67219,672,KS,Amazon/ICT2
 IGQ2,Amazon-IGQ2,"23289 S Central Ave, IL",60449,604,IL,Amazon/IGQ2
+ILG1,Amazon-ILG1,"城市级候选ZIP，待复核：Bear, DE",19701,197,DE,Amazon/ILG1
 IND5,Amazon-IND5,"800 Perry Road, Plainfield, IN",46168,461,IN,Amazon/IND5
 IND9,Amazon-IND9,,46143,461,IN,Amazon/IND9
 IUSF,Amazon-IUSF,"3351 Balmorhea Dr, Dallas, TX",75241,752,TX,Amazon/IUSF
@@ -37,17 +51,26 @@ IUSP,Amazon-IUSP,,92344,923,CA,Amazon/IUSP
 IUSQ,Amazon-IUSQ,,92374,923,CA,Amazon/IUSQ
 IUSW,Amazon-IUSW,,92344,923,CA,Amazon/IUSW
 IUTE,Amazon-IUTE,,85338,853,AZ,Amazon/IUTE
+JAX3,Amazon-JAX3,"城市级候选ZIP，待复核：Jacksonville, FL",32210,322,FL,Amazon/JAX3
+JVL1,Amazon-JVL1,"城市级候选ZIP，待复核：Beloit, WI",53511,535,WI,Amazon/JVL1
 LAS1,Amazon-LAS1,,89044,890,NV,Amazon/LAS1
 LAS6,Amazon-LAS6,,89115,891,NV,Amazon/LAS6
 LAX9,Amazon-LAX9,,92337,923,CA,Amazon/LAX9
+LBE1,Amazon-LBE1,"城市级候选ZIP，待复核：New Stanton, PA",15672,156,PA,Amazon/LBE1
+LFT1,Amazon-LFT1,"城市级候选ZIP，待复核：Carencro, LA",70520,705,LA,Amazon/LFT1
 LGB4,Amazon-LGB4,,92374,923,CA,Amazon/LGB4
 LGB8,Amazon-LGB8,,92376,923,CA,Amazon/LGB8
 LIT2,Amazon-LIT2,,72117,721,AR,Amazon/LIT2
 MCC1,Amazon-MCC1,,95742,957,CA,Amazon/MCC1
 MCE1,Amazon-MCE1,,95380,953,CA,Amazon/MCE1
+MCO2,Amazon-MCO2,"城市级候选ZIP，待复核：Deltona, FL",32725,327,FL,Amazon/MCO2
+MDT1,Amazon-MDT1,"城市级候选ZIP，待复核：Carlisle, PA",17015,170,PA,Amazon/MDT1
+MDT4,Amazon-MDT4,"城市级候选ZIP，待复核：York, PA",17406,174,PA,Amazon/MDT4
 MDW2,Amazon-MDW2,,60433,604,IL,Amazon/MDW2
+MDW6,Amazon-MDW6,"城市级候选ZIP，待复核：Romeoville, IL",60446,604,IL,Amazon/MDW6
 MDW8,Amazon-MDW8,,60085,600,IL,Amazon/MDW8
 MEM1,Amazon-MEM1,,38118,381,TN,Amazon/MEM1
+MGE3,Amazon-MGE3,"城市级候选ZIP，待复核：Jefferson, GA",30549,305,GA,Amazon/MGE3
 MIT2,Amazon-MIT2,,93263,932,CA,Amazon/MIT2
 MQJ1,Amazon-MQJ1,,46140,461,IN,Amazon/MQJ1
 MQJ2,Amazon-MQJ2,"19 Bob Glidden Blvd, IN",46184,461,IN,Amazon/MQJ2
@@ -57,10 +80,13 @@ OLM1,Amazon-OLM1,,98516,985,WA,Amazon/OLM1
 ONT8,Amazon-ONT8,,92551,925,CA,Amazon/ONT8
 ORD2,Amazon-ORD2,,60410,604,IL,Amazon/ORD2
 ORF2,Amazon-ORF2,,23321,233,VA,Amazon/ORF2
+PBI2,Amazon-PBI2,"城市级候选ZIP，待复核：Jupiter, FL",33458,334,FL,Amazon/PBI2
 PDX6,Amazon-PDX6,,97203,972,OR,Amazon/PDX6
 PDX7,Amazon-PDX7,,97317,973,OR,Amazon/PDX7
+PHL4,Amazon-PHL4,"城市级候选ZIP，待复核：Carlisle, PA",17015,170,PA,Amazon/PHL4
 PHX5,Amazon-PHX5,,85338,853,AZ,Amazon/PHX5
 PHX7,Amazon-PHX7,,85043,850,AZ,Amazon/PHX7
+PIT2,Amazon-PIT2,"城市级候选ZIP，待复核：Imperial / Findlay Township, PA",15126,151,PA,Amazon/PIT2
 POC1,Amazon-POC1,,92336,923,CA,Amazon/POC1
 POC2,Amazon-POC2,,91761,917,CA,Amazon/POC2
 POC3,Amazon-POC3,,92509,925,CA,Amazon/POC3
@@ -68,6 +94,7 @@ PSC2,Amazon-PSC2,,99301,993,WA,Amazon/PSC2
 PSP3,Amazon-PSP3,,92240,922,CA,Amazon/PSP3
 QXY8,Amazon-QXY8,,93725,937,CA,Amazon/QXY8
 RDU2,Amazon-RDU2,,27577,275,NC,Amazon/RDU2
+RFD4,Amazon-RFD4,"城市级候选ZIP，待复核：Huntley, IL",60142,601,IL,Amazon/RFD4
 SAT1,Amazon-SAT1,,78154,781,TX,Amazon/SAT1
 SAT4,Amazon-SAT4,"10384 W US Highway 90, San Antonio, TX",78245,782,TX,Amazon/SAT4
 SBD1,Amazon-SBD1,,92316,923,CA,Amazon/SBD1
@@ -86,8 +113,12 @@ TCY1,Amazon-TCY1,,95206,952,CA,Amazon/TCY1
 TCY2,Amazon-TCY2,,95215,952,CA,Amazon/TCY2
 TEB3,Amazon-TEB3,"2651 Oldmans Creek Rd, Logan Township, NJ",08085,080,NJ,Amazon/TEB3
 TEB4,Amazon-TEB4,"742 Courses Landing Rd, Swedesboro, NJ",08069,080,NJ,Amazon/TEB4
+TEB6,Amazon-TEB6,"城市级候选ZIP，待复核：Cranbury, NJ",08512,085,NJ,Amazon/TEB6
 TEB9,Amazon-TEB9,,08873,088,NJ,Amazon/TEB9
 TOL3,Amazon-TOL3,,43551,435,OH,Amazon/TOL3
+TPA2,Amazon-TPA2,"城市级候选ZIP，待复核：Lakeland, FL",33811,338,FL,Amazon/TPA2
+TPA3,Amazon-TPA3,"城市级候选ZIP，待复核：Auburndale, FL",33823,338,FL,Amazon/TPA3
+TPA6,Amazon-TPA6,"城市级候选ZIP，待复核：Ocala, FL",34475,344,FL,Amazon/TPA6
 VGT2,Amazon-VGT2,,89115,891,NV,Amazon/VGT2
 XLX1,Amazon-XLX1,"3931 Lakeview Corporate Dr, Edwardsville, IL",62025,620,IL,Amazon/XLX1
 XLX7,Amazon-XLX7,,92394,923,CA,Amazon/XLX7
