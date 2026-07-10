@@ -86,7 +86,8 @@ st.caption(
     "无效批次审核包含非卡车派送、批次状态无效，以及派送方式为卡车配送但备注含废单/取消/作废/无效/删除/关闭等关键词的记录。"
     "第二步“派送数据匹配及分析”上传第一步结果和人工补充目的地文件，补齐商业/私人地址邮编后，再严格按周/月输出Excel分析报告。"
     "第二步匹配文件支持鲲运导出列表格式，字段可为批次号 + 邮编/目的地邮编/标准邮编 + 省/州/州/目的州；同一批次多个邮编会全部保留。"
-    "工具已内置FBA仓点邮编表、平台仓邮编表和干线识别规则。干线只对LA仓派送分析生效：NJ=070-089，Dallas=750-753，Chicago=606xx，Savannah=314xx。"
+    "干线识别优先读车次/批次备注中的 NJ / SAV / DAL，再读邮编规则。干线只对LA仓派送分析生效。"
+    "工具已内置FBA仓点邮编表、平台仓邮编表和干线识别规则。干线邮编规则：NJ=070-089，Dallas=750-753，Chicago=606xx，Savannah=314xx。"
     "LTL不计入发车数，只参与方数结构；邮编列按文本处理；四位邮编自动补0。FTL车型缺失默认53尺大车；同车次装车类型同时出现卡板和地板时，聚合后按地板。"
 )
 
@@ -274,7 +275,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
                 metrics = delivery_workflow.process_stage2_analysis(cleaned_batches, match_df, period_type=period_type)
 
                 st.success("派送分析报告已生成，详细结果请下载Excel查看。")
-                st.write("报告结构：表一=货量、发车量、派送时效；表二=成本。")
+                st.write("报告结构：货量、发车量、派送时效、成本四张核心表。")
 
                 output = write_sheets_to_excel(metrics)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
