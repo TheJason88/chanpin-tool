@@ -6,6 +6,57 @@ import delivery_match_adapter
 
 DESTINATION_TYPES = ["全部", "FBA", "FBX"]
 
+BASE_STAGE2_SHEETS = [
+    "货量",
+    "发车量",
+    "派送时效",
+    "成本",
+    "派送二_匹配后合并数据",
+    "邮编异常审核",
+    "区域识别规则",
+    "干线识别规则",
+]
+
+
+def get_stage2_report_sheet_names(destination_type="全部"):
+    """Return the exact report-sheet structure for the selected delivery destination type."""
+    if destination_type == "FBA":
+        return [
+            "货量",
+            "FBA货量排行",
+            "发车量",
+            "派送时效",
+            "成本",
+            "派送二_匹配后合并数据",
+            "邮编异常审核",
+            "区域识别规则",
+            "干线识别规则",
+        ]
+    if destination_type == "FBX":
+        return [
+            "货量",
+            "FBX平台仓货量",
+            "发车量",
+            "派送时效",
+            "成本",
+            "派送二_匹配后合并数据",
+            "邮编异常审核",
+            "区域识别规则",
+            "干线识别规则",
+        ]
+    return [
+        "货量",
+        "FBA货量排行",
+        "FBX平台仓货量",
+        "发车量",
+        "派送时效",
+        "成本",
+        "派送二_匹配后合并数据",
+        "邮编异常审核",
+        "区域识别规则",
+        "干线识别规则",
+    ]
+
 
 def _is_blank(value):
     return processors.is_blank(value)
@@ -75,26 +126,43 @@ def rebuild_zip_audit_from_cleaned(cleaned_batches):
     return cleaned_batches[mask].copy()
 
 
+def _split_combined_report(combined):
+    if combined is None or combined.empty:
+        empty = pd.DataFrame()
+        return empty, empty, empty
+    volume = combined[combined["报告部分"].astype(str).str.startswith("1.")].copy()
+    volume = volume[~volume["指标名称"].astype(str).isin(["FBA仓点货量排行", "FBX平台仓货量排行"])]
+    dispatch = combined[combined["报告部分"].astype(str).str.startswith("2.")].copy()
+    timing = combined[combined["报告部分"].astype(str).str.startswith("3.")].copy()
+    return volume, dispatch, timing
+
+
 def build_stage2_report_for_destination(delivery_workflow_module, cleaned_batches, match_df=None, period_type="按周统计", destination_type="全部"):
     matched = delivery_workflow_module.prepare_stage2_for_report(cleaned_batches, match_df, period_type)
     matched = filter_delivery_destination_type(matched, destination_type)
 
     combined = delivery_workflow_module.build_sheet1_volume_dispatch_time_report(matched)
-    if combined.empty:
-        volume = dispatch = timing = combined.copy()
-    else:
-        volume = combined[combined["报告部分"].astype(str).str.startswith("1.")].copy()
-        volume = volume[~volume["指标名称"].astype(str).isin(["FBA仓点货量排行", "FBX平台仓货量排行"])]
-        dispatch = combined[combined["报告部分"].astype(str).str.startswith("2.")].copy()
-        timing = combined[combined["报告部分"].astype(str).str.startswith("3.")].copy()
-
+    volume, dispatch, timing = _split_combined_report(combined)
     cost = delivery_match_adapter.build_station_cost_report(matched)
     zip_audit = matched[matched["目的地邮编待补充"]].copy() if "目的地邮编待补充" in matched.columns else pd.DataFrame()
 
-    return {
+    report = {
         "货量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(volume, "货量"), "货量"),
-        "FBA货量排行": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(delivery_match_adapter.build_fba_rank_sheet(matched), "FBA货量排行"), "FBA货量排行"),
-        "FBX平台仓货量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(delivery_match_adapter.build_fbx_platform_warehouse_sheet(matched), "FBX平台仓货量"), "FBX平台仓货量"),
+    }
+
+    if destination_type in ["全部", "FBA"]:
+        report["FBA货量排行"] = delivery_match_adapter._safe_round(
+            delivery_match_adapter._finalize_sheet(delivery_match_adapter.build_fba_rank_sheet(matched), "FBA货量排行"),
+            "FBA货量排行",
+        )
+
+    if destination_type in ["全部", "FBX"]:
+        report["FBX平台仓货量"] = delivery_match_adapter._safe_round(
+            delivery_match_adapter._finalize_sheet(delivery_match_adapter.build_fbx_platform_warehouse_sheet(matched), "FBX平台仓货量"),
+            "FBX平台仓货量",
+        )
+
+    report.update({
         "发车量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(dispatch, "发车量"), "发车量"),
         "派送时效": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(timing, "派送时效"), "派送时效"),
         "成本": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(cost, "成本"), "成本"),
@@ -102,4 +170,11 @@ def build_stage2_report_for_destination(delivery_workflow_module, cleaned_batche
         "邮编异常审核": delivery_match_adapter._finalize_zip_audit_sheet(zip_audit),
         "区域识别规则": delivery_workflow_module.REGION_RULES_DF,
         "干线识别规则": delivery_workflow_module.LINEHAUL_RULES,
-    }
+    })
+
+    # Keep output sheet order stable and aligned with selected destination type.
+    ordered = {}
+    for sheet in get_stage2_report_sheet_names(destination_type):
+        if sheet in report:
+            ordered[sheet] = report[sheet]
+    return ordered
