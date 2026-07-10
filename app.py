@@ -11,6 +11,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 import tool_common
 import delivery_runtime
+import delivery_destination_filter
 
 # Streamlit rerun sometimes keeps imported modules in memory.
 importlib.reload(processors)
@@ -20,6 +21,7 @@ importlib.reload(delivery_match_adapter)
 importlib.reload(delivery_stage1_adapter)
 importlib.reload(tool_common)
 importlib.reload(delivery_runtime)
+importlib.reload(delivery_destination_filter)
 delivery_runtime.bootstrap(delivery_workflow)
 
 VALID_WAREHOUSES = ["LA", "NJ", "SAV", "DAL"]
@@ -41,16 +43,19 @@ analysis_module = st.selectbox(
     index=0,
 )
 
-# 产品类型筛选已移除：目前各功能没有可靠依据按页面选择的产品类型筛数据，统一按全部数据处理。
+# 普通模块不做产品类型筛选；派送模块按目的地类型筛选。
 product_type = DEFAULT_PRODUCT_TYPE
+delivery_destination_type = "全部"
+if analysis_module in [DELIVERY_STAGE1_MODULE, DELIVERY_STAGE2_MODULE]:
+    delivery_destination_type = st.selectbox("3. 选择目的地类型", delivery_destination_filter.DESTINATION_TYPES, index=0)
 
 period_type = "不适用"
 date_range = None
 if analysis_module == DELIVERY_STAGE1_MODULE:
-    st.info("派送原数据处理执行全量清洗，不按时间范围筛选，也不按产品类型筛选。")
+    st.info("派送原数据处理执行全量清洗，不按时间范围筛选；可按目的地类型筛选：全部 / FBA / FBX。")
 elif analysis_module == DELIVERY_STAGE2_MODULE:
-    period_type = st.selectbox("3. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0)
-    st.info("派送数据匹配及分析按统计周期生成报告；产品类型由目的地规则自动识别，不使用页面筛选。")
+    period_type = st.selectbox("4. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0)
+    st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。选择全部时结果与原逻辑一致；选择FBA/FBX时会剔除另一类目的地。")
 elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
     period_type = st.selectbox("3. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0)
     today = date.today()
@@ -59,7 +64,8 @@ elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
 
 st.caption(
     "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间。"
-    "产品类型筛选已移除，所有功能统一按上传文件中的全部有效数据处理。"
+    "普通模块不做产品类型筛选，统一按上传文件中的全部有效数据处理。"
+    "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
     "派送原数据处理=全量出库数据清洗，不做时间筛选；只负责合并、剔除无效批次、识别FTL/LTL、FTL按车次号合并、识别FBA/FBX与邮编。"
     "同一FTL车次混多个目的地时，目的地识别字段按该车次内出库体积最大的明细行覆盖。"
     "派送数据匹配及分析支持两种输入：一是派送一结果+一个或多个鲲运匹配列表；二是上一次派送二报告，在邮编异常审核表中补充邮编后直接重新上传。"
@@ -140,7 +146,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
     selection_complete = selection_complete and period_type != PLACEHOLDER
 
 if analysis_module == DELIVERY_STAGE1_MODULE:
-    raw_files = st.file_uploader("3. 上传派送原始数据文件（可多选，格式需一致）", type=["xlsx", "xls"], accept_multiple_files=True)
+    raw_files = st.file_uploader("4. 上传派送原始数据文件（可多选，格式需一致）", type=["xlsx", "xls"], accept_multiple_files=True)
     if raw_files:
         st.success(f"已上传 {len(raw_files)} 个文件。")
     if st.button("开始处理派送原数据", type="primary"):
@@ -167,6 +173,9 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
                     start_date=None,
                     end_date=None,
                 )
+                cleaned_batches = delivery_destination_filter.filter_delivery_destination_type(cleaned_batches, delivery_destination_type)
+                zip_audit_df = delivery_destination_filter.rebuild_zip_audit_from_cleaned(cleaned_batches)
+
                 st.subheader("清洗后数据预览")
                 st.dataframe(cleaned_batches.head(100), use_container_width=True)
                 st.subheader("邮编异常数据预览")
@@ -174,22 +183,22 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
                 st.subheader("无效数据预览")
                 st.dataframe(invalid_detail.head(100), use_container_width=True)
                 output = tool_common.write_sheets_to_excel({"清洗后数据": cleaned_batches, "邮编异常数据": zip_audit_df, "无效数据": invalid_detail})
-                file_name = tool_common.build_output_filename(warehouse, DELIVERY_STAGE1_MODULE)
+                file_name = tool_common.build_output_filename(warehouse, DELIVERY_STAGE1_MODULE, delivery_destination_type)
                 st.download_button("下载派送一结果 Excel", output, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         except Exception as e:
             st.error("派送原数据处理失败，请检查文件字段、仓点选择或源数据格式。")
             st.exception(e)
 
 elif analysis_module == DELIVERY_STAGE2_MODULE:
-    stage1_file = st.file_uploader("4A. 上传派送一结果，或上传已补充邮编异常审核的派送二报告", type=["xlsx", "xls"], key="stage1_result_file")
+    stage1_file = st.file_uploader("5A. 上传派送一结果，或上传已补充邮编异常审核的派送二报告", type=["xlsx", "xls"], key="stage1_result_file")
     match_files = st.file_uploader(
-        "4B. 上传人工匹配文件（可选，可多选；鲲运导出列表也可，需含批次号 + 邮编/目的地邮编/标准邮编，可含省/州）",
+        "5B. 上传人工匹配文件（可选，可多选；鲲运导出列表也可，需含批次号 + 邮编/目的地邮编/标准邮编，可含省/州）",
         type=["xlsx", "xls"],
         accept_multiple_files=True,
         key="manual_match_file",
     )
     if match_files:
-        st.success(f"4B已上传 {len(match_files)} 个匹配文件。结构相同会自动按行合并。")
+        st.success(f"5B已上传 {len(match_files)} 个匹配文件。结构相同会自动按行合并。")
 
     if st.button("开始匹配并生成派送分析报告", type="primary"):
         try:
@@ -204,11 +213,20 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
                 match_df = sanitize_stage2_input_df(match_df)
                 if match_files:
                     st.info(merge_message)
-                metrics = delivery_workflow.process_stage2_analysis(cleaned_batches, match_df, period_type=period_type)
+                if delivery_destination_type == "全部":
+                    metrics = delivery_workflow.process_stage2_analysis(cleaned_batches, match_df, period_type=period_type)
+                else:
+                    metrics = delivery_destination_filter.build_stage2_report_for_destination(
+                        delivery_workflow,
+                        cleaned_batches,
+                        match_df=match_df,
+                        period_type=period_type,
+                        destination_type=delivery_destination_type,
+                    )
                 st.success("派送分析报告已生成，详细结果请下载Excel查看。")
-                st.write("报告结构：货量、FBA货量排行、FBX平台仓货量、发车量、派送时效、成本。")
+                st.write(f"报告结构：货量、FBA货量排行、FBX平台仓货量、发车量、派送时效、成本。当前目的地类型：{delivery_destination_type}")
                 output = tool_common.write_sheets_to_excel(metrics)
-                file_name = tool_common.build_output_filename(warehouse, DELIVERY_STAGE2_MODULE, period_type)
+                file_name = tool_common.build_output_filename(warehouse, DELIVERY_STAGE2_MODULE, delivery_destination_type, period_type)
                 st.download_button("下载派送分析报告 Excel", output, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         except Exception as e:
             st.error("派送数据匹配及分析失败，请检查派送一结果文件、匹配文件字段或批次号是否一致。")
