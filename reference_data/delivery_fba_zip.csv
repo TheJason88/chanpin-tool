@@ -79,6 +79,7 @@ MEM1,Amazon-MEM1,,38118,381,TN,Amazon/MEM1
 MEM8,Amazon-MEM8,"仅查询到邮编，具体地址待复核",38611,386,MS,Amazon/MEM8
 MGE3,Amazon-MGE3,"城市级候选ZIP，待复核：Jefferson, GA",30549,305,GA,Amazon/MGE3
 MIT2,Amazon-MIT2,,93263,932,CA,Amazon/MIT2
+MKC4,Amazon-MKC4,"城市级候选ZIP，待复核：Edgerton, KS",66021,660,KS,Amazon/MKC4
 MQJ1,Amazon-MQJ1,,46140,461,IN,Amazon/MQJ1
 MQJ2,Amazon-MQJ2,"19 Bob Glidden Blvd, IN",46184,461,IN,Amazon/MQJ2
 OAK3,Amazon-OAK3,,95363,953,CA,Amazon/OAK3
@@ -114,9 +115,11 @@ SBD3,Amazon-SBD3,,92407,924,CA,Amazon/SBD3
 SCK1,Amazon-SCK1,,95215,952,CA,Amazon/SCK1
 SCK4,Amazon-SCK4,,95215,952,CA,Amazon/SCK4
 SCK8,Amazon-SCK8,,94561,945,CA,Amazon/SCK8
+SLC2,Amazon-SLC2,"城市级候选ZIP，待复核：West Jordan, UT",84081,840,UT,Amazon/SLC2
 SMF3,Amazon-SMF3,,95206,952,CA,Amazon/SMF3
 SMF6,Amazon-SMF6,,95837,958,CA,Amazon/SMF6
 SNA4,Amazon-SNA4,,92376,923,CA,Amazon/SNA4
+STL3,Amazon-STL3,"城市级候选ZIP，待复核：Republic, MO",65738,657,MO,Amazon/STL3
 STL4,Amazon-STL4,"3050 Gateway Commerce Center Dr S, Edwardsville, IL",62025,620,IL,Amazon/STL4
 SWF1,Amazon-SWF1,"635 International Blvd, New Windsor, NY",12575,125,NY,Amazon/SWF1
 SWF2,Amazon-SWF2,,12533,125,NY,Amazon/SWF2
