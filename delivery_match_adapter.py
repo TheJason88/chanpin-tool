@@ -3,6 +3,7 @@ import re
 import pandas as pd
 
 import processors
+import delivery_reference
 
 
 STATE_ALIASES = {
@@ -65,7 +66,6 @@ def _normalize_zip(value):
 
 def _infer_linehaul_from_text(text):
     upper = str(text).upper()
-    # 优先级：更明确的SAV/DAL优先；NJ最常见但不覆盖明确SAV/DAL。
     if re.search(r"\bSAV\b|转\s*SAV|SAVANNAH", upper):
         return "LA-SAV", "车次/批次备注命中SAV"
     if re.search(r"\bDAL\b|转\s*DAL|DALLAS", upper):
@@ -81,16 +81,46 @@ def _strip_remark_columns(df):
     return df.drop(columns=[c for c in DROP_REMARK_COLS if c in df.columns], errors="ignore")
 
 
+def _fill_fba_zip_memory(df):
+    out = df.copy()
+    for col in ["标准邮编集合", "邮编前三位集合", "目的州", "邮编来源"]:
+        if col not in out.columns:
+            out[col] = ""
+    for idx, row in out.iterrows():
+        if _split_values(row.get("标准邮编集合", "")):
+            continue
+        codes = _split_values(row.get("FBA仓点代码集合", ""))
+        if not codes:
+            continue
+        zips, states = [], []
+        for code in codes:
+            ref = delivery_reference.FBA_REFERENCE_MAP.get(str(code).upper().strip())
+            if not ref:
+                continue
+            z = str(ref.get("邮编", "")).zfill(5) if str(ref.get("邮编", "")).strip() else ""
+            state = str(ref.get("州", "")).upper().strip()
+            if z and z not in zips:
+                zips.append(z)
+            if state and state not in states:
+                states.append(state)
+        if zips:
+            out.at[idx, "标准邮编集合"] = ",".join(zips)
+            out.at[idx, "邮编前三位集合"] = ",".join([z[:3] for z in zips if len(z) == 5])
+            out.at[idx, "邮编来源"] = "内置FBA仓点邮编表"
+            out.at[idx, "目的地邮编待补充"] = False
+        if states:
+            out.at[idx, "目的州"] = ",".join(states)
+    return out
+
+
 def prepare_manual_match_flexible(match_df):
     match = processors.normalize_columns(match_df).copy()
     processors.require_columns(match, ["批次号"], "人工目的地匹配文件")
-
     zip_col = _find_col(match, ["标准邮编", "目的地邮编", "邮编", "ZIP", "Zip", "zipcode", "ZipCode", "PostalCode", "Postal Code"])
     if not zip_col:
         raise ValueError("人工目的地匹配文件需要包含 标准邮编 / 目的地邮编 / 邮编 字段。")
     state_col = _find_col(match, ["目的州", "省/州", "州", "到达州", "目的地州", "State", "Destination State"])
     remark_cols = [c for c in REMARK_COLS if c in match.columns]
-
     grouped = {}
     for _, row in match.iterrows():
         batch = str(row.get("批次号", "")).strip()
@@ -113,7 +143,6 @@ def prepare_manual_match_flexible(match_df):
         for text in remarks:
             if not _is_blank(text) and str(text).strip() not in entry["remarks"]:
                 entry["remarks"].append(str(text).strip())
-
     rows = []
     for batch, entry in grouped.items():
         rows.append({
@@ -129,29 +158,25 @@ def prepare_manual_match_flexible(match_df):
 
 
 def apply_manual_match_to_cleaned_batches_flexible(cleaned_batches, match_df):
-    df = cleaned_batches.copy()
+    df = _fill_fba_zip_memory(cleaned_batches)
     match = prepare_manual_match_flexible(match_df)
     if df.empty or match.empty:
         return df
-
     match_map = match.set_index("批次号").to_dict("index")
     for col in ["目的州", "邮编来源", "匹配备注集合"]:
         if col not in df.columns:
             df[col] = ""
-
     for idx, row in df.iterrows():
         existing_zips = _split_values(row.get("标准邮编集合", ""))
         batch_ids = _split_values(row.get("批次号集合", row.get("批次号", "")))
-        zips = []
-        states = []
-        remarks = []
+        zips, states, remarks = [], [], []
         for batch in batch_ids:
             rec = match_map.get(batch)
             if not rec:
                 continue
-            for txt in _split_values(rec.get("匹配备注集合", "")):
-                if txt not in remarks:
-                    remarks.append(txt)
+            remark_text = rec.get("匹配备注集合", "")
+            if not _is_blank(remark_text) and remark_text not in remarks:
+                remarks.append(remark_text)
             if rec.get("补充邮编是否有效"):
                 for z in _split_values(rec.get("补充标准邮编", "")):
                     if z not in zips:
@@ -170,7 +195,6 @@ def apply_manual_match_to_cleaned_batches_flexible(cleaned_batches, match_df):
             df.at[idx, "目的地邮编待补充"] = False
         if states:
             df.at[idx, "目的州"] = ",".join(states)
-
     df["目的地邮编待补充"] = df["标准邮编集合"].apply(lambda x: len(_split_values(x)) == 0)
     return df
 
@@ -178,20 +202,10 @@ def apply_manual_match_to_cleaned_batches_flexible(cleaned_batches, match_df):
 def identify_linehaul_with_remark_priority(row, delivery_workflow_module):
     if str(row.get("仓库", "")).strip() not in ["LA", "美西仓", "美西二号仓", "CA"]:
         return "非LA干线", "非LA仓暂不识别LA干线"
-
-    text_parts = [
-        row.get("匹配备注集合", ""),
-        row.get("批次号集合", ""),
-        row.get("车次号", ""),
-        row.get("调入仓库", ""),
-        row.get("业务场景", ""),
-        row.get("出库类型", ""),
-    ]
+    text_parts = [row.get("匹配备注集合", ""), row.get("批次号集合", ""), row.get("车次号", ""), row.get("调入仓库", ""), row.get("业务场景", ""), row.get("出库类型", "")]
     line, reason = _infer_linehaul_from_text(" ".join(str(x) for x in text_parts if not _is_blank(x)))
     if line:
         return line, reason
-
-    # 其次保留原有调拨/邮编干线规则。
     return delivery_workflow_module._original_identify_linehaul_second_part(row)
 
 
@@ -208,15 +222,13 @@ def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_d
     matched = delivery_workflow_module.prepare_stage2_for_report(cleaned_batches, match_df, period_type)
     combined = delivery_workflow_module.build_sheet1_volume_dispatch_time_report(matched)
     cost = delivery_workflow_module.build_sheet2_cost_report(matched)
-
     if combined.empty:
         volume = dispatch = timing = combined.copy()
     else:
         volume = combined[combined["报告部分"].astype(str).str.startswith("1.")].copy()
         dispatch = combined[combined["报告部分"].astype(str).str.startswith("2.")].copy()
         timing = combined[combined["报告部分"].astype(str).str.startswith("3.")].copy()
-
-    outputs = {
+    return {
         "货量": processors.round_output_numbers(_strip_remark_columns(volume), processors.RESULT_DECIMALS),
         "发车量": processors.round_output_numbers(_strip_remark_columns(dispatch), processors.RESULT_DECIMALS),
         "派送时效": processors.round_output_numbers(_strip_remark_columns(timing), processors.RESULT_DECIMALS),
@@ -226,7 +238,6 @@ def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_d
         "区域识别规则": delivery_workflow_module.REGION_RULES_DF,
         "干线识别规则": delivery_workflow_module.LINEHAUL_RULES,
     }
-    return outputs
 
 
 def patch_delivery_workflow(delivery_workflow_module):
