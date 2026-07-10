@@ -1,12 +1,17 @@
 FBA仓点代码,目的地示例,地址,邮编,邮编前三位,州,站点名称
 ABE8,Amazon-ABE8,,08518,085,NJ,Amazon/ABE8
 ABQ2,Amazon-ABQ2,,87031,870,NM,Amazon/ABQ2
+ACY2,Amazon-ACY2,1101 E Pearl St,08016,080,NJ,Amazon/ACY2
+ALB1,Amazon-ALB1,"1835 US Route 9, Castleton, NY",12033,120,NY,Amazon/ALB1
 AVP1,Amazon-AVP1,,18202,182,PA,Amazon/AVP1
 BFI3,Amazon-BFI3,,98327,983,WA,Amazon/BFI3
 BNA6,Amazon-BNA6,,37040,370,TN,Amazon/BNA6
 CLT2,Amazon-CLT2,,28214,282,NC,Amazon/CLT2
+CMH2,Amazon-CMH2,"6050 Gateway Court, Groveport, OH",43125,431,OH,Amazon/CMH2
+DCA6,Amazon-DCA6,"6001 Bethlehem Blvd, Baltimore, MD",21219,212,MD,Amazon/DCA6
 DEN8,Amazon-DEN8,,80018,800,CO,Amazon/DEN8
 DFW6,Amazon-DFW6,"940 W Bethel Rd, Coppell, TX",75019,750,TX,Amazon/DFW6
+DTW3,Amazon-DTW3,"33701 Prescott Road, MI",48174,481,MI,Amazon/DTW3
 FAT2,Amazon-FAT2,,93291,932,CA,Amazon/FAT2
 FOE1,Amazon-FOE1,,66109,661,KS,Amazon/FOE1
 FTW1,Amazon-FTW1,,75241,752,TX,Amazon/FTW1
@@ -23,6 +28,8 @@ HLI2,Amazon-HLI2,,95023,950,CA,Amazon/HLI2
 HOU8,Amazon-HOU8,"2303 Hurricane Lane, Fresno, TX",77545,775,TX,Amazon/HOU8
 IAH3,Amazon-IAH3,,77032,770,TX,Amazon/IAH3
 ICT2,Amazon-ICT2,,67219,672,KS,Amazon/ICT2
+IGQ2,Amazon-IGQ2,"23289 S Central Ave, IL",60449,604,IL,Amazon/IGQ2
+IND5,Amazon-IND5,"800 Perry Road, Plainfield, IN",46168,461,IN,Amazon/IND5
 IND9,Amazon-IND9,,46143,461,IN,Amazon/IND9
 IUSF,Amazon-IUSF,"3351 Balmorhea Dr, Dallas, TX",75241,752,TX,Amazon/IUSF
 IUSJ,Amazon-IUSJ,,92223,922,CA,Amazon/IUSJ
@@ -43,6 +50,7 @@ MDW8,Amazon-MDW8,,60085,600,IL,Amazon/MDW8
 MEM1,Amazon-MEM1,,38118,381,TN,Amazon/MEM1
 MIT2,Amazon-MIT2,,93263,932,CA,Amazon/MIT2
 MQJ1,Amazon-MQJ1,,46140,461,IN,Amazon/MQJ1
+MQJ2,Amazon-MQJ2,"19 Bob Glidden Blvd, IN",46184,461,IN,Amazon/MQJ2
 OAK3,Amazon-OAK3,,95363,953,CA,Amazon/OAK3
 OKC2,Amazon-OKC2,,73159,731,OK,Amazon/OKC2
 OLM1,Amazon-OLM1,,98516,985,WA,Amazon/OLM1
@@ -72,10 +80,14 @@ SMF3,Amazon-SMF3,,95206,952,CA,Amazon/SMF3
 SMF6,Amazon-SMF6,,95837,958,CA,Amazon/SMF6
 SNA4,Amazon-SNA4,,92376,923,CA,Amazon/SNA4
 STL4,Amazon-STL4,"3050 Gateway Commerce Center Dr S, Edwardsville, IL",62025,620,IL,Amazon/STL4
+SWF1,Amazon-SWF1,"635 International Blvd, New Windsor, NY",12575,125,NY,Amazon/SWF1
 SWF2,Amazon-SWF2,,12533,125,NY,Amazon/SWF2
 TCY1,Amazon-TCY1,,95206,952,CA,Amazon/TCY1
 TCY2,Amazon-TCY2,,95215,952,CA,Amazon/TCY2
+TEB3,Amazon-TEB3,"2651 Oldmans Creek Rd, Logan Township, NJ",08085,080,NJ,Amazon/TEB3
+TEB4,Amazon-TEB4,"742 Courses Landing Rd, Swedesboro, NJ",08069,080,NJ,Amazon/TEB4
 TEB9,Amazon-TEB9,,08873,088,NJ,Amazon/TEB9
 TOL3,Amazon-TOL3,,43551,435,OH,Amazon/TOL3
 VGT2,Amazon-VGT2,,89115,891,NV,Amazon/VGT2
+XLX1,Amazon-XLX1,"3931 Lakeview Corporate Dr, Edwardsville, IL",62025,620,IL,Amazon/XLX1
 XLX7,Amazon-XLX7,,92394,923,CA,Amazon/XLX7
