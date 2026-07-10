@@ -8,11 +8,14 @@ import streamlit as st
 import processors
 import delivery_reference
 import delivery_workflow
+import delivery_match_adapter
 
 # Streamlit rerun sometimes keeps imported modules in memory.
 importlib.reload(processors)
 importlib.reload(delivery_reference)
 importlib.reload(delivery_workflow)
+importlib.reload(delivery_match_adapter)
+delivery_match_adapter.patch_delivery_workflow(delivery_workflow)
 
 VALID_WAREHOUSES = ["LA", "NJ", "SAV", "DAL"]
 PLACEHOLDER = "请填入"
@@ -82,6 +85,7 @@ st.caption(
     "派送拆成两步：第一步合并多个鲲运源文件、剔除无效批次、识别FTL/LTL、FTL按车次号合并，并识别FBA/FBX与邮编；未匹配邮编放到结果底部。"
     "无效批次审核包含非卡车派送、批次状态无效，以及派送方式为卡车配送但备注含废单/取消/作废/无效/删除/关闭等关键词的记录。"
     "第二步“派送数据匹配及分析”上传第一步结果和人工补充目的地文件，补齐商业/私人地址邮编后，再严格按周/月输出Excel分析报告。"
+    "第二步匹配文件支持鲲运导出列表格式，字段可为批次号 + 邮编/目的地邮编/标准邮编 + 省/州/州/目的州；同一批次多个邮编会全部保留。"
     "工具已内置FBA仓点邮编表、平台仓邮编表和干线识别规则。干线只对LA仓派送分析生效：NJ=070-089，Dallas=750-753，Chicago=606xx，Savannah=314xx。"
     "LTL不计入发车数，只参与方数结构；邮编列按文本处理；四位邮编自动补0。FTL车型缺失默认53尺大车；同车次装车类型同时出现卡板和地板时，聚合后按地板。"
 )
@@ -247,7 +251,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
         key="stage1_result_file"
     )
     match_file = st.file_uploader(
-        "6B. 上传人工匹配完成的批次目的地文件（需含批次号 + 目的地邮编/标准邮编，可含州）",
+        "6B. 上传人工匹配完成的批次目的地文件（可直接上传鲲运导出列表，需含批次号 + 邮编/目的地邮编/标准邮编，可含省/州）",
         type=["xlsx", "xls"],
         key="manual_match_file"
     )
