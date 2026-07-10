@@ -17,6 +17,7 @@ COST_CANDIDATES = [
 
 
 NUMERIC_COLS = ["出库体积", "出库卡板数", "派送成本"]
+RECALC_COLS = ["出库体积", "出库卡板数", "派送成本", "FBA出库体积", "FBX出库体积"]
 
 
 def _clean_header(value):
@@ -60,7 +61,7 @@ def _repair_one_numeric_column(df, target_col, candidates):
     best_col, best_sum = _best_candidate(out, candidates)
     if best_col is None:
         if not target_exists:
-            out[target_col] = 0
+            out[target_col] = 0.0
         return out
     # 如果标准列不存在，或标准列全空/全0而别名列有值，则用有效别名列覆盖标准列。
     if (not target_exists) or target_sum <= 0 < best_sum:
@@ -89,8 +90,18 @@ def _ensure_numeric(df, cols):
     out = df.copy()
     for col in cols:
         if col not in out.columns:
-            out[col] = 0
-        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
+            out[col] = 0.0
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0).astype(float)
+    return out
+
+
+def _prepare_recalc_columns(df):
+    """确保回填列都是float，避免向int64列写入 2.3544 这类小数时报错。"""
+    out = df.copy()
+    for col in RECALC_COLS:
+        if col not in out.columns:
+            out[col] = 0.0
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0).astype(float)
     return out
 
 
@@ -109,10 +120,7 @@ def _force_cleaned_totals_from_detail(cleaned_batches, detail_df):
     if "FBA/FBX" not in detail.columns:
         detail["FBA/FBX"] = ""
 
-    out = cleaned_batches.copy()
-    for col in ["出库体积", "出库卡板数", "派送成本", "FBA出库体积", "FBX出库体积"]:
-        if col not in out.columns:
-            out[col] = 0
+    out = _prepare_recalc_columns(cleaned_batches)
 
     for idx, row in out.iterrows():
         batch_ids = _split_batch_ids(row.get("批次号集合", row.get("批次号", "")))
@@ -128,8 +136,8 @@ def _force_cleaned_totals_from_detail(cleaned_batches, detail_df):
         out.at[idx, "FBX出库体积"] = float(matched.loc[matched["FBA/FBX"] == "FBX", "出库体积"].sum())
 
         # 主产品类型同步按方数重新判定。
-        fba_volume = out.at[idx, "FBA出库体积"]
-        fbx_volume = out.at[idx, "FBX出库体积"]
+        fba_volume = float(out.at[idx, "FBA出库体积"] or 0)
+        fbx_volume = float(out.at[idx, "FBX出库体积"] or 0)
         if fba_volume > 0 and fbx_volume > 0:
             out.at[idx, "系统产品类型"] = "混合目的地"
         elif fba_volume > 0:
