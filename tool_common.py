@@ -65,6 +65,26 @@ DECIMAL_OUTPUT_COLUMNS = [
 
 TEXT_COLUMN_KEYWORDS = ["邮编", "ZIP", "zip", "批次号", "车次号"]
 
+PLATFORM_DISPLAY_MAP = {
+    "walmart": "Walmart",
+    "wal-mart": "Walmart",
+    "tiktok": "TikTok",
+    "tik-tok": "TikTok",
+    "temu": "TEMU",
+    "shein": "SHEIN",
+    "newegg": "Newegg",
+    "wayfair": "Wayfair",
+    "amazon": "Amazon",
+    "4px": "4PX",
+}
+
+PLATFORM_COLUMNS = ["平台", "平台名称", "补充平台名称"]
+CODE_COLUMNS = [
+    "平台仓代码", "仓点代码", "仓库代码", "平台仓代码集合", "补充平台仓代码",
+    "FBA仓点", "FBA仓点代码", "FBA仓点代码集合", "仓点",
+]
+PAIR_COLUMNS = ["平台仓配对集合", "补充平台仓配对"]
+
 
 def clean_header(value):
     return processors.clean_col_name(value)
@@ -234,26 +254,151 @@ def apply_dominant_destination_from_detail(cleaned_batches, detail_df):
         out.at[idx, "目的地邮编待补充"] = len(split_values(zip_value)) == 0
 
         fba_code = str(dominant.get("FBA仓点代码", "")).strip()
-        platform = str(dominant.get("平台名称", "")).strip()
-        platform_code = str(dominant.get("平台仓代码", dominant.get("仓库代码", ""))).strip()
+        platform = _normalize_platform_display(dominant.get("平台名称", ""))
+        platform_code = _normalize_code_display(dominant.get("平台仓代码", dominant.get("仓库代码", "")))
         if product == "FBA":
-            out.at[idx, "FBA仓点代码集合"] = "" if fba_code.lower() in ["nan", "none", "<na>"] else fba_code
+            out.at[idx, "FBA仓点代码集合"] = "" if fba_code.lower() in ["nan", "none", "<na>"] else _normalize_code_display(fba_code)
             out.at[idx, "平台名称"] = ""
             out.at[idx, "平台仓代码集合"] = ""
             out.at[idx, "平台仓配对集合"] = ""
         elif product == "FBX":
             out.at[idx, "FBA仓点代码集合"] = ""
-            out.at[idx, "平台名称"] = "" if platform.lower() in ["nan", "none", "<na>"] else platform
-            out.at[idx, "平台仓代码集合"] = "" if platform_code.lower() in ["nan", "none", "<na>"] else platform_code
-            if platform and platform_code and platform.lower() not in ["nan", "none"] and platform_code.lower() not in ["nan", "none"]:
+            out.at[idx, "平台名称"] = platform
+            out.at[idx, "平台仓代码集合"] = platform_code
+            if platform and platform_code:
                 out.at[idx, "平台仓配对集合"] = f"{platform}||{platform_code}"
+    return out
+
+
+def _normalize_platform_display(value):
+    if processors.is_blank(value):
+        return ""
+    text = str(value).strip()
+    if text.lower() in ["nan", "none", "null", "<na>"]:
+        return ""
+    key = re.sub(r"\s+", "", text).lower()
+    return PLATFORM_DISPLAY_MAP.get(key, text)
+
+
+def _normalize_code_display(value):
+    if processors.is_blank(value):
+        return ""
+    text = str(value).strip()
+    if text.lower() in ["nan", "none", "null", "<na>"]:
+        return ""
+    return text.upper()
+
+
+def _normalize_code_list(value):
+    values = split_values(value)
+    out = []
+    seen = set()
+    for item in values:
+        normalized = _normalize_code_display(item)
+        key = normalized.upper()
+        if normalized and key not in seen:
+            out.append(normalized)
+            seen.add(key)
+    return ",".join(out)
+
+
+def _normalize_pair_list(value):
+    pairs = []
+    seen = set()
+    for raw in str(value or "").split(";"):
+        if "||" not in raw:
+            continue
+        platform, code = raw.split("||", 1)
+        platform = _normalize_platform_display(platform)
+        code = _normalize_code_display(code)
+        if not platform or not code:
+            continue
+        key = f"{platform.lower()}||{code.upper()}"
+        if key not in seen:
+            pairs.append(f"{platform}||{code}")
+            seen.add(key)
+    return ";".join(pairs)
+
+
+def normalize_case_insensitive_labels(df):
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    for col in PLATFORM_COLUMNS:
+        if col in out.columns:
+            out[col] = out[col].apply(_normalize_platform_display)
+    for col in CODE_COLUMNS:
+        if col in out.columns:
+            out[col] = out[col].apply(_normalize_code_list if "集合" in col else _normalize_code_display)
+    for col in PAIR_COLUMNS:
+        if col in out.columns:
+            out[col] = out[col].apply(_normalize_pair_list)
+    return out
+
+
+def _recalc_rank_and_share(df, value_col, rank_col, share_col, group_cols):
+    if df.empty or value_col not in df.columns:
+        return df
+    out = df.copy()
+    out[value_col] = pd.to_numeric(out[value_col], errors="coerce").fillna(0)
+    out = out.sort_values(group_cols + [value_col], ascending=[True] * len(group_cols) + [False]).reset_index(drop=True)
+    if share_col in out.columns:
+        total = out.groupby(group_cols, dropna=False)[value_col].transform("sum")
+        out[share_col] = out[value_col] / total.replace(0, pd.NA)
+    if rank_col in out.columns:
+        out[rank_col] = out.groupby(group_cols, dropna=False)[value_col].rank(method="first", ascending=False).astype(int)
+    return out
+
+
+def _group_sum_preserve_order(df, keys, sum_cols):
+    if df.empty or not all(k in df.columns for k in keys):
+        return df
+    out = df.copy()
+    for col in sum_cols:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
+    agg = {col: "sum" for col in sum_cols if col in out.columns}
+    for col in out.columns:
+        if col not in keys and col not in agg:
+            agg[col] = "first"
+    grouped = out.groupby(keys, dropna=False, as_index=False).agg(agg)
+    return grouped[[c for c in out.columns if c in grouped.columns]]
+
+
+def merge_case_duplicate_output_rows(df, sheet_type=""):
+    if df is None or df.empty:
+        return df
+    out = normalize_case_insensitive_labels(df)
+
+    if sheet_type == "FBX平台仓货量":
+        keys = ["仓库", "统计周期", "平台", "平台仓代码"]
+        out = _group_sum_preserve_order(out, keys, ["出库体积"])
+        return _recalc_rank_and_share(out, "出库体积", "排名", "占比", ["仓库", "统计周期"])
+
+    if sheet_type == "FBA货量排行":
+        keys = ["仓库", "统计周期", "FBA仓点"]
+        out = _group_sum_preserve_order(out, keys, ["出库体积"])
+        return _recalc_rank_and_share(out, "出库体积", "排名", "占比", ["仓库", "统计周期"])
+
+    if sheet_type == "成本":
+        keys = ["指标名称", "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组"]
+        sum_cols = ["车次数", "总出库体积", "总派送成本"]
+        out = _group_sum_preserve_order(out, keys, sum_cols)
+        if "平均整车价" in out.columns:
+            out["平均整车价"] = pd.to_numeric(out.get("总派送成本"), errors="coerce") / pd.to_numeric(out.get("车次数"), errors="coerce").replace(0, pd.NA)
+        if "每方平均价" in out.columns:
+            out["每方平均价"] = pd.to_numeric(out.get("总派送成本"), errors="coerce") / pd.to_numeric(out.get("总出库体积"), errors="coerce").replace(0, pd.NA)
+        if "平均每车出库体积" in out.columns:
+            out["平均每车出库体积"] = pd.to_numeric(out.get("总出库体积"), errors="coerce") / pd.to_numeric(out.get("车次数"), errors="coerce").replace(0, pd.NA)
+        return out
+
     return out
 
 
 def clean_for_excel_output(df, sheet_type=""):
     if df is None:
         return pd.DataFrame()
-    out = df.copy()
+    out = merge_case_duplicate_output_rows(df.copy(), sheet_type=sheet_type)
     for col in out.columns:
         if any(k in str(col) for k in TEXT_COLUMN_KEYWORDS):
             out[col] = out[col].fillna("").astype(str).replace({"nan": "", "None": "", "<NA>": ""})
