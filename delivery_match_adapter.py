@@ -17,6 +17,16 @@ REMARK_COLS = ["MEMO", "跟进记录", "内部备注", "备注", "派送区域",
 DROP_REMARK_COLS = ["备注", "备注信息", "匹配备注集合", "专线识别方式", "派送区域识别方式", "备注列"]
 INVALID_LABEL_KEYWORDS = ["盈仓", "未知", "非平台", "其他"]
 
+ZIP_FILL_COL = "补充标准邮编"
+STATE_FILL_COL = "补充目的州"
+AUDIT_FILL_COLS = [ZIP_FILL_COL, STATE_FILL_COL]
+INTEGER_COLUMNS = ["排名", "车次数", "发车数", "派送数", "出库卡板数"]
+DECIMAL_COLUMNS = [
+    "数值", "占比", "出库体积", "FBA出库体积", "FBX出库体积", "派送成本", "派送时效",
+    "总出库体积", "总派送成本", "平均整车价", "每方平均价", "平均每车出库体积",
+    "P80每车出库体积", "平均派送时效", "P80派送时效",
+]
+
 # 仓间调拨目标仓地址：用于功能二补邮编、识别干线，避免调拨行长期留在邮编异常审核。
 TRANSFER_WAREHOUSE_INFO = {
     "LA": {"zip": "91708", "state": "CA", "line": "LA", "keywords": ["LA", "美西", "洛杉矶", "CHINO"]},
@@ -91,7 +101,6 @@ def _infer_transfer_target(text):
 
 def _infer_linehaul_from_text(text):
     upper = str(text).upper()
-    # 优先中文仓名/英文仓点/车次备注。SAV/DAL/NJ必须在邮编规则前生效。
     target, info = _infer_transfer_target(upper)
     if target in ["NJ", "SAV", "DAL"]:
         return info["line"], f"车次/批次/调入仓库命中{target}"
@@ -115,12 +124,16 @@ def _strip_remark_columns(df):
     return df.drop(columns=cols_to_drop, errors="ignore")
 
 
-def _drop_empty_columns(df):
+def _drop_empty_columns(df, preserve=None):
     if df is None or df.empty:
         return df
+    preserve = set(preserve or [])
     out = df.copy()
     keep_cols = []
     for col in out.columns:
+        if col in preserve:
+            keep_cols.append(col)
+            continue
         s = out[col]
         non_empty = s.apply(lambda x: not (_is_blank(x) or (pd.isna(x) if not isinstance(x, (list, dict, tuple, set)) else False)))
         if non_empty.any():
@@ -128,8 +141,53 @@ def _drop_empty_columns(df):
     return out[keep_cols]
 
 
-def _finalize_sheet(df):
-    return _drop_empty_columns(_strip_remark_columns(df))
+def _format_numbers(df, sheet_type=""):
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+
+    for col in INTEGER_COLUMNS:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").round(0).astype("Int64")
+
+    # 发车量表里的“数值”本质是车次数，不保留小数。
+    if sheet_type == "发车量" and "数值" in out.columns:
+        out["数值"] = pd.to_numeric(out["数值"], errors="coerce").round(0).astype("Int64")
+
+    for col in DECIMAL_COLUMNS:
+        if col in out.columns:
+            if sheet_type == "发车量" and col == "数值":
+                continue
+            out[col] = pd.to_numeric(out[col], errors="coerce").round(2)
+
+    # 如果车次数因为历史分摊逻辑出现小数，统一改成整数计数口径。
+    if "车次数" in out.columns:
+        out["车次数"] = pd.to_numeric(out["车次数"], errors="coerce").round(0).astype("Int64")
+    return out
+
+
+def _finalize_sheet(df, sheet_type=""):
+    return _format_numbers(_drop_empty_columns(_strip_remark_columns(df)), sheet_type=sheet_type)
+
+
+def _finalize_zip_audit_sheet(df):
+    if df is None or df.empty:
+        cols = ["分析批次ID", "批次号集合", ZIP_FILL_COL, STATE_FILL_COL, "标准邮编集合", "目的州"]
+        return pd.DataFrame(columns=cols)
+    out = _strip_remark_columns(df.copy())
+    for col in AUDIT_FILL_COLS:
+        if col not in out.columns:
+            out.insert(min(2, len(out.columns)), col, "")
+    preferred = [
+        "分析批次ID", "仓库", "标准运输类型", "派送方式", "车次号", "批次号集合",
+        ZIP_FILL_COL, STATE_FILL_COL,
+        "出库类型", "业务场景", "调入仓库", "出库体积", "出库卡板数", "派送成本",
+        "系统产品类型", "主产品类型", "平台名称", "平台仓代码集合", "FBA仓点代码集合",
+        "标准邮编集合", "目的州", "邮编来源", "目的地邮编待补充",
+    ]
+    cols = [c for c in preferred if c in out.columns] + [c for c in out.columns if c not in preferred]
+    out = out[cols]
+    return _format_numbers(out, sheet_type="邮编异常审核")
 
 
 def _fill_fba_zip_memory(df):
@@ -177,7 +235,6 @@ def _fill_transfer_zip_memory(df):
         target, info = _infer_transfer_target(text)
         if not info:
             continue
-        # 调拨的目的地就是目标仓；优先用固定目标仓邮编补齐，避免进入邮编异常。
         out.at[idx, "标准邮编集合"] = info["zip"]
         out.at[idx, "邮编前三位集合"] = info["zip"][:3]
         out.at[idx, "目的州"] = info["state"]
@@ -188,11 +245,17 @@ def _fill_transfer_zip_memory(df):
 
 
 def prepare_manual_match_flexible(match_df):
+    if match_df is None or match_df.empty:
+        return pd.DataFrame(columns=["批次号", "补充标准邮编", "补充目的州", "补充邮编是否有效"])
+
     match = processors.normalize_columns(match_df).copy()
-    processors.require_columns(match, ["批次号"], "人工目的地匹配文件")
+    if "批次号" not in match.columns:
+        return pd.DataFrame(columns=["批次号", "补充标准邮编", "补充目的州", "补充邮编是否有效"])
+
     zip_col = _find_col(match, ["标准邮编", "目的地邮编", "邮编", "ZIP", "Zip", "zipcode", "ZipCode", "PostalCode", "Postal Code"])
     if not zip_col:
-        raise ValueError("人工目的地匹配文件需要包含 标准邮编 / 目的地邮编 / 邮编 字段。")
+        return pd.DataFrame(columns=["批次号", "补充标准邮编", "补充目的州", "补充邮编是否有效"])
+
     state_col = _find_col(match, ["目的州", "省/州", "州", "到达州", "目的地州", "State", "Destination State"])
     platform_col = _find_col(match, ["平台名称", "平台", "渠道", "客户平台"])
     warehouse_code_col = _find_col(match, ["平台仓代码", "仓库代码", "仓库Code", "仓点代码", "目的仓代码", "Warehouse Code"])
@@ -250,7 +313,9 @@ def apply_manual_match_to_cleaned_batches_flexible(cleaned_batches, match_df):
     df = _fill_transfer_zip_memory(_fill_fba_zip_memory(cleaned_batches))
     match = prepare_manual_match_flexible(match_df)
     if df.empty or match.empty:
+        df["目的地邮编待补充"] = df["标准邮编集合"].apply(lambda x: len(_split_values(x)) == 0)
         return _fill_transfer_zip_memory(df)
+
     match_map = match.set_index("批次号").to_dict("index")
     for col in ["目的州", "邮编来源", "匹配备注集合", "平台仓代码集合", "平台仓配对集合", "平台名称"]:
         if col not in df.columns:
@@ -304,6 +369,84 @@ def apply_manual_match_to_cleaned_batches_flexible(cleaned_batches, match_df):
     return df
 
 
+def _pick_zip_from_audit_row(row):
+    for col in [ZIP_FILL_COL, "待填邮编", "补充邮编", "目的地邮编", "邮编", "标准邮编", "标准邮编集合"]:
+        if col not in row.index:
+            continue
+        values = _split_values(row.get(col, ""))
+        valid_zips = []
+        for value in values:
+            zip_code, _, valid, _ = _normalize_zip(value)
+            if valid and zip_code:
+                valid_zips.append(zip_code)
+        if valid_zips:
+            return ",".join(list(dict.fromkeys(valid_zips)))
+    return ""
+
+
+def _apply_zip_audit_updates(main_df, audit_df):
+    if main_df is None or main_df.empty or audit_df is None or audit_df.empty:
+        return main_df
+    df = main_df.copy()
+    audit = audit_df.copy()
+    for col in ["标准邮编集合", "邮编前三位集合", "目的州", "邮编来源", "目的地邮编待补充"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    def build_key(row):
+        if "分析批次ID" in row.index and not _is_blank(row.get("分析批次ID")):
+            return f"ID::{str(row.get('分析批次ID')).strip()}"
+        if "批次号集合" in row.index and not _is_blank(row.get("批次号集合")):
+            return f"BATCH::{str(row.get('批次号集合')).strip()}"
+        return ""
+
+    main_index = {build_key(row): idx for idx, row in df.iterrows() if build_key(row)}
+    for _, row in audit.iterrows():
+        key = build_key(row)
+        if not key or key not in main_index:
+            continue
+        zip_value = _pick_zip_from_audit_row(row)
+        if not zip_value:
+            continue
+        idx = main_index[key]
+        state = ""
+        for state_col in [STATE_FILL_COL, "目的州", "州", "省/州"]:
+            if state_col in row.index and not _is_blank(row.get(state_col)):
+                state = _normalize_state(row.get(state_col))
+                break
+        zips = _split_values(zip_value)
+        df.at[idx, "标准邮编集合"] = ",".join(zips)
+        df.at[idx, "邮编前三位集合"] = ",".join([z[:3] for z in zips if len(z) == 5])
+        if state:
+            df.at[idx, "目的州"] = state
+        df.at[idx, "邮编来源"] = "邮编异常审核人工补充"
+        df.at[idx, "目的地邮编待补充"] = False
+    df["目的地邮编待补充"] = df["标准邮编集合"].apply(lambda x: len(_split_values(x)) == 0)
+    return df
+
+
+def read_stage1_or_stage2_with_audit_updates(excel_file):
+    excel_file.seek(0)
+    xls = pd.ExcelFile(excel_file)
+    if "派送二_匹配后合并数据" in xls.sheet_names:
+        sheet_name = "派送二_匹配后合并数据"
+    elif "清洗后数据" in xls.sheet_names:
+        sheet_name = "清洗后数据"
+    elif "派送一_清洗合并数据" in xls.sheet_names:
+        sheet_name = "派送一_清洗合并数据"
+    elif "派送二_批次车次聚合" in xls.sheet_names:
+        sheet_name = "派送二_批次车次聚合"
+    else:
+        sheet_name = xls.sheet_names[0]
+    excel_file.seek(0)
+    df = pd.read_excel(excel_file, sheet_name=sheet_name, dtype=str)
+    if "邮编异常审核" in xls.sheet_names:
+        excel_file.seek(0)
+        audit_df = pd.read_excel(excel_file, sheet_name="邮编异常审核", dtype=str)
+        df = _apply_zip_audit_updates(df, audit_df)
+    return df
+
+
 def identify_linehaul_with_remark_priority(row, delivery_workflow_module):
     if str(row.get("仓库", "")).strip() not in ["LA", "美西仓", "美西二号仓", "CA"]:
         return "非LA干线", "非LA仓暂不识别LA干线"
@@ -323,29 +466,47 @@ def apply_linehaul_rules_with_remark_priority(df, delivery_workflow_module):
     return pd.concat([out, line_results], axis=1)
 
 
-def _expand_volume_by_codes(df, code_col, volume_col, warehouse_col="仓库", period_col="统计周期", platform_col=None, exclude_invalid=True):
+def _expand_volume_by_codes(df, code_col, volume_col, warehouse_col="仓库", period_col="统计周期", platform_col=None, pair_col=None, exclude_invalid=True):
     rows = []
-    if df.empty or code_col not in df.columns:
+    if df.empty:
         return pd.DataFrame()
     for _, row in df.iterrows():
         volume = pd.to_numeric(row.get(volume_col, 0), errors="coerce")
         if pd.isna(volume) or volume <= 0:
             continue
-        codes = _split_values(row.get(code_col, ""))
+        if pair_col and pair_col in df.columns:
+            pairs = [p for p in str(row.get(pair_col, "")).split(";") if p.strip() and "||" in p]
+            if pairs:
+                share_volume = float(volume) / len(pairs)
+                for pair in pairs:
+                    platform, code = pair.split("||", 1)
+                    if _valid_platform_label(platform) and _valid_platform_label(code):
+                        rows.append({"仓库": row.get(warehouse_col, ""), "统计周期": row.get(period_col, ""), "平台": platform, "仓点代码": code, "出库体积": share_volume})
+                continue
+        codes = _split_values(row.get(code_col, "")) if code_col in row.index else []
         if exclude_invalid:
             codes = [c for c in codes if _valid_platform_label(c)]
         if not codes:
             continue
         share_volume = float(volume) / len(codes)
+        platform_value = row.get(platform_col, "") if platform_col else ""
         for code in codes:
-            rows.append({
-                "仓库": row.get(warehouse_col, ""),
-                "统计周期": row.get(period_col, ""),
-                "平台": row.get(platform_col, "") if platform_col else "",
-                "仓点代码": code,
-                "出库体积": share_volume,
-            })
+            rows.append({"仓库": row.get(warehouse_col, ""), "统计周期": row.get(period_col, ""), "平台": platform_value, "仓点代码": code, "出库体积": share_volume})
     return pd.DataFrame(rows)
+
+
+def _cost_vehicle_group(row):
+    vehicle = str(row.get("车型标准值", ""))
+    loading = str(row.get("装车类型标准值", ""))
+    if "26" in vehicle or "小车" in vehicle:
+        return "小车"
+    if "53" in vehicle or "大车" in vehicle:
+        if "卡板" in loading:
+            return "大车卡板"
+        if "地板" in loading:
+            return "大车地板"
+        return "大车未知装车"
+    return "未知车型"
 
 
 def _expand_cost_by_station(df, object_type):
@@ -358,10 +519,8 @@ def _expand_cost_by_station(df, object_type):
             continue
         volume = pd.to_numeric(row.get("出库体积", 0), errors="coerce")
         cost = pd.to_numeric(row.get("派送成本", 0), errors="coerce")
-        if pd.isna(volume):
-            volume = 0
-        if pd.isna(cost):
-            cost = 0
+        volume = 0 if pd.isna(volume) else float(volume)
+        cost = 0 if pd.isna(cost) else float(cost)
         if volume <= 0 and cost <= 0:
             continue
         objects = []
@@ -379,43 +538,25 @@ def _expand_cost_by_station(df, object_type):
             else:
                 codes = [c for c in _split_values(row.get("平台仓代码集合", "")) if _valid_platform_label(c)]
                 platforms = [p for p in _split_values(row.get("平台名称", "")) if _valid_platform_label(p)]
-                if len(platforms) == len(codes) and len(codes) > 0:
+                if len(platforms) == len(codes) and codes:
                     objects.extend(list(zip(platforms, codes)))
-                elif len(codes) > 0:
+                elif codes:
                     platform = platforms[0] if len(platforms) == 1 else ""
                     for code in codes:
                         objects.append((platform, code))
         if not objects:
             continue
-        share_volume = float(volume) / len(objects)
-        share_cost = float(cost) / len(objects)
+        share_volume = volume / len(objects)
+        share_cost = cost / len(objects)
         for platform, code in objects:
             rows.append({
-                "仓库": row.get("仓库", ""),
-                "统计周期": row.get("统计周期", ""),
+                "仓库": row.get("仓库", ""), "统计周期": row.get("统计周期", ""),
                 "对象类型": object_type if object_type == "FBA" else "FBX平台仓",
-                "平台": platform if object_type != "FBA" else "FBA",
-                "仓点代码": code,
-                "车型装车分组": vehicle_group,
-                "车次数": 1 / len(objects),
-                "出库体积": share_volume,
-                "派送成本": share_cost,
+                "平台": platform if object_type != "FBA" else "FBA", "仓点代码": code,
+                "车型装车分组": vehicle_group, "车次数": 1,
+                "出库体积": share_volume, "派送成本": share_cost,
             })
     return pd.DataFrame(rows)
-
-
-def _cost_vehicle_group(row):
-    vehicle = str(row.get("车型标准值", ""))
-    loading = str(row.get("装车类型标准值", ""))
-    if "26" in vehicle or "小车" in vehicle:
-        return "小车"
-    if "53" in vehicle or "大车" in vehicle:
-        if "卡板" in loading:
-            return "大车卡板"
-        if "地板" in loading:
-            return "大车地板"
-        return "大车未知装车"
-    return "未知车型"
 
 
 def build_fba_rank_sheet(matched):
@@ -436,7 +577,7 @@ def build_fbx_platform_warehouse_sheet(matched):
         return pd.DataFrame(columns=["仓库", "统计周期", "排名", "平台", "平台仓代码", "出库体积", "占比"])
     source = matched[(matched.get("FBX出库体积", 0) > 0)].copy()
     source = source[source["平台名称"].apply(_valid_platform_label)] if "平台名称" in source.columns else source.iloc[0:0]
-    expanded = _expand_volume_by_codes(source, "平台仓代码集合", "FBX出库体积", platform_col="平台名称", exclude_invalid=True)
+    expanded = _expand_volume_by_codes(source, "平台仓代码集合", "FBX出库体积", platform_col="平台名称", pair_col="平台仓配对集合", exclude_invalid=True)
     if expanded.empty:
         return pd.DataFrame(columns=["仓库", "统计周期", "排名", "平台", "平台仓代码", "出库体积", "占比"])
     agg = expanded.groupby(["仓库", "统计周期", "平台", "仓点代码"], dropna=False)["出库体积"].sum().reset_index()
@@ -460,7 +601,7 @@ def build_station_cost_report(matched):
         rows.append({
             "指标名称": "满载情况", "仓库": warehouse, "统计周期": period,
             "对象类型": "FTL大车地板", "平台": "全部", "仓点代码": "全部", "车型装车分组": "大车地板",
-            "车次数": len(group), "总出库体积": group["出库体积"].sum(), "总派送成本": group["派送成本"].sum(),
+            "车次数": int(len(group)), "总出库体积": group["出库体积"].sum(), "总派送成本": group["派送成本"].sum(),
             "平均整车价": None, "每方平均价": None,
             "平均每车出库体积": group["出库体积"].mean(), "P80每车出库体积": processors.safe_p80(group["出库体积"]),
         })
@@ -477,6 +618,7 @@ def build_station_cost_report(matched):
         ).reset_index()
         grouped = grouped[(grouped["总出库体积"] > 0) | (grouped["总派送成本"] > 0)]
         grouped["指标名称"] = "FBA及FBX平台仓成本"
+        grouped["车次数"] = grouped["车次数"].round(0).astype(int)
         grouped["平均整车价"] = grouped["总派送成本"] / grouped["车次数"].replace(0, pd.NA)
         grouped["每方平均价"] = grouped["总派送成本"] / grouped["总出库体积"].replace(0, pd.NA)
         grouped["平均每车出库体积"] = grouped["总出库体积"] / grouped["车次数"].replace(0, pd.NA)
@@ -484,6 +626,12 @@ def build_station_cost_report(matched):
         rows_df = grouped[["指标名称", "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组", "车次数", "总出库体积", "总派送成本", "平均整车价", "每方平均价", "平均每车出库体积", "P80每车出库体积"]]
         rows.extend(rows_df.to_dict("records"))
     return pd.DataFrame(rows)
+
+
+def _safe_round(df, sheet_type):
+    # 先按原有逻辑保留两位小数，再把计数列改回整数。
+    rounded = processors.round_output_numbers(df, processors.RESULT_DECIMALS) if df is not None else df
+    return _format_numbers(rounded, sheet_type=sheet_type)
 
 
 def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_df, period_type="按周统计"):
@@ -497,15 +645,16 @@ def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_d
         dispatch = combined[combined["报告部分"].astype(str).str.startswith("2.")].copy()
         timing = combined[combined["报告部分"].astype(str).str.startswith("3.")].copy()
     cost = build_station_cost_report(matched)
+    zip_audit = matched[matched["目的地邮编待补充"]].copy() if "目的地邮编待补充" in matched.columns else pd.DataFrame()
     return {
-        "货量": processors.round_output_numbers(_finalize_sheet(volume), processors.RESULT_DECIMALS),
-        "FBA货量排行": processors.round_output_numbers(_finalize_sheet(build_fba_rank_sheet(matched)), processors.RESULT_DECIMALS),
-        "FBX平台仓货量": processors.round_output_numbers(_finalize_sheet(build_fbx_platform_warehouse_sheet(matched)), processors.RESULT_DECIMALS),
-        "发车量": processors.round_output_numbers(_finalize_sheet(dispatch), processors.RESULT_DECIMALS),
-        "派送时效": processors.round_output_numbers(_finalize_sheet(timing), processors.RESULT_DECIMALS),
-        "成本": processors.round_output_numbers(_finalize_sheet(cost), processors.RESULT_DECIMALS),
-        "派送二_匹配后合并数据": processors.round_output_numbers(_finalize_sheet(matched), processors.RESULT_DECIMALS),
-        "邮编异常审核": _finalize_sheet(matched[matched["目的地邮编待补充"]].copy()) if "目的地邮编待补充" in matched.columns else pd.DataFrame(),
+        "货量": _safe_round(_finalize_sheet(volume, "货量"), "货量"),
+        "FBA货量排行": _safe_round(_finalize_sheet(build_fba_rank_sheet(matched), "FBA货量排行"), "FBA货量排行"),
+        "FBX平台仓货量": _safe_round(_finalize_sheet(build_fbx_platform_warehouse_sheet(matched), "FBX平台仓货量"), "FBX平台仓货量"),
+        "发车量": _safe_round(_finalize_sheet(dispatch, "发车量"), "发车量"),
+        "派送时效": _safe_round(_finalize_sheet(timing, "派送时效"), "派送时效"),
+        "成本": _safe_round(_finalize_sheet(cost, "成本"), "成本"),
+        "派送二_匹配后合并数据": _safe_round(_finalize_sheet(matched, "明细"), "明细"),
+        "邮编异常审核": _finalize_zip_audit_sheet(zip_audit),
         "区域识别规则": delivery_workflow_module.REGION_RULES_DF,
         "干线识别规则": delivery_workflow_module.LINEHAUL_RULES,
     }
@@ -514,9 +663,10 @@ def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_d
 def patch_delivery_workflow(delivery_workflow_module):
     delivery_workflow_module.prepare_manual_match = prepare_manual_match_flexible
     delivery_workflow_module.apply_manual_match_to_cleaned_batches = apply_manual_match_to_cleaned_batches_flexible
+    delivery_workflow_module.read_stage1_cleaned_batches = read_stage1_or_stage2_with_audit_updates
     if not hasattr(delivery_workflow_module, "_original_identify_linehaul_second_part"):
         delivery_workflow_module._original_identify_linehaul_second_part = delivery_workflow_module.identify_linehaul_second_part
     delivery_workflow_module.identify_linehaul_second_part = lambda row: identify_linehaul_with_remark_priority(row, delivery_workflow_module)
     delivery_workflow_module.apply_linehaul_rules_second_part = lambda df: apply_linehaul_rules_with_remark_priority(df, delivery_workflow_module)
-    delivery_workflow_module.process_stage2_analysis = lambda cleaned_batches, match_df, period_type="按周统计": build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_df, period_type)
+    delivery_workflow_module.process_stage2_analysis = lambda cleaned_batches, match_df=None, period_type="按周统计": build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_df, period_type)
     return delivery_workflow_module
