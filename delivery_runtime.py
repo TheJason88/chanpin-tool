@@ -1,8 +1,31 @@
+import re
+
 import pandas as pd
 
 import tool_common
 import delivery_match_adapter
 import delivery_stage1_adapter
+
+
+PATCH_STATE_ATTRS = [
+    "_original_process_stage1_raw_files_to_cleaned_batches",
+    "_original_identify_linehaul_second_part",
+    "_unified_stage1_process_wrapped",
+]
+
+
+def _reset_stale_patch_state(delivery_workflow_module):
+    """
+    importlib.reload 会重新执行模块源码，但不会自动删除运行时额外挂上去的属性。
+    如果不清理这些标记，后续补丁会误以为已经应用，导致新规则没有真正生效。
+    """
+    for attr in PATCH_STATE_ATTRS:
+        if hasattr(delivery_workflow_module, attr):
+            try:
+                delattr(delivery_workflow_module, attr)
+            except Exception:
+                pass
+    return delivery_workflow_module
 
 
 def _sync_common_rules():
@@ -16,6 +39,18 @@ def _sync_common_rules():
     delivery_match_adapter.DECIMAL_COLUMNS = tool_common.DECIMAL_OUTPUT_COLUMNS
 
 
+def _normalize_batch_key(value):
+    if pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if text.lower() in ["nan", "none", "null", "<na>"]:
+        return ""
+    # Excel 有时会把纯数字批次号读成 12345.0；这里统一还原，避免匹配不到原始明细。
+    if re.fullmatch(r"\d+\.0", text):
+        return text[:-2]
+    return text
+
+
 def _batch_cost_series_for_trip(detail, batch_ids):
     """
     派送功能一车次合并成本口径：
@@ -25,21 +60,22 @@ def _batch_cost_series_for_trip(detail, batch_ids):
     """
     if detail is None or detail.empty or "批次号" not in detail.columns or "派送成本" not in detail.columns:
         return pd.Series(dtype=float)
-    batch_ids = [str(x).strip() for x in batch_ids if str(x).strip()]
-    if not batch_ids:
+    normalized_batch_ids = [_normalize_batch_key(x) for x in batch_ids]
+    normalized_batch_ids = [x for x in normalized_batch_ids if x]
+    if not normalized_batch_ids:
         return pd.Series(dtype=float)
 
     working = detail.copy()
-    working["批次号_匹配Key"] = working["批次号"].astype(str).str.strip()
+    working["批次号_匹配Key"] = working["批次号"].apply(_normalize_batch_key)
     working["派送成本"] = pd.to_numeric(working["派送成本"], errors="coerce").fillna(0).astype(float)
-    matched = working[working["批次号_匹配Key"].isin(batch_ids)].copy()
+    matched = working[working["批次号_匹配Key"].isin(normalized_batch_ids)].copy()
     if matched.empty:
         return pd.Series(dtype=float)
 
     # 同一批次在原始数据里如果有多行，成本按批次字段取首次有效值，避免同批次重复行再次放大成本。
     per_batch = matched.groupby("批次号_匹配Key", sort=False)["派送成本"].first()
     ordered_values = []
-    for batch_id in batch_ids:
+    for batch_id in normalized_batch_ids:
         if batch_id in per_batch.index:
             ordered_values.append(float(per_batch.loc[batch_id]))
     return pd.Series(ordered_values, dtype=float)
@@ -48,7 +84,10 @@ def _batch_cost_series_for_trip(detail, batch_ids):
 def _aggregate_trip_delivery_cost(batch_costs):
     if batch_costs is None or batch_costs.empty:
         return 0.0
-    values = pd.to_numeric(batch_costs, errors="coerce").fillna(0).astype(float)
+    values = pd.to_numeric(batch_costs, errors="coerce").dropna().astype(float)
+    if values.empty:
+        return 0.0
+    # 仅在“多个批次的有效派送成本完全相等”时取其一；否则仍按批次相加。
     if len(values) > 1 and values.round(6).nunique(dropna=True) == 1:
         return float(values.iloc[0])
     return float(values.sum())
@@ -78,10 +117,9 @@ def _apply_equal_cost_rule_to_stage1(cleaned_batches, raw_detail):
 
 
 def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_module):
-    if hasattr(delivery_workflow_module, "_unified_stage1_process_wrapped"):
-        return delivery_workflow_module
-
     base_func = delivery_workflow_module.process_stage1_raw_files_to_cleaned_batches
+    if getattr(base_func, "_is_unified_stage1_runtime_wrapper", False):
+        return delivery_workflow_module
 
     def unified_stage1_process(file_dfs, warehouse, period_type="不适用", start_date=None, end_date=None):
         # 功能一只负责全量清洗，不再按页面时间范围筛选。
@@ -101,13 +139,14 @@ def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_modul
             return cleaned_batches, invalid_detail, zip_audit_df, raw_detail
         return result
 
+    unified_stage1_process._is_unified_stage1_runtime_wrapper = True
     delivery_workflow_module.process_stage1_raw_files_to_cleaned_batches = unified_stage1_process
-    delivery_workflow_module._unified_stage1_process_wrapped = True
     return delivery_workflow_module
 
 
 def bootstrap(delivery_workflow_module):
     """集中应用派送运行时补丁，app.py只调用这一处，避免多处散落 patch。"""
+    _reset_stale_patch_state(delivery_workflow_module)
     _sync_common_rules()
     delivery_match_adapter.patch_delivery_workflow(delivery_workflow_module)
     delivery_stage1_adapter.patch_delivery_stage1(delivery_workflow_module)
