@@ -7,27 +7,6 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-PATCH_STATE_ATTRS = [
-    "_original_process_stage1_raw_files_to_cleaned_batches",
-    "_original_identify_linehaul_second_part",
-    "_unified_stage1_process_wrapped",
-]
-
-
-def _reset_stale_patch_state(delivery_workflow_module):
-    """
-    importlib.reload 会重新执行模块源码，但不会自动删除运行时额外挂上去的属性。
-    如果不清理这些标记，后续补丁会误以为已经应用，导致新规则没有真正生效。
-    """
-    for attr in PATCH_STATE_ATTRS:
-        if hasattr(delivery_workflow_module, attr):
-            try:
-                delattr(delivery_workflow_module, attr)
-            except Exception:
-                pass
-    return delivery_workflow_module
-
-
 def _sync_common_rules():
     # 统一字段别名和调拨仓规则，避免多个补丁模块各自维护一套。
     delivery_stage1_adapter.VOLUME_CANDIDATES = tool_common.FIELD_ALIASES["出库体积"]
@@ -146,7 +125,7 @@ def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_modul
 
 def bootstrap(delivery_workflow_module):
     """集中应用派送运行时补丁，app.py只调用这一处，避免多处散落 patch。"""
-    _reset_stale_patch_state(delivery_workflow_module)
+    # app.py 每次 rerun 已经 importlib.reload(delivery_workflow)，这里不再删除补丁状态，避免运行中函数引用被破坏。
     _sync_common_rules()
     delivery_match_adapter.patch_delivery_workflow(delivery_workflow_module)
     delivery_stage1_adapter.patch_delivery_stage1(delivery_workflow_module)
