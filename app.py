@@ -35,11 +35,9 @@ DEFAULT_PRODUCT_TYPE = "全部"
 DESTINATION_TYPES = ["全部", "FBA", "FBX"]
 
 _bootstrap_error = None
-_startup_checks = []
 try:
-    # 不在每次页面交互时强制 importlib.reload，避免 Streamlit rerun 重复 patch 导致派送模块不稳定。
+    # 只做一次轻量初始化，不做 importlib.reload，不做启动自检，避免 Streamlit 选择框 rerun 时重复 patch 崩溃。
     delivery_runtime.bootstrap(delivery_workflow)
-    _startup_checks = delivery_runtime.startup_smoke_check(delivery_workflow)
 except Exception as exc:
     _bootstrap_error = exc
 
@@ -47,15 +45,6 @@ if _bootstrap_error is not None:
     st.error("工具启动失败：派送运行时规则加载失败。页面已进入保护模式，下面是具体错误。")
     st.exception(_bootstrap_error)
     st.stop()
-
-_failed_checks = [x for x in _startup_checks if not x.get("是否通过")]
-if _failed_checks:
-    st.error("工具启动自检未通过，请先修复以下项目。")
-    st.dataframe(pd.DataFrame(_failed_checks), use_container_width=True)
-    st.stop()
-
-with st.sidebar.expander("启动自检", expanded=False):
-    st.dataframe(pd.DataFrame(_startup_checks), use_container_width=True, hide_index=True)
 
 
 def _is_blank(value):
@@ -283,10 +272,10 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
     selection_complete = selection_complete and period_type != PLACEHOLDER
 
 if analysis_module == DELIVERY_STAGE1_MODULE:
-    raw_files = st.file_uploader("4. 上传派送原始数据文件（可多选，格式需一致）", type=["xlsx", "xls"], accept_multiple_files=True)
+    raw_files = st.file_uploader("4. 上传派送原始数据文件（可多选，格式需一致）", type=["xlsx", "xls"], accept_multiple_files=True, key="delivery_stage1_raw_files")
     if raw_files:
         st.success(f"已上传 {len(raw_files)} 个文件。")
-    if st.button("开始处理派送原数据", type="primary"):
+    if st.button("开始处理派送原数据", type="primary", key="run_delivery_stage1"):
         try:
             if not selection_complete:
                 st.warning("请先把仓点、分析模块选择完整。")
@@ -337,7 +326,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
     if match_files:
         st.success(f"5B已上传 {len(match_files)} 个匹配文件。结构相同会自动按行合并。")
 
-    if st.button("开始匹配并生成派送分析报告", type="primary"):
+    if st.button("开始匹配并生成派送分析报告", type="primary", key="run_delivery_stage2"):
         try:
             if not selection_complete:
                 st.warning("请先把仓点、分析模块、统计周期都选择完整。")
@@ -365,7 +354,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
             st.exception(e)
 
 else:
-    uploaded_file = st.file_uploader("5. 上传 Excel", type=["xlsx", "xls"])
+    uploaded_file = st.file_uploader("5. 上传 Excel", type=["xlsx", "xls"], key="normal_uploaded_file")
     if uploaded_file is not None:
         try:
             uploaded_file.seek(0)
@@ -373,7 +362,7 @@ else:
             sheet_names = excel_file.sheet_names
             sheet_name = st.selectbox("选择工作表", sheet_names) if len(sheet_names) > 1 else sheet_names[0]
             st.success(f"文件上传成功，当前工作表：{sheet_name}")
-            if st.button("开始分析", type="primary"):
+            if st.button("开始分析", type="primary", key="run_normal_analysis"):
                 if not selection_complete:
                     st.warning("请先把仓点、分析模块、统计周期都选择完整。")
                 elif not selected_date_range_is_valid(date_range):
