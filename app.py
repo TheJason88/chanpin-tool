@@ -1,4 +1,3 @@
-import importlib
 from datetime import date
 
 import pandas as pd
@@ -9,7 +8,7 @@ st.title("美盈产品数据处理工具")
 st.write("请选择分析维度并上传对应 Excel，系统将自动清洗、筛选、汇总并生成结果文件。")
 st.divider()
 
-# 先让页面本身稳定打开；自定义模块导入失败时在页面内显示错误，避免 Streamlit 直接 Oh no 白屏。
+# 页面先稳定打开；业务模块导入失败时在页面内显示具体错误，避免 Streamlit 直接白屏。
 _dependency_error = None
 try:
     import processors
@@ -36,16 +35,11 @@ DEFAULT_PRODUCT_TYPE = "全部"
 DESTINATION_TYPES = ["全部", "FBA", "FBX"]
 
 _bootstrap_error = None
+_startup_checks = []
 try:
-    # Streamlit rerun sometimes keeps imported modules in memory.
-    importlib.reload(processors)
-    importlib.reload(delivery_reference)
-    importlib.reload(delivery_workflow)
-    importlib.reload(delivery_match_adapter)
-    importlib.reload(delivery_stage1_adapter)
-    importlib.reload(tool_common)
-    importlib.reload(delivery_runtime)
+    # 不在每次页面交互时强制 importlib.reload，避免 Streamlit rerun 重复 patch 导致派送模块不稳定。
     delivery_runtime.bootstrap(delivery_workflow)
+    _startup_checks = delivery_runtime.startup_smoke_check(delivery_workflow)
 except Exception as exc:
     _bootstrap_error = exc
 
@@ -53,6 +47,15 @@ if _bootstrap_error is not None:
     st.error("工具启动失败：派送运行时规则加载失败。页面已进入保护模式，下面是具体错误。")
     st.exception(_bootstrap_error)
     st.stop()
+
+_failed_checks = [x for x in _startup_checks if not x.get("是否通过")]
+if _failed_checks:
+    st.error("工具启动自检未通过，请先修复以下项目。")
+    st.dataframe(pd.DataFrame(_failed_checks), use_container_width=True)
+    st.stop()
+
+with st.sidebar.expander("启动自检", expanded=False):
+    st.dataframe(pd.DataFrame(_startup_checks), use_container_width=True, hide_index=True)
 
 
 def _is_blank(value):
@@ -114,7 +117,7 @@ def filter_delivery_destination_type(df, destination_type="全部"):
 def rebuild_zip_audit_from_cleaned(cleaned_batches):
     if cleaned_batches is None or cleaned_batches.empty or "目的地邮编待补充" not in cleaned_batches.columns:
         return pd.DataFrame()
-    mask = cleaned_batches["目的地邮编待补充"].astype(str).str.lower().isin(["true", "1", "是", "yes"])
+    mask = tool_common.normalize_boolean_series(cleaned_batches["目的地邮编待补充"])
     return cleaned_batches[mask].copy()
 
 
@@ -144,7 +147,10 @@ def build_stage2_report_for_destination(cleaned_batches, match_df=None, period_t
     combined = delivery_workflow.build_sheet1_volume_dispatch_time_report(matched)
     volume, dispatch, timing = _split_combined_report(combined)
     cost = delivery_match_adapter.build_station_cost_report(matched)
-    zip_audit = matched[matched["目的地邮编待补充"]].copy() if "目的地邮编待补充" in matched.columns else pd.DataFrame()
+    if "目的地邮编待补充" in matched.columns:
+        zip_audit = matched[tool_common.normalize_boolean_series(matched["目的地邮编待补充"])].copy()
+    else:
+        zip_audit = pd.DataFrame()
 
     report = {"货量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(volume, "货量"), "货量")}
     if destination_type in ["全部", "FBA"]:
