@@ -7,6 +7,7 @@ AKR1,Amazon-AKR1,"城市级候选ZIP，待复核：Canton / North Canton, OH",44
 ALB1,Amazon-ALB1,"1835 US Route 9, Castleton, NY",12033,120,NY,Amazon/ALB1
 AVP1,Amazon-AVP1,,18202,182,PA,Amazon/AVP1
 BFI3,Amazon-BFI3,,98327,983,WA,Amazon/BFI3
+BJC1,Amazon-BJC1,"6300 N Powhaton Road, Aurora, CO",80019,800,CO,Amazon/BJC1
 BNA2,Amazon-BNA2,"城市级候选ZIP，待复核：Lebanon, TN",37090,370,TN,Amazon/BNA2
 BNA6,Amazon-BNA6,,37040,370,TN,Amazon/BNA6
 BOS7,Amazon-BOS7,"城市级候选ZIP，待复核：Fall River, MA",02720,027,MA,Amazon/BOS7
@@ -65,6 +66,7 @@ LAX9,Amazon-LAX9,,92337,923,CA,Amazon/LAX9
 LBE1,Amazon-LBE1,"城市级候选ZIP，待复核：New Stanton, PA",15672,156,PA,Amazon/LBE1
 LFT1,Amazon-LFT1,"城市级候选ZIP，待复核：Carencro, LA",70520,705,LA,Amazon/LFT1
 LGB4,Amazon-LGB4,,92374,923,CA,Amazon/LGB4
+LGB6,Amazon-LGB6,"20901 Krameria Ave, Riverside, CA",92518,925,CA,Amazon/LGB6
 LGB8,Amazon-LGB8,,92376,923,CA,Amazon/LGB8
 LIT2,Amazon-LIT2,,72117,721,AR,Amazon/LIT2
 MCC1,Amazon-MCC1,,95742,957,CA,Amazon/MCC1
@@ -102,8 +104,10 @@ POC3,Amazon-POC3,,92509,925,CA,Amazon/POC3
 PSC2,Amazon-PSC2,,99301,993,WA,Amazon/PSC2
 PSP3,Amazon-PSP3,,92240,922,CA,Amazon/PSP3
 QXY8,Amazon-QXY8,,93725,937,CA,Amazon/QXY8
+QZZ7,Amazon-QZZ7,"8560 E Elliot Rd, Mesa, AZ",85212,852,AZ,Amazon/QZZ7
 RDU2,Amazon-RDU2,,27577,275,NC,Amazon/RDU2
 RDU4,Amazon-RDU4,"6309 Bragg Blvd, Fayetteville, NC",28303,283,NC,Amazon/RDU4
+RFD2,Amazon-RFD2,"11500 Freeman Road, Huntley, IL",60142,601,IL,Amazon/RFD2
 RFD4,Amazon-RFD4,"城市级候选ZIP，待复核：Huntley, IL",60142,601,IL,Amazon/RFD4
 RMN3,Amazon-RMN3,"220 Centreport Pkwy, Fredericksburg, VA",22406,224,VA,Amazon/RMN3
 RYY2,Amazon-RYY2,"1250 Cassville White Road, White, GA",30184,301,GA,Amazon/RYY2
