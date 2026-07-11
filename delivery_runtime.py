@@ -128,10 +128,68 @@ def _wrap_stage1_runtime_rules(delivery_workflow_module):
     return delivery_workflow_module
 
 
+def _split_stage2_combined_report(combined):
+    if combined is None or combined.empty:
+        empty = pd.DataFrame()
+        return empty, empty, empty
+    volume = combined[combined["报告部分"].astype(str).str.startswith("1.")].copy()
+    volume = volume[~volume["指标名称"].astype(str).isin(["FBA仓点货量排行", "FBX平台仓货量排行"])]
+    dispatch = combined[combined["报告部分"].astype(str).str.startswith("2.")].copy()
+    timing = combined[combined["报告部分"].astype(str).str.startswith("3.")].copy()
+    return volume, dispatch, timing
+
+
+def _stage2_zip_audit_rows(matched):
+    """兼容 Excel 读入的 True/False 字符串，避免 matched["目的地邮编待补充"] 被 pandas 当成列名索引。"""
+    if matched is None or matched.empty or "目的地邮编待补充" not in matched.columns:
+        return pd.DataFrame()
+    mask = tool_common.normalize_boolean_series(matched["目的地邮编待补充"])
+    return matched[mask].copy()
+
+
+def _build_stage2_report_safe(delivery_workflow_module, cleaned_batches, match_df=None, period_type="按周统计"):
+    """功能二统一报告生成。只修正布尔筛选和空表保护，不改变业务指标口径。"""
+    matched = delivery_workflow_module.prepare_stage2_for_report(cleaned_batches, match_df, period_type)
+    combined = delivery_workflow_module.build_sheet1_volume_dispatch_time_report(matched)
+    volume, dispatch, timing = _split_stage2_combined_report(combined)
+    cost = delivery_match_adapter.build_station_cost_report(matched)
+    zip_audit = _stage2_zip_audit_rows(matched)
+
+    return {
+        "货量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(volume, "货量"), "货量"),
+        "FBA货量排行": delivery_match_adapter._safe_round(
+            delivery_match_adapter._finalize_sheet(delivery_match_adapter.build_fba_rank_sheet(matched), "FBA货量排行"),
+            "FBA货量排行",
+        ),
+        "FBX平台仓货量": delivery_match_adapter._safe_round(
+            delivery_match_adapter._finalize_sheet(delivery_match_adapter.build_fbx_platform_warehouse_sheet(matched), "FBX平台仓货量"),
+            "FBX平台仓货量",
+        ),
+        "发车量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(dispatch, "发车量"), "发车量"),
+        "派送时效": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(timing, "派送时效"), "派送时效"),
+        "成本": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(cost, "成本"), "成本"),
+        "派送二_匹配后合并数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(matched, "明细"), "明细"),
+        "邮编异常审核": delivery_match_adapter._finalize_zip_audit_sheet(zip_audit),
+        "区域识别规则": delivery_workflow_module.REGION_RULES_DF,
+        "干线识别规则": delivery_workflow_module.LINEHAUL_RULES,
+    }
+
+
+def _patch_stage2_runtime_rules(delivery_workflow_module):
+    delivery_workflow_module.process_stage2_analysis = lambda cleaned_batches, match_df=None, period_type="按周统计": _build_stage2_report_safe(
+        delivery_workflow_module,
+        cleaned_batches,
+        match_df,
+        period_type,
+    )
+    return delivery_workflow_module
+
+
 def bootstrap(delivery_workflow_module):
     """派送模块统一初始化入口。保持幂等，不做强制reload，不删除运行时属性。"""
     _sync_common_rules()
     delivery_match_adapter.patch_delivery_workflow(delivery_workflow_module)
+    _patch_stage2_runtime_rules(delivery_workflow_module)
     delivery_stage1_adapter.patch_delivery_stage1(delivery_workflow_module)
     _wrap_stage1_runtime_rules(delivery_workflow_module)
     return delivery_workflow_module
