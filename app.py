@@ -1,3 +1,4 @@
+import importlib
 from datetime import date
 
 import pandas as pd
@@ -8,7 +9,7 @@ st.title("美盈产品数据处理工具")
 st.write("请选择分析维度并上传对应 Excel，系统将自动清洗、筛选、汇总并生成结果文件。")
 st.divider()
 
-# 页面先稳定打开；业务模块导入失败时在页面内显示具体错误，避免 Streamlit 直接白屏。
+# 先让页面本身稳定打开；自定义模块导入失败时在页面内显示错误，避免 Streamlit 直接 Oh no 白屏。
 _dependency_error = None
 try:
     import processors
@@ -36,7 +37,14 @@ DESTINATION_TYPES = ["全部", "FBA", "FBX"]
 
 _bootstrap_error = None
 try:
-    # 只做一次轻量初始化，不做 importlib.reload，不做启动自检，避免 Streamlit 选择框 rerun 时重复 patch 崩溃。
+    # Streamlit rerun sometimes keeps imported modules in memory.
+    importlib.reload(processors)
+    importlib.reload(delivery_reference)
+    importlib.reload(delivery_workflow)
+    importlib.reload(delivery_match_adapter)
+    importlib.reload(delivery_stage1_adapter)
+    importlib.reload(tool_common)
+    importlib.reload(delivery_runtime)
     delivery_runtime.bootstrap(delivery_workflow)
 except Exception as exc:
     _bootstrap_error = exc
@@ -106,7 +114,7 @@ def filter_delivery_destination_type(df, destination_type="全部"):
 def rebuild_zip_audit_from_cleaned(cleaned_batches):
     if cleaned_batches is None or cleaned_batches.empty or "目的地邮编待补充" not in cleaned_batches.columns:
         return pd.DataFrame()
-    mask = tool_common.normalize_boolean_series(cleaned_batches["目的地邮编待补充"])
+    mask = cleaned_batches["目的地邮编待补充"].astype(str).str.lower().isin(["true", "1", "是", "yes"])
     return cleaned_batches[mask].copy()
 
 
@@ -136,10 +144,7 @@ def build_stage2_report_for_destination(cleaned_batches, match_df=None, period_t
     combined = delivery_workflow.build_sheet1_volume_dispatch_time_report(matched)
     volume, dispatch, timing = _split_combined_report(combined)
     cost = delivery_match_adapter.build_station_cost_report(matched)
-    if "目的地邮编待补充" in matched.columns:
-        zip_audit = matched[tool_common.normalize_boolean_series(matched["目的地邮编待补充"])].copy()
-    else:
-        zip_audit = pd.DataFrame()
+    zip_audit = matched[matched["目的地邮编待补充"]].copy() if "目的地邮编待补充" in matched.columns else pd.DataFrame()
 
     report = {"货量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(volume, "货量"), "货量")}
     if destination_type in ["全部", "FBA"]:
@@ -272,10 +277,10 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
     selection_complete = selection_complete and period_type != PLACEHOLDER
 
 if analysis_module == DELIVERY_STAGE1_MODULE:
-    raw_files = st.file_uploader("4. 上传派送原始数据文件（可多选，格式需一致）", type=["xlsx", "xls"], accept_multiple_files=True, key="delivery_stage1_raw_files")
+    raw_files = st.file_uploader("4. 上传派送原始数据文件（可多选，格式需一致）", type=["xlsx", "xls"], accept_multiple_files=True)
     if raw_files:
         st.success(f"已上传 {len(raw_files)} 个文件。")
-    if st.button("开始处理派送原数据", type="primary", key="run_delivery_stage1"):
+    if st.button("开始处理派送原数据", type="primary"):
         try:
             if not selection_complete:
                 st.warning("请先把仓点、分析模块选择完整。")
@@ -326,7 +331,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
     if match_files:
         st.success(f"5B已上传 {len(match_files)} 个匹配文件。结构相同会自动按行合并。")
 
-    if st.button("开始匹配并生成派送分析报告", type="primary", key="run_delivery_stage2"):
+    if st.button("开始匹配并生成派送分析报告", type="primary"):
         try:
             if not selection_complete:
                 st.warning("请先把仓点、分析模块、统计周期都选择完整。")
@@ -354,7 +359,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
             st.exception(e)
 
 else:
-    uploaded_file = st.file_uploader("5. 上传 Excel", type=["xlsx", "xls"], key="normal_uploaded_file")
+    uploaded_file = st.file_uploader("5. 上传 Excel", type=["xlsx", "xls"])
     if uploaded_file is not None:
         try:
             uploaded_file.seek(0)
@@ -362,7 +367,7 @@ else:
             sheet_names = excel_file.sheet_names
             sheet_name = st.selectbox("选择工作表", sheet_names) if len(sheet_names) > 1 else sheet_names[0]
             st.success(f"文件上传成功，当前工作表：{sheet_name}")
-            if st.button("开始分析", type="primary", key="run_normal_analysis"):
+            if st.button("开始分析", type="primary"):
                 if not selection_complete:
                     st.warning("请先把仓点、分析模块、统计周期都选择完整。")
                 elif not selected_date_range_is_valid(date_range):
