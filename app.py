@@ -1,4 +1,3 @@
-import importlib
 from datetime import date
 
 import pandas as pd
@@ -9,7 +8,7 @@ st.title("美盈产品数据处理工具")
 st.write("请选择分析维度并上传对应 Excel，系统将自动清洗、筛选、汇总并生成结果文件。")
 st.divider()
 
-# 先让页面本身稳定打开；自定义模块导入失败时在页面内显示错误，避免 Streamlit 直接 Oh no 白屏。
+# 页面先稳定打开；业务模块导入失败时在页面内显示具体错误。
 _dependency_error = None
 try:
     import processors
@@ -37,14 +36,7 @@ DESTINATION_TYPES = ["全部", "FBA", "FBX"]
 
 _bootstrap_error = None
 try:
-    # Streamlit rerun sometimes keeps imported modules in memory.
-    importlib.reload(processors)
-    importlib.reload(delivery_reference)
-    importlib.reload(delivery_workflow)
-    importlib.reload(delivery_match_adapter)
-    importlib.reload(delivery_stage1_adapter)
-    importlib.reload(tool_common)
-    importlib.reload(delivery_runtime)
+    # 不在每次下拉框变化时强制 reload。Streamlit rerun 只重新执行页面逻辑，模块初始化保持轻量。
     delivery_runtime.bootstrap(delivery_workflow)
 except Exception as exc:
     _bootstrap_error = exc
@@ -72,11 +64,6 @@ def _numeric_value(value):
 
 
 def classify_delivery_destination_type(row):
-    """
-    派送目的地类型口径：
-    FBA = 明确 Amazon/FBA 仓；FBX = 非FBA目的地。
-    同一车次混合目的地时，前置逻辑已按最大出库体积目的地覆盖识别字段。
-    """
     product_text = " ".join(
         _text(row.get(col, ""))
         for col in ["主产品类型", "系统产品类型", "FBA/FBX", "实际目的地", "修正后目的地", "目的地"]
@@ -114,7 +101,7 @@ def filter_delivery_destination_type(df, destination_type="全部"):
 def rebuild_zip_audit_from_cleaned(cleaned_batches):
     if cleaned_batches is None or cleaned_batches.empty or "目的地邮编待补充" not in cleaned_batches.columns:
         return pd.DataFrame()
-    mask = cleaned_batches["目的地邮编待补充"].astype(str).str.lower().isin(["true", "1", "是", "yes"])
+    mask = tool_common.normalize_boolean_series(cleaned_batches["目的地邮编待补充"])
     return cleaned_batches[mask].copy()
 
 
@@ -144,7 +131,7 @@ def build_stage2_report_for_destination(cleaned_batches, match_df=None, period_t
     combined = delivery_workflow.build_sheet1_volume_dispatch_time_report(matched)
     volume, dispatch, timing = _split_combined_report(combined)
     cost = delivery_match_adapter.build_station_cost_report(matched)
-    zip_audit = matched[matched["目的地邮编待补充"]].copy() if "目的地邮编待补充" in matched.columns else pd.DataFrame()
+    zip_audit = rebuild_zip_audit_from_cleaned(matched)
 
     report = {"货量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(volume, "货量"), "货量")}
     if destination_type in ["全部", "FBA"]:
@@ -236,30 +223,31 @@ def sanitize_stage2_input_df(df):
     return tool_common.ensure_object_df(df)
 
 
-warehouse = st.selectbox("1. 选择仓点", [PLACEHOLDER, "LA", "NJ", "SAV", "DAL", "全部"], index=0)
+warehouse = st.selectbox("1. 选择仓点", [PLACEHOLDER, "LA", "NJ", "SAV", "DAL", "全部"], index=0, key="warehouse_select")
 analysis_module = st.selectbox(
     "2. 选择分析模块",
     [PLACEHOLDER, "货量分析", "提柜分析", "拆柜分析", DELIVERY_STAGE1_MODULE, DELIVERY_STAGE2_MODULE],
     index=0,
+    key="analysis_module_select",
 )
 
 product_type = DEFAULT_PRODUCT_TYPE
 delivery_destination_type = "全部"
 if analysis_module in [DELIVERY_STAGE1_MODULE, DELIVERY_STAGE2_MODULE]:
-    delivery_destination_type = st.selectbox("3. 选择目的地类型", DESTINATION_TYPES, index=0)
+    delivery_destination_type = st.selectbox("3. 选择目的地类型", DESTINATION_TYPES, index=0, key="delivery_destination_type_select")
 
 period_type = "不适用"
 date_range = None
 if analysis_module == DELIVERY_STAGE1_MODULE:
     st.info("派送原数据处理执行全量清洗，不按时间范围筛选；可按目的地类型筛选：全部 / FBA / FBX。")
 elif analysis_module == DELIVERY_STAGE2_MODULE:
-    period_type = st.selectbox("4. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0)
+    period_type = st.selectbox("4. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0, key="stage2_period_select")
     st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。选择全部时输出FBA和FBX专项表；选择FBA/FBX时只输出对应目的地的专项表。")
 elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
-    period_type = st.selectbox("3. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0)
+    period_type = st.selectbox("3. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0, key="normal_period_select")
     today = date.today()
     month_start = today.replace(day=1)
-    date_range = st.date_input("4. 选择时间范围", value=(month_start, today), format="YYYY-MM-DD")
+    date_range = st.date_input("4. 选择时间范围", value=(month_start, today), format="YYYY-MM-DD", key="normal_date_range")
 
 st.caption(
     "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间。"
@@ -277,10 +265,17 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
     selection_complete = selection_complete and period_type != PLACEHOLDER
 
 if analysis_module == DELIVERY_STAGE1_MODULE:
-    raw_files = st.file_uploader("4. 上传派送原始数据文件（可多选，格式需一致）", type=["xlsx", "xls"], accept_multiple_files=True)
+    with st.form("delivery_stage1_form", clear_on_submit=False):
+        raw_files = st.file_uploader(
+            "4. 上传派送原始数据文件（可多选，格式需一致）",
+            type=["xlsx", "xls"],
+            accept_multiple_files=True,
+            key="delivery_stage1_raw_files",
+        )
+        run_stage1 = st.form_submit_button("开始处理派送原数据", type="primary")
     if raw_files:
         st.success(f"已上传 {len(raw_files)} 个文件。")
-    if st.button("开始处理派送原数据", type="primary"):
+    if run_stage1:
         try:
             if not selection_complete:
                 st.warning("请先把仓点、分析模块选择完整。")
@@ -315,7 +310,7 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
                 st.dataframe(invalid_detail.head(100), use_container_width=True)
                 output = tool_common.write_sheets_to_excel({"清洗后数据": cleaned_batches, "邮编异常数据": zip_audit_df, "无效数据": invalid_detail})
                 file_name = tool_common.build_output_filename(warehouse, DELIVERY_STAGE1_MODULE, delivery_destination_type)
-                st.download_button("下载派送一结果 Excel", output, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                st.download_button("下载派送一结果 Excel", output, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_delivery_stage1")
         except Exception as e:
             st.error("派送原数据处理失败，请检查文件字段、仓点选择或源数据格式。")
             st.exception(e)
@@ -331,7 +326,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
     if match_files:
         st.success(f"5B已上传 {len(match_files)} 个匹配文件。结构相同会自动按行合并。")
 
-    if st.button("开始匹配并生成派送分析报告", type="primary"):
+    if st.button("开始匹配并生成派送分析报告", type="primary", key="run_delivery_stage2"):
         try:
             if not selection_complete:
                 st.warning("请先把仓点、分析模块、统计周期都选择完整。")
@@ -353,21 +348,21 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
                 st.write(f"报告结构：{'、'.join(report_sheets)}。当前目的地类型：{delivery_destination_type}")
                 output = tool_common.write_sheets_to_excel(metrics)
                 file_name = tool_common.build_output_filename(warehouse, DELIVERY_STAGE2_MODULE, delivery_destination_type, period_type)
-                st.download_button("下载派送分析报告 Excel", output, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                st.download_button("下载派送分析报告 Excel", output, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_delivery_stage2")
         except Exception as e:
             st.error("派送数据匹配及分析失败，请检查派送一结果文件、匹配文件字段或批次号是否一致。")
             st.exception(e)
 
 else:
-    uploaded_file = st.file_uploader("5. 上传 Excel", type=["xlsx", "xls"])
+    uploaded_file = st.file_uploader("5. 上传 Excel", type=["xlsx", "xls"], key="normal_uploaded_file")
     if uploaded_file is not None:
         try:
             uploaded_file.seek(0)
             excel_file = pd.ExcelFile(uploaded_file)
             sheet_names = excel_file.sheet_names
-            sheet_name = st.selectbox("选择工作表", sheet_names) if len(sheet_names) > 1 else sheet_names[0]
+            sheet_name = st.selectbox("选择工作表", sheet_names, key="normal_sheet_select") if len(sheet_names) > 1 else sheet_names[0]
             st.success(f"文件上传成功，当前工作表：{sheet_name}")
-            if st.button("开始分析", type="primary"):
+            if st.button("开始分析", type="primary", key="run_normal_analysis"):
                 if not selection_complete:
                     st.warning("请先把仓点、分析模块、统计周期都选择完整。")
                 elif not selected_date_range_is_valid(date_range):
@@ -394,7 +389,7 @@ else:
                     st.dataframe(detail_df.head(100), use_container_width=True)
                     output = tool_common.write_sheets_to_excel({"清洗后的数据集": detail_df, "数据处理结果": result_df})
                     file_name = tool_common.build_output_filename(warehouse, final_module, period_type)
-                    st.download_button("下载结果 Excel", output, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    st.download_button("下载结果 Excel", output, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_normal_result")
         except Exception as e:
             st.error("处理失败，请检查文件字段、工作表、时间范围或分析模块是否匹配。")
             st.exception(e)
