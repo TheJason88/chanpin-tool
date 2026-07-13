@@ -33,6 +33,8 @@ DELIVERY_STAGE2_MODULE = "派送数据匹配及分析"
 NORMAL_MODULES = ["货量分析", "提柜分析", "拆柜分析"]
 DEFAULT_PRODUCT_TYPE = "全部"
 DESTINATION_TYPES = ["全部", "FBA", "FBX"]
+ORIGINAL_FILE_PERIOD = "按原文件时间范围"
+NORMAL_PERIOD_TYPES = [PLACEHOLDER, "按月统计", "按周统计", ORIGINAL_FILE_PERIOD]
 
 _bootstrap_error = None
 try:
@@ -223,6 +225,40 @@ def sanitize_stage2_input_df(df):
     return tool_common.ensure_object_df(df)
 
 
+def normal_module_date_column(module_name):
+    if module_name == "货量分析":
+        return "ETA"
+    if module_name in ["提柜分析", "提柜时效分析"]:
+        return "实际抵仓时间"
+    if module_name in ["拆柜分析", "拆柜时效分析"]:
+        return "拆柜完成时间"
+    return ""
+
+
+def original_file_period_label(detail_df, module_name):
+    date_col = normal_module_date_column(module_name)
+    if detail_df is None or detail_df.empty or date_col not in detail_df.columns:
+        return "原文件全部时间范围"
+    valid_dates = pd.to_datetime(detail_df[date_col], errors="coerce").dropna()
+    if valid_dates.empty:
+        return "原文件全部时间范围"
+    return f"{valid_dates.min().strftime('%Y-%m-%d')} ~ {valid_dates.max().strftime('%Y-%m-%d')}"
+
+
+def rebuild_normal_result_for_original_file_range(detail_df, module_name):
+    detail_df = detail_df.copy()
+    detail_df["统计周期"] = original_file_period_label(detail_df, module_name)
+    if module_name == "货量分析":
+        result_df = processors.build_volume_one_row_summary(detail_df, include_us_customer=True)
+    elif module_name in ["提柜分析", "提柜时效分析"]:
+        result_df = processors.build_time_ops_one_row_summary(detail_df, "提柜时效", "提柜")
+    elif module_name in ["拆柜分析", "拆柜时效分析"]:
+        result_df = processors.build_time_ops_one_row_summary(detail_df, "拆柜时效", "拆柜")
+    else:
+        result_df = pd.DataFrame()
+    return detail_df, processors.round_output_numbers(result_df, processors.RESULT_DECIMALS)
+
+
 warehouse = st.selectbox("1. 选择仓点", [PLACEHOLDER, "LA", "NJ", "SAV", "DAL", "全部"], index=0, key="warehouse_select")
 analysis_module = st.selectbox(
     "2. 选择分析模块",
@@ -244,14 +280,18 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
     period_type = st.selectbox("4. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0, key="stage2_period_select")
     st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。选择全部时输出FBA和FBX专项表；选择FBA/FBX时只输出对应目的地的专项表。")
 elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
-    period_type = st.selectbox("3. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0, key="normal_period_select")
-    today = date.today()
-    month_start = today.replace(day=1)
-    date_range = st.date_input("4. 选择时间范围", value=(month_start, today), format="YYYY-MM-DD", key="normal_date_range")
+    period_type = st.selectbox("3. 选择统计周期", NORMAL_PERIOD_TYPES, index=0, key="normal_period_select")
+    if period_type == ORIGINAL_FILE_PERIOD:
+        st.info("按原文件时间范围：不再按页面时间筛选，也不拆分月/周；系统会按上传文件中对应时间字段的最小日期到最大日期，将全部有效数据汇总为一个统计周期。")
+    else:
+        today = date.today()
+        month_start = today.replace(day=1)
+        date_range = st.date_input("4. 选择时间范围", value=(month_start, today), format="YYYY-MM-DD", key="normal_date_range")
 
 st.caption(
     "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间。"
     "普通模块不做产品类型筛选，统一按上传文件中的全部有效数据处理。"
+    "普通模块支持：按月统计 / 按周统计 / 按原文件时间范围。"
     "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
     "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
     "6B支持多文件上传；结构完全相同的匹配文件默认纵向合并。"
@@ -365,24 +405,29 @@ else:
             if st.button("开始分析", type="primary", key="run_normal_analysis"):
                 if not selection_complete:
                     st.warning("请先把仓点、分析模块、统计周期都选择完整。")
-                elif not selected_date_range_is_valid(date_range):
+                elif period_type != ORIGINAL_FILE_PERIOD and not selected_date_range_is_valid(date_range):
                     st.warning("请选择完整的开始日期和结束日期。")
-                elif date_range[0] > date_range[1]:
+                elif period_type != ORIGINAL_FILE_PERIOD and date_range[0] > date_range[1]:
                     st.warning("开始日期不能晚于结束日期。")
                 else:
                     validate_uploaded_warehouse(uploaded_file, sheet_name, warehouse)
                     uploaded_file.seek(0)
                     warehouse_for_processing = "四仓合并" if warehouse == "全部" else warehouse
+                    processor_period_type = "按周统计" if period_type == ORIGINAL_FILE_PERIOD else period_type
+                    normal_start_date = None if period_type == ORIGINAL_FILE_PERIOD else date_range[0]
+                    normal_end_date = None if period_type == ORIGINAL_FILE_PERIOD else date_range[1]
                     detail_df, result_df, final_module = processors.process_uploaded_file(
                         uploaded_file=uploaded_file,
                         sheet_name=sheet_name,
                         warehouse=warehouse_for_processing,
                         product_type=DEFAULT_PRODUCT_TYPE,
                         analysis_module=analysis_module,
-                        period_type=period_type,
-                        start_date=date_range[0],
-                        end_date=date_range[1],
+                        period_type=processor_period_type,
+                        start_date=normal_start_date,
+                        end_date=normal_end_date,
                     )
+                    if period_type == ORIGINAL_FILE_PERIOD:
+                        detail_df, result_df = rebuild_normal_result_for_original_file_range(detail_df, analysis_module)
                     st.subheader("数据处理结果")
                     st.dataframe(result_df, use_container_width=True)
                     st.subheader("清洗后的数据集预览")
