@@ -37,15 +37,18 @@ def _sync_common_rules():
 
 
 def _contains_any_keyword(value, keywords):
-    if value is None or pd.isna(value):
+    if value is None:
         return False
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
     text = str(value)
     upper_text = text.upper()
     for keyword in keywords:
         k = str(keyword)
-        if not k:
-            continue
-        if k.upper() in upper_text:
+        if k and k.upper() in upper_text:
             return True
     return False
 
@@ -53,10 +56,15 @@ def _contains_any_keyword(value, keywords):
 def _row_text(row, columns):
     values = []
     for col in columns:
-        if col in row.index:
-            value = row.get(col, "")
-            if value is not None and not pd.isna(value):
-                values.append(str(value))
+        if col not in row.index:
+            continue
+        value = row.get(col, "")
+        try:
+            is_blank = value is None or pd.isna(value)
+        except Exception:
+            is_blank = value is None
+        if not is_blank:
+            values.append(str(value))
     return " ".join(values)
 
 
@@ -68,6 +76,17 @@ def _patch_invalid_batch_keywords(delivery_workflow_module):
             keywords.append(keyword)
     delivery_workflow_module.INVALID_BATCH_KEYWORDS = keywords
     return delivery_workflow_module
+
+
+def _set_text_for_mask(df, mask, col, value, create=False):
+    """安全写入文本值，避免 pandas 3 对 int/float 列写入字符串时报 dtype 错。"""
+    if col not in df.columns:
+        if not create:
+            return
+        df[col] = pd.Series([pd.NA] * len(df), index=df.index, dtype="object")
+    elif str(df[col].dtype) != "object":
+        df[col] = df[col].astype("object")
+    df.loc[mask, col] = value
 
 
 def _apply_ltl_priority_to_detail(detail_df):
@@ -84,24 +103,19 @@ def _apply_ltl_priority_to_detail(detail_df):
     if not mask.any():
         return out
 
-    out.loc[mask, "标准运输类型"] = "LTL"
-    if "运输类型" in out.columns:
-        out.loc[mask, "运输类型"] = "LTL"
-    if "运输方式" in out.columns:
-        out.loc[mask, "运输方式"] = "LTL"
-    if "派送方式" in out.columns:
-        out.loc[mask, "派送方式"] = "散板出库"
-    if "车型标准值" in out.columns:
-        out.loc[mask, "车型标准值"] = "不适用"
-    if "装车类型标准值" in out.columns:
-        out.loc[mask, "装车类型标准值"] = "散板"
+    _set_text_for_mask(out, mask, "标准运输类型", "LTL", create=True)
+    _set_text_for_mask(out, mask, "运输类型", "LTL")
+    _set_text_for_mask(out, mask, "运输方式", "LTL")
+    _set_text_for_mask(out, mask, "派送方式", "散板出库")
+    _set_text_for_mask(out, mask, "车型标准值", "不适用")
+    _set_text_for_mask(out, mask, "装车类型标准值", "散板")
     return out
 
 
 def _patch_ltl_priority_from_remarks():
     """功能一原始明细清洗后、合并车次前，按备注优先纠正LTL。"""
     current_func = processors.process_delivery_stage1_from_files
-    if getattr(current_func, "_ltl_remark_priority", False):
+    if getattr(current_func, "_ltl_remark_priority_v2", False):
         return
 
     original_func = getattr(processors, "_original_process_delivery_stage1_from_files", current_func)
@@ -114,7 +128,7 @@ def _patch_ltl_priority_from_remarks():
             return (detail_df,) + tuple(result[1:])
         return result
 
-    process_delivery_stage1_from_files_with_ltl_priority._ltl_remark_priority = True
+    process_delivery_stage1_from_files_with_ltl_priority._ltl_remark_priority_v2 = True
     processors.process_delivery_stage1_from_files = process_delivery_stage1_from_files_with_ltl_priority
 
 
