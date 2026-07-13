@@ -30,7 +30,7 @@ def _sync_common_rules():
 def _patch_invalid_batch_keywords(delivery_workflow_module):
     """派送一无效批次剔除关键词补充。"""
     keywords = list(getattr(delivery_workflow_module, "INVALID_BATCH_KEYWORDS", []))
-    for keyword in ["清除"]:
+    for keyword in ["清除", "自提"]:
         if keyword not in keywords:
             keywords.append(keyword)
     delivery_workflow_module.INVALID_BATCH_KEYWORDS = keywords
@@ -248,8 +248,19 @@ def _transfer_rows(matched, ftl_only=True):
     return out
 
 
+def _filter_positive_cost_rows(df):
+    """成本测算只纳入派送成本大于0的车次；0成本车不计车次数、不参与平均价。"""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    if "派送成本" not in out.columns:
+        return out.iloc[0:0].copy()
+    out["派送成本"] = pd.to_numeric(out["派送成本"], errors="coerce").fillna(0)
+    return out[out["派送成本"] > 0].copy()
+
+
 def _filter_regular_single_batch_trips_for_cost(matched):
-    """普通派送成本只看单批次单车次；调拨成本另行汇总，不走车型/卡地板拆分。"""
+    """普通派送成本只看单批次单车次、且派送成本大于0；调拨成本另行汇总。"""
     if matched is None or matched.empty:
         return matched
     out = matched.copy()
@@ -258,7 +269,8 @@ def _filter_regular_single_batch_trips_for_cost(matched):
     if regular.empty:
         return regular
     batch_counts = regular.apply(lambda row: len(_unique_batch_keys_from_row(row)), axis=1)
-    return regular[batch_counts == 1].copy()
+    single_batch = regular[batch_counts == 1].copy()
+    return _filter_positive_cost_rows(single_batch)
 
 
 def _combine_series_text(series):
@@ -275,7 +287,7 @@ def _combine_series_text(series):
 
 
 def _build_transfer_cost_report(matched):
-    transfer = _transfer_rows(matched, ftl_only=True)
+    transfer = _filter_positive_cost_rows(_transfer_rows(matched, ftl_only=True))
     columns = [
         "指标名称", "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组",
         "车次数", "总出库体积", "总派送成本", "平均整车价", "每方平均价",
@@ -344,7 +356,7 @@ def _build_transfer_report(matched):
 
 
 def _patch_cost_report_single_batch_only():
-    """派送二成本表口径：普通派送只看单批次单车次；调拨成本单独按目标盈仓汇总，不分车型。"""
+    """派送二成本表口径：普通派送只看单批次单车次且成本>0；调拨成本单独按目标盈仓汇总且成本>0。"""
     current_func = delivery_match_adapter.build_station_cost_report
     if getattr(current_func, "_single_batch_and_transfer_cost", False):
         return
