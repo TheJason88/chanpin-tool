@@ -9,7 +9,6 @@ import delivery_stage1_adapter
 
 
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
-
 TRANSFER_TARGETS = {
     "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
     "SAV": {"name": "SAV盈仓", "line": "LA-SAV"},
@@ -17,12 +16,14 @@ TRANSFER_TARGETS = {
 }
 TRANSFER_KEYWORDS = ["调拨", "仓间", "调入"]
 
-# 功能一无效批次补充关键词。原始代码里已有：取消、作废、废单、无效、删除、关闭。
+# 原始代码已有：取消、作废、废单、无效、删除、关闭。这里补足历史备注删除关键词和新增关键词。
 ADDITIONAL_INVALID_BATCH_KEYWORDS = ["废单", "快递", "公共单", "清除", "自提"]
 
 # LTL最高优先级识别词：哪怕运输类型显示FTL，只要备注命中这些词，功能一先按LTL处理。
 LTL_PRIORITY_KEYWORDS = ["LTL", "散货", "散板"]
 LTL_REMARK_COLUMNS = ["备注", "备注信息", "MEMO", "跟进记录", "内部备注", "派送区域"]
+START_TIME_CANDIDATES = ["批次出库时间", "出库时间", "实际出库时间", "批次出库时间"]
+END_TIME_CANDIDATES = ["批次签收时间", "签收时间", "实际签收时间", "送达时间", "妥投时间"]
 
 
 def _sync_common_rules():
@@ -36,14 +37,16 @@ def _sync_common_rules():
     delivery_match_adapter.DECIMAL_COLUMNS = tool_common.DECIMAL_OUTPUT_COLUMNS
 
 
-def _contains_any_keyword(value, keywords):
-    if value is None:
-        return False
+def _is_blank_value(value):
     try:
-        if pd.isna(value):
-            return False
+        return value is None or pd.isna(value)
     except Exception:
-        pass
+        return value is None
+
+
+def _contains_any_keyword(value, keywords):
+    if _is_blank_value(value):
+        return False
     text = str(value)
     upper_text = text.upper()
     for keyword in keywords:
@@ -56,16 +59,60 @@ def _contains_any_keyword(value, keywords):
 def _row_text(row, columns):
     values = []
     for col in columns:
-        if col not in row.index:
-            continue
-        value = row.get(col, "")
-        try:
-            is_blank = value is None or pd.isna(value)
-        except Exception:
-            is_blank = value is None
-        if not is_blank:
-            values.append(str(value))
+        if col in row.index and not _is_blank_value(row.get(col, "")):
+            values.append(str(row.get(col, "")))
     return " ".join(values)
+
+
+def _find_existing_col(df, candidates):
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+
+def _is_ltl_series(df):
+    if df is None or df.empty:
+        return pd.Series(False, index=getattr(df, "index", []))
+    mask = pd.Series(False, index=df.index)
+    for col in ["标准运输类型", "运输类型", "运输方式", "派送方式", "装车类型标准值"]:
+        if col not in df.columns:
+            continue
+        text = df[col].astype(str).str.upper()
+        mask = mask | text.str.contains("LTL", na=False) | text.str.contains("散货|散板", na=False)
+    return mask
+
+
+def _clean_delivery_time_columns(df):
+    """
+    派送时效清洗口径：
+    - 出库时间/签收时间任一缺失，派送时效留空，不再显示0；
+    - 派送时效<=0或>30视为无效，留空；
+    - LTL不参与派送时效统计，时效留空；
+    - 是否有效时效同步改为布尔口径，供后续均值/P80自然排除无效行。
+    """
+    if df is None or df.empty or "派送时效" not in df.columns:
+        return df
+
+    out = df.copy()
+    start_col = _find_existing_col(out, START_TIME_CANDIDATES)
+    end_col = _find_existing_col(out, END_TIME_CANDIDATES)
+
+    duration = pd.to_numeric(out["派送时效"], errors="coerce")
+    invalid = duration.isna() | (duration <= 0) | (duration > 30) | _is_ltl_series(out)
+
+    if start_col:
+        start_time = pd.to_datetime(out[start_col], errors="coerce")
+        invalid = invalid | start_time.isna()
+    if end_col:
+        end_time = pd.to_datetime(out[end_col], errors="coerce")
+        invalid = invalid | end_time.isna()
+
+    out["派送时效"] = duration
+    out.loc[invalid, "派送时效"] = pd.NA
+    if "是否有效时效" in out.columns:
+        out["是否有效时效"] = ~invalid
+    return out
 
 
 def _patch_invalid_batch_keywords(delivery_workflow_module):
@@ -96,26 +143,22 @@ def _apply_ltl_priority_to_detail(detail_df):
 
     out = detail_df.copy()
     remark_cols = [col for col in LTL_REMARK_COLUMNS if col in out.columns]
-    if not remark_cols:
-        return out
-
-    mask = out.apply(lambda row: _contains_any_keyword(_row_text(row, remark_cols), LTL_PRIORITY_KEYWORDS), axis=1)
-    if not mask.any():
-        return out
-
-    _set_text_for_mask(out, mask, "标准运输类型", "LTL", create=True)
-    _set_text_for_mask(out, mask, "运输类型", "LTL")
-    _set_text_for_mask(out, mask, "运输方式", "LTL")
-    _set_text_for_mask(out, mask, "派送方式", "散板出库")
-    _set_text_for_mask(out, mask, "车型标准值", "不适用")
-    _set_text_for_mask(out, mask, "装车类型标准值", "散板")
-    return out
+    if remark_cols:
+        mask = out.apply(lambda row: _contains_any_keyword(_row_text(row, remark_cols), LTL_PRIORITY_KEYWORDS), axis=1)
+        if mask.any():
+            _set_text_for_mask(out, mask, "标准运输类型", "LTL", create=True)
+            _set_text_for_mask(out, mask, "运输类型", "LTL")
+            _set_text_for_mask(out, mask, "运输方式", "LTL")
+            _set_text_for_mask(out, mask, "派送方式", "散板出库")
+            _set_text_for_mask(out, mask, "车型标准值", "不适用")
+            _set_text_for_mask(out, mask, "装车类型标准值", "散板")
+    return _clean_delivery_time_columns(out)
 
 
 def _patch_ltl_priority_from_remarks():
     """功能一原始明细清洗后、合并车次前，按备注优先纠正LTL。"""
     current_func = processors.process_delivery_stage1_from_files
-    if getattr(current_func, "_ltl_remark_priority_v2", False):
+    if getattr(current_func, "_ltl_remark_priority_v3", False):
         return
 
     original_func = getattr(processors, "_original_process_delivery_stage1_from_files", current_func)
@@ -128,7 +171,7 @@ def _patch_ltl_priority_from_remarks():
             return (detail_df,) + tuple(result[1:])
         return result
 
-    process_delivery_stage1_from_files_with_ltl_priority._ltl_remark_priority_v2 = True
+    process_delivery_stage1_from_files_with_ltl_priority._ltl_remark_priority_v3 = True
     processors.process_delivery_stage1_from_files = process_delivery_stage1_from_files_with_ltl_priority
 
 
@@ -189,7 +232,7 @@ def _stage1_force_totals_with_unique_cost_rule(cleaned_batches, detail_df):
     detail = delivery_stage1_adapter.repair_delivery_stage1_numeric_columns(detail)
     detail = delivery_stage1_adapter._ensure_numeric(detail, delivery_stage1_adapter.NUMERIC_COLS)
     if "批次号" not in detail.columns:
-        return cleaned_batches
+        return _clean_delivery_time_columns(cleaned_batches)
     if "FBA/FBX" not in detail.columns:
         detail["FBA/FBX"] = ""
     detail["批次号_匹配Key"] = detail["批次号"].apply(_normalize_batch_key)
@@ -224,18 +267,17 @@ def _stage1_force_totals_with_unique_cost_rule(cleaned_batches, detail_df):
             out.at[idx, "系统产品类型"] = "FBX"
         out.at[idx, "主产品类型"] = "FBA" if fba_volume >= fbx_volume and fba_volume > 0 else ("FBX" if fbx_volume > 0 else "未知")
 
-    return out
+    return _clean_delivery_time_columns(out)
 
 
 def _apply_trip_cost_rule(cleaned_batches, raw_detail):
     """兜底回填派送成本，确保功能一最终输出仍使用同一套成本口径。"""
     if cleaned_batches is None or cleaned_batches.empty or raw_detail is None or raw_detail.empty:
-        return cleaned_batches
+        return _clean_delivery_time_columns(cleaned_batches)
     if "批次号" not in raw_detail.columns or "派送成本" not in raw_detail.columns:
-        return cleaned_batches
+        return _clean_delivery_time_columns(cleaned_batches)
 
-    detail = _apply_ltl_priority_to_detail(raw_detail)
-    detail = detail.copy()
+    detail = _apply_ltl_priority_to_detail(raw_detail).copy()
     detail["批次号_匹配Key"] = detail["批次号"].apply(_normalize_batch_key)
     detail["派送成本"] = pd.to_numeric(detail["派送成本"], errors="coerce")
 
@@ -255,7 +297,7 @@ def _apply_trip_cost_rule(cleaned_batches, raw_detail):
             continue
         out.at[idx, "派送成本"] = _aggregate_unique_batch_costs(_batch_costs_by_ordered_batch_ids(matched, batch_keys))
 
-    return out
+    return _clean_delivery_time_columns(out)
 
 
 def _original_file_period_label(df, date_col="批次出库时间"):
@@ -286,6 +328,24 @@ def _patch_stage2_original_file_period(delivery_workflow_module):
 
     add_analysis_period_with_original_file_range._supports_original_file_period = True
     delivery_workflow_module.add_analysis_period = add_analysis_period_with_original_file_range
+    return delivery_workflow_module
+
+
+def _patch_stage2_prepare_time_rules(delivery_workflow_module):
+    """派送二在生成报表前重洗时效：缺日期/0时效/LTL均不参与均值与P80。"""
+    current_func = delivery_workflow_module.prepare_stage2_for_report
+    if getattr(current_func, "_cleans_delivery_time", False):
+        return delivery_workflow_module
+
+    original_func = getattr(delivery_workflow_module, "_original_prepare_stage2_for_report", current_func)
+    delivery_workflow_module._original_prepare_stage2_for_report = original_func
+
+    def prepare_stage2_for_report_with_clean_time(cleaned_batches, match_df, period_type):
+        matched = original_func(cleaned_batches, match_df, period_type)
+        return _clean_delivery_time_columns(matched)
+
+    prepare_stage2_for_report_with_clean_time._cleans_delivery_time = True
+    delivery_workflow_module.prepare_stage2_for_report = prepare_stage2_for_report_with_clean_time
     return delivery_workflow_module
 
 
@@ -486,6 +546,7 @@ def _patch_stage2_transfer_sheet():
 
     def build_split_stage2_report_with_transfer(delivery_workflow_module, cleaned_batches, match_df, period_type="按周统计"):
         matched = delivery_workflow_module.prepare_stage2_for_report(cleaned_batches, match_df, period_type)
+        matched = _clean_delivery_time_columns(matched)
         combined = delivery_workflow_module.build_sheet1_volume_dispatch_time_report(matched)
         if combined.empty:
             volume = dispatch = timing = combined.copy()
@@ -539,8 +600,10 @@ def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_modul
         )
         if isinstance(result, tuple) and len(result) == 4:
             cleaned_batches, invalid_detail, zip_audit_df, raw_detail = result
+            raw_detail = _apply_ltl_priority_to_detail(raw_detail)
             cleaned_batches = tool_common.apply_dominant_destination_from_detail(cleaned_batches, raw_detail)
             cleaned_batches = _apply_trip_cost_rule(cleaned_batches, raw_detail)
+            cleaned_batches = _clean_delivery_time_columns(cleaned_batches)
             if cleaned_batches is not None and not cleaned_batches.empty and "目的地邮编待补充" in cleaned_batches.columns:
                 zip_audit_df = cleaned_batches[tool_common.normalize_boolean_series(cleaned_batches["目的地邮编待补充"])].copy()
             return cleaned_batches, invalid_detail, zip_audit_df, raw_detail
@@ -563,5 +626,6 @@ def bootstrap(delivery_workflow_module):
     delivery_match_adapter.patch_delivery_workflow(delivery_workflow_module)
     delivery_stage1_adapter.patch_delivery_stage1(delivery_workflow_module)
     _patch_ltl_priority_from_remarks()
+    _patch_stage2_prepare_time_rules(delivery_workflow_module)
     _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_module)
     return delivery_workflow_module
