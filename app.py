@@ -69,7 +69,7 @@ def _numeric_value(value):
 def classify_delivery_destination_type(row):
     product_text = " ".join(
         _text(row.get(col, ""))
-        for col in ["主产品类型", "系统产品类型", "FBA/FBX", "实际目的地", "修正后目的地", "目的地"]
+        for col in ["主产品类型", "系统产品类型", "FBA/FBX", "实际目的地", "修正后目的地", "目的地", "出库类型", "业务场景", "调入仓库"]
         if col in row.index
     ).upper()
     fba_code_text = " ".join(
@@ -80,7 +80,7 @@ def classify_delivery_destination_type(row):
     fba_volume = _numeric_value(row.get("FBA出库体积", 0))
     fbx_volume = _numeric_value(row.get("FBX出库体积", 0))
 
-    if "仓间调拨" in product_text:
+    if "仓间调拨" in product_text or "调拨" in product_text or "调入" in product_text:
         return "FBX"
     if ("FBA" in product_text or "AMAZON" in product_text) and "FBX" not in product_text:
         return "FBA"
@@ -110,10 +110,10 @@ def rebuild_zip_audit_from_cleaned(cleaned_batches):
 
 def get_stage2_report_sheet_names(destination_type="全部"):
     if destination_type == "FBA":
-        return ["货量", "FBA货量排行", "发车量", "派送时效", "成本", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
+        return ["货量", "FBA货量排行", "发车量", "派送时效", "调拨数据", "成本", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
     if destination_type == "FBX":
-        return ["货量", "FBX平台仓货量", "发车量", "派送时效", "成本", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
-    return ["货量", "FBA货量排行", "FBX平台仓货量", "发车量", "派送时效", "成本", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
+        return ["货量", "FBX平台仓货量", "发车量", "派送时效", "调拨数据", "成本", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
+    return ["货量", "FBA货量排行", "FBX平台仓货量", "发车量", "派送时效", "调拨数据", "成本", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
 
 
 def _split_combined_report(combined):
@@ -134,6 +134,10 @@ def build_stage2_report_for_destination(cleaned_batches, match_df=None, period_t
     combined = delivery_workflow.build_sheet1_volume_dispatch_time_report(matched)
     volume, dispatch, timing = _split_combined_report(combined)
     cost = delivery_match_adapter.build_station_cost_report(matched)
+    if hasattr(delivery_match_adapter, "build_transfer_report"):
+        transfer = delivery_match_adapter.build_transfer_report(matched)
+    else:
+        transfer = pd.DataFrame()
     zip_audit = rebuild_zip_audit_from_cleaned(matched)
 
     report = {"货量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(volume, "货量"), "货量")}
@@ -150,6 +154,7 @@ def build_stage2_report_for_destination(cleaned_batches, match_df=None, period_t
     report.update({
         "发车量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(dispatch, "发车量"), "发车量"),
         "派送时效": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(timing, "派送时效"), "派送时效"),
+        "调拨数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(transfer, "调拨数据"), "调拨数据"),
         "成本": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(cost, "成本"), "成本"),
         "派送二_匹配后合并数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(matched, "明细"), "明细"),
         "邮编异常审核": delivery_match_adapter._finalize_zip_audit_sheet(zip_audit),
@@ -296,7 +301,7 @@ st.caption(
     "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间。"
     "普通模块不做产品类型筛选，统一按上传文件中的全部有效数据处理。"
     "普通模块支持：按月统计 / 按周统计 / 按原文件时间范围。"
-    "派送二支持：按月统计 / 按周统计 / 按原文件时间范围。"
+    "派送二支持：按月统计 / 按周统计 / 按原文件时间范围；并单独输出LA至NJ/SAV/DAL盈仓调拨数据。"
     "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
     "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
     "6B支持多文件上传；结构完全相同的匹配文件默认纵向合并。"
