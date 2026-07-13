@@ -176,6 +176,37 @@ def _patch_stage2_original_file_period(delivery_workflow_module):
     return delivery_workflow_module
 
 
+def _unique_batch_keys_from_row(row):
+    batch_ids = delivery_stage1_adapter._split_batch_ids(row.get("批次号集合", row.get("批次号", "")))
+    batch_keys = [_normalize_batch_key(x) for x in batch_ids]
+    return list(dict.fromkeys([x for x in batch_keys if x]))
+
+
+def _filter_single_batch_trips_for_cost(matched):
+    """成本表只纳入单批次形成单车次的FTL；多批次合成车次不进入成本测算。"""
+    if matched is None or matched.empty:
+        return matched
+    out = matched.copy()
+    batch_counts = out.apply(lambda row: len(_unique_batch_keys_from_row(row)), axis=1)
+    return out[batch_counts == 1].copy()
+
+
+def _patch_cost_report_single_batch_only():
+    """派送二成本表口径：只看单批次单车次，排除多批次合成车次。"""
+    current_func = delivery_match_adapter.build_station_cost_report
+    if getattr(current_func, "_single_batch_only", False):
+        return
+
+    original_func = getattr(delivery_match_adapter, "_original_build_station_cost_report", current_func)
+    delivery_match_adapter._original_build_station_cost_report = original_func
+
+    def build_station_cost_report_single_batch_only(matched):
+        return original_func(_filter_single_batch_trips_for_cost(matched))
+
+    build_station_cost_report_single_batch_only._single_batch_only = True
+    delivery_match_adapter.build_station_cost_report = build_station_cost_report_single_batch_only
+
+
 def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_module):
     if hasattr(delivery_workflow_module, "_unified_stage1_process_wrapped"):
         return delivery_workflow_module
@@ -209,6 +240,7 @@ def bootstrap(delivery_workflow_module):
     """集中应用派送运行时补丁，app.py只调用这一处，避免多处散落 patch。"""
     _sync_common_rules()
     _patch_stage2_original_file_period(delivery_workflow_module)
+    _patch_cost_report_single_batch_only()
     # 关键修正：把成本聚合规则挂到功能一强制回填函数本身，避免后置 wrapper 未生效时派送成本仍按明细简单相加。
     delivery_stage1_adapter._force_cleaned_totals_from_detail = _stage1_force_totals_with_unique_cost_rule
     delivery_match_adapter.patch_delivery_workflow(delivery_workflow_module)
