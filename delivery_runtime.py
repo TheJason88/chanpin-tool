@@ -7,9 +7,6 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-COST_BLANK_THRESHOLD = 12000.0
-
-
 def _sync_common_rules():
     # 统一字段别名和调拨仓规则，避免多个补丁模块各自维护一套。
     delivery_stage1_adapter.VOLUME_CANDIDATES = tool_common.FIELD_ALIASES["出库体积"]
@@ -36,9 +33,10 @@ def _normalize_batch_key(value):
 def _aggregate_unique_batch_costs(cost_values):
     """
     一车多批次派送成本口径：
-    - 多批次里相同成本只保留一次；
+    - 先取每个批次的首个有效成本；
+    - 多个批次里相同成本只保留一次；
     - 不同成本相加；
-    - 聚合后单车成本超过 12000 时留空。
+    - 不再执行超过 12000 留空规则。
     """
     values = pd.to_numeric(pd.Series(cost_values), errors="coerce").dropna().astype(float)
     if values.empty:
@@ -52,14 +50,70 @@ def _aggregate_unique_batch_costs(cost_values):
             continue
         seen.add(key)
         total += float(value)
-
-    if total > COST_BLANK_THRESHOLD:
-        return float("nan")
     return total
 
 
+def _batch_costs_by_ordered_batch_ids(detail, batch_keys):
+    batch_costs = []
+    for batch_key in batch_keys:
+        values = detail.loc[detail["批次号_匹配Key"] == batch_key, "派送成本"].dropna()
+        if not values.empty:
+            # 同一批次在原始明细中可能出现多行，派送成本按该批次首个有效成本取一次。
+            batch_costs.append(float(values.iloc[0]))
+    return batch_costs
+
+
+def _stage1_force_totals_with_unique_cost_rule(cleaned_batches, detail_df):
+    """
+    替换 delivery_stage1_adapter 原来的强制回填逻辑。
+    只改变派送成本聚合口径，方数、板数、FBA/FBX方数仍沿用原有汇总方式。
+    """
+    if cleaned_batches is None or cleaned_batches.empty or detail_df is None or detail_df.empty:
+        return cleaned_batches
+
+    detail = delivery_stage1_adapter.repair_delivery_stage1_numeric_columns(detail_df)
+    detail = delivery_stage1_adapter._ensure_numeric(detail, delivery_stage1_adapter.NUMERIC_COLS)
+    if "批次号" not in detail.columns:
+        return cleaned_batches
+    if "FBA/FBX" not in detail.columns:
+        detail["FBA/FBX"] = ""
+    detail["批次号_匹配Key"] = detail["批次号"].apply(_normalize_batch_key)
+
+    out = delivery_stage1_adapter._prepare_recalc_columns(cleaned_batches)
+
+    for idx, row in out.iterrows():
+        batch_ids = delivery_stage1_adapter._split_batch_ids(row.get("批次号集合", row.get("批次号", "")))
+        batch_keys = [_normalize_batch_key(x) for x in batch_ids]
+        batch_keys = [x for x in batch_keys if x]
+        if not batch_keys:
+            continue
+
+        matched = detail[detail["批次号_匹配Key"].isin(batch_keys)].copy()
+        if matched.empty:
+            continue
+
+        out.at[idx, "出库体积"] = float(matched["出库体积"].sum())
+        out.at[idx, "出库卡板数"] = float(matched["出库卡板数"].sum())
+        out.at[idx, "派送成本"] = _aggregate_unique_batch_costs(_batch_costs_by_ordered_batch_ids(matched, batch_keys))
+        out.at[idx, "FBA出库体积"] = float(matched.loc[matched["FBA/FBX"] == "FBA", "出库体积"].sum())
+        out.at[idx, "FBX出库体积"] = float(matched.loc[matched["FBA/FBX"] == "FBX", "出库体积"].sum())
+
+        # 主产品类型同步按方数重新判定。
+        fba_volume = float(out.at[idx, "FBA出库体积"] or 0)
+        fbx_volume = float(out.at[idx, "FBX出库体积"] or 0)
+        if fba_volume > 0 and fbx_volume > 0:
+            out.at[idx, "系统产品类型"] = "混合目的地"
+        elif fba_volume > 0:
+            out.at[idx, "系统产品类型"] = "FBA"
+        elif fbx_volume > 0:
+            out.at[idx, "系统产品类型"] = "FBX"
+        out.at[idx, "主产品类型"] = "FBA" if fba_volume >= fbx_volume and fba_volume > 0 else ("FBX" if fbx_volume > 0 else "未知")
+
+    return out
+
+
 def _apply_trip_cost_rule(cleaned_batches, raw_detail):
-    """只回填派送成本，不动方数、板数、目的地识别等已稳定逻辑。"""
+    """兜底回填派送成本，确保功能一最终输出仍使用同一套成本口径。"""
     if cleaned_batches is None or cleaned_batches.empty or raw_detail is None or raw_detail.empty:
         return cleaned_batches
     if "批次号" not in raw_detail.columns or "派送成本" not in raw_detail.columns:
@@ -83,15 +137,7 @@ def _apply_trip_cost_rule(cleaned_batches, raw_detail):
         matched = detail[detail["批次号_匹配Key"].isin(batch_keys)].copy()
         if matched.empty:
             continue
-
-        # 同一批次在原始明细中可能出现多行，派送成本按该批次首个有效成本取一次，避免同批次重复行放大。
-        batch_costs = []
-        for batch_key in batch_keys:
-            values = matched.loc[matched["批次号_匹配Key"] == batch_key, "派送成本"].dropna()
-            if not values.empty:
-                batch_costs.append(float(values.iloc[0]))
-
-        out.at[idx, "派送成本"] = _aggregate_unique_batch_costs(batch_costs)
+        out.at[idx, "派送成本"] = _aggregate_unique_batch_costs(_batch_costs_by_ordered_batch_ids(matched, batch_keys))
 
     return out
 
@@ -128,6 +174,8 @@ def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_modul
 def bootstrap(delivery_workflow_module):
     """集中应用派送运行时补丁，app.py只调用这一处，避免多处散落 patch。"""
     _sync_common_rules()
+    # 关键修正：把成本聚合规则挂到功能一强制回填函数本身，避免后置 wrapper 未生效时派送成本仍按明细简单相加。
+    delivery_stage1_adapter._force_cleaned_totals_from_detail = _stage1_force_totals_with_unique_cost_rule
     delivery_match_adapter.patch_delivery_workflow(delivery_workflow_module)
     delivery_stage1_adapter.patch_delivery_stage1(delivery_workflow_module)
     _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_module)
