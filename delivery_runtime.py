@@ -8,6 +8,12 @@ import delivery_stage1_adapter
 
 
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
+TRANSFER_TARGETS = {
+    "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
+    "SAV": {"name": "SAV盈仓", "line": "LA-SAV"},
+    "DAL": {"name": "DAL盈仓", "line": "LA-DAL"},
+}
+TRANSFER_KEYWORDS = ["调拨", "仓间", "调入"]
 
 
 def _sync_common_rules():
@@ -192,29 +198,219 @@ def _unique_batch_keys_from_row(row):
     return list(dict.fromkeys([x for x in batch_keys if x]))
 
 
-def _filter_single_batch_trips_for_cost(matched):
-    """成本表只纳入单批次形成单车次的FTL；多批次合成车次不进入成本测算。"""
+def _is_la_source(row):
+    return str(row.get("仓库", "")).strip() in ["LA", "美西仓", "美西二号仓", "CA"]
+
+
+def _transfer_target_from_row(row):
+    """
+    识别LA调拨至 NJ / SAV / DAL 盈仓的数据。
+    必须先具备调拨语义，再按调入仓库、备注、车次/批次、专线线路识别目标仓，避免把普通LA干线派送误判为调拨。
+    """
+    if not _is_la_source(row):
+        return ""
+
+    text_fields = ["出库类型", "业务场景", "调入仓库", "邮编来源", "匹配备注集合", "车次号", "批次号集合"]
+    text = " ".join(str(row.get(c, "")) for c in text_fields if c in row.index)
+    upper_text = text.upper()
+    line = str(row.get("专线线路", "")).strip()
+
+    has_transfer_semantics = (
+        any(keyword in text for keyword in TRANSFER_KEYWORDS)
+        or "仓间调拨目标仓地址" in text
+        or bool(str(row.get("调入仓库", "")).strip())
+    )
+    if not has_transfer_semantics:
+        return ""
+
+    for target, target_info in TRANSFER_TARGETS.items():
+        info = tool_common.TRANSFER_WAREHOUSE_INFO.get(target, {})
+        keywords = [target, target_info["name"], target_info["line"]] + list(info.get("keywords", []))
+        if line == target_info["line"] or any(str(keyword).upper() in upper_text for keyword in keywords if keyword):
+            return target
+    return ""
+
+
+def _transfer_rows(matched, ftl_only=True):
+    if matched is None or matched.empty:
+        return pd.DataFrame()
+    out = matched.copy()
+    out["调拨目标仓"] = out.apply(_transfer_target_from_row, axis=1)
+    out = out[out["调拨目标仓"].isin(TRANSFER_TARGETS.keys())].copy()
+    if ftl_only and "是否FTL发车" in out.columns:
+        out = out[out["是否FTL发车"]].copy()
+    for col in ["出库体积", "出库卡板数", "派送成本"]:
+        if col not in out.columns:
+            out[col] = 0
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
+    out["调拨目标仓名称"] = out["调拨目标仓"].map(lambda x: TRANSFER_TARGETS.get(x, {}).get("name", x))
+    out["专线线路"] = out["调拨目标仓"].map(lambda x: TRANSFER_TARGETS.get(x, {}).get("line", ""))
+    return out
+
+
+def _filter_regular_single_batch_trips_for_cost(matched):
+    """普通派送成本只看单批次单车次；调拨成本另行汇总，不走车型/卡地板拆分。"""
     if matched is None or matched.empty:
         return matched
     out = matched.copy()
-    batch_counts = out.apply(lambda row: len(_unique_batch_keys_from_row(row)), axis=1)
-    return out[batch_counts == 1].copy()
+    transfer_targets = out.apply(_transfer_target_from_row, axis=1)
+    regular = out[~transfer_targets.isin(TRANSFER_TARGETS.keys())].copy()
+    if regular.empty:
+        return regular
+    batch_counts = regular.apply(lambda row: len(_unique_batch_keys_from_row(row)), axis=1)
+    return regular[batch_counts == 1].copy()
+
+
+def _combine_series_text(series):
+    if series is None:
+        return ""
+    values = []
+    for value in series:
+        if pd.isna(value):
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in ["nan", "none", "null", "<na>"] and text not in values:
+            values.append(text)
+    return ",".join(values)
+
+
+def _build_transfer_cost_report(matched):
+    transfer = _transfer_rows(matched, ftl_only=True)
+    columns = [
+        "指标名称", "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组",
+        "车次数", "总出库体积", "总派送成本", "平均整车价", "每方平均价",
+        "平均每车出库体积", "P80每车出库体积",
+    ]
+    if transfer.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows = []
+    for (warehouse, period, target, target_name), group in transfer.groupby(["仓库", "统计周期", "调拨目标仓", "调拨目标仓名称"], dropna=False):
+        trip_count = len(group)
+        total_volume = group["出库体积"].sum()
+        total_cost = group["派送成本"].sum()
+        rows.append({
+            "指标名称": "调拨成本",
+            "仓库": warehouse,
+            "统计周期": period,
+            "对象类型": "仓间调拨",
+            "平台": "联宇盈仓",
+            "仓点代码": target_name,
+            "车型装车分组": "不区分车型",
+            "车次数": int(trip_count),
+            "总出库体积": total_volume,
+            "总派送成本": total_cost,
+            "平均整车价": total_cost / trip_count if trip_count else pd.NA,
+            "每方平均价": total_cost / total_volume if total_volume else pd.NA,
+            "平均每车出库体积": total_volume / trip_count if trip_count else pd.NA,
+            "P80每车出库体积": pd.NA,
+        })
+    return pd.DataFrame(rows)[columns]
+
+
+def _build_transfer_report(matched):
+    transfer = _transfer_rows(matched, ftl_only=True)
+    columns = [
+        "指标名称", "发货仓", "调拨目标仓", "专线线路", "统计周期", "车次数",
+        "总出库体积", "总出库卡板数", "总派送成本", "平均整车价", "每方平均价",
+        "平均每车出库体积", "批次号集合", "车次号集合",
+    ]
+    if transfer.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows = []
+    for (warehouse, period, target_name, line), group in transfer.groupby(["仓库", "统计周期", "调拨目标仓名称", "专线线路"], dropna=False):
+        trip_count = len(group)
+        total_volume = group["出库体积"].sum()
+        total_pallets = group["出库卡板数"].sum()
+        total_cost = group["派送成本"].sum()
+        rows.append({
+            "指标名称": "LA仓间调拨",
+            "发货仓": warehouse,
+            "调拨目标仓": target_name,
+            "专线线路": line,
+            "统计周期": period,
+            "车次数": int(trip_count),
+            "总出库体积": total_volume,
+            "总出库卡板数": total_pallets,
+            "总派送成本": total_cost,
+            "平均整车价": total_cost / trip_count if trip_count else pd.NA,
+            "每方平均价": total_cost / total_volume if total_volume else pd.NA,
+            "平均每车出库体积": total_volume / trip_count if trip_count else pd.NA,
+            "批次号集合": _combine_series_text(group.get("批次号集合")),
+            "车次号集合": _combine_series_text(group.get("车次号")),
+        })
+    return pd.DataFrame(rows)[columns]
 
 
 def _patch_cost_report_single_batch_only():
-    """派送二成本表口径：只看单批次单车次，排除多批次合成车次。"""
+    """派送二成本表口径：普通派送只看单批次单车次；调拨成本单独按目标盈仓汇总，不分车型。"""
     current_func = delivery_match_adapter.build_station_cost_report
-    if getattr(current_func, "_single_batch_only", False):
+    if getattr(current_func, "_single_batch_and_transfer_cost", False):
         return
 
-    original_func = getattr(delivery_match_adapter, "_original_build_station_cost_report", current_func)
+    original_func = getattr(
+        delivery_match_adapter,
+        "_base_build_station_cost_report",
+        getattr(delivery_match_adapter, "_original_build_station_cost_report", current_func),
+    )
+    delivery_match_adapter._base_build_station_cost_report = original_func
     delivery_match_adapter._original_build_station_cost_report = original_func
 
-    def build_station_cost_report_single_batch_only(matched):
-        return original_func(_filter_single_batch_trips_for_cost(matched))
+    def build_station_cost_report_with_transfer(matched):
+        regular_cost = original_func(_filter_regular_single_batch_trips_for_cost(matched))
+        transfer_cost = _build_transfer_cost_report(matched)
+        frames = [df for df in [regular_cost, transfer_cost] if df is not None and not df.empty]
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True, sort=False)
 
-    build_station_cost_report_single_batch_only._single_batch_only = True
-    delivery_match_adapter.build_station_cost_report = build_station_cost_report_single_batch_only
+    build_station_cost_report_with_transfer._single_batch_and_transfer_cost = True
+    delivery_match_adapter.build_station_cost_report = build_station_cost_report_with_transfer
+
+
+def _patch_stage2_transfer_sheet():
+    """派送二结果增加“调拨数据”独立表。"""
+    current_func = delivery_match_adapter.build_split_stage2_report
+    if getattr(current_func, "_includes_transfer_sheet", False):
+        return
+
+    def build_split_stage2_report_with_transfer(delivery_workflow_module, cleaned_batches, match_df, period_type="按周统计"):
+        matched = delivery_workflow_module.prepare_stage2_for_report(cleaned_batches, match_df, period_type)
+        combined = delivery_workflow_module.build_sheet1_volume_dispatch_time_report(matched)
+        if combined.empty:
+            volume = dispatch = timing = combined.copy()
+        else:
+            volume = combined[combined["报告部分"].astype(str).str.startswith("1.")].copy()
+            volume = volume[~volume["指标名称"].astype(str).isin(["FBA仓点货量排行", "FBX平台仓货量排行"])]
+            dispatch = combined[combined["报告部分"].astype(str).str.startswith("2.")].copy()
+            timing = combined[combined["报告部分"].astype(str).str.startswith("3.")].copy()
+
+        cost = delivery_match_adapter.build_station_cost_report(matched)
+        transfer_report = _build_transfer_report(matched)
+        if "目的地邮编待补充" in matched.columns:
+            zip_audit = matched[tool_common.normalize_boolean_series(matched["目的地邮编待补充"])].copy()
+        else:
+            zip_audit = pd.DataFrame()
+
+        return {
+            "货量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(volume, "货量"), "货量"),
+            "FBA货量排行": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(delivery_match_adapter.build_fba_rank_sheet(matched), "FBA货量排行"), "FBA货量排行"),
+            "FBX平台仓货量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(delivery_match_adapter.build_fbx_platform_warehouse_sheet(matched), "FBX平台仓货量"), "FBX平台仓货量"),
+            "发车量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(dispatch, "发车量"), "发车量"),
+            "派送时效": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(timing, "派送时效"), "派送时效"),
+            "调拨数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(transfer_report, "调拨数据"), "调拨数据"),
+            "成本": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(cost, "成本"), "成本"),
+            "派送二_匹配后合并数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(matched, "明细"), "明细"),
+            "邮编异常审核": delivery_match_adapter._finalize_zip_audit_sheet(zip_audit),
+            "区域识别规则": delivery_workflow_module.REGION_RULES_DF,
+            "干线识别规则": delivery_workflow_module.LINEHAUL_RULES,
+        }
+
+    build_split_stage2_report_with_transfer._includes_transfer_sheet = True
+    delivery_match_adapter.build_split_stage2_report = build_split_stage2_report_with_transfer
+    # 供 app.py 的FBA/FBX专项报告后续复用；不影响普通调用。
+    delivery_match_adapter.build_transfer_report = _build_transfer_report
 
 
 def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_module):
@@ -252,6 +448,7 @@ def bootstrap(delivery_workflow_module):
     _patch_invalid_batch_keywords(delivery_workflow_module)
     _patch_stage2_original_file_period(delivery_workflow_module)
     _patch_cost_report_single_batch_only()
+    _patch_stage2_transfer_sheet()
     # 关键修正：把成本聚合规则挂到功能一强制回填函数本身，避免后置 wrapper 未生效时派送成本仍按明细简单相加。
     delivery_stage1_adapter._force_cleaned_totals_from_detail = _stage1_force_totals_with_unique_cost_rule
     delivery_match_adapter.patch_delivery_workflow(delivery_workflow_module)
