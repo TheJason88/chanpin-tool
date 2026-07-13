@@ -2,18 +2,27 @@ import re
 
 import pandas as pd
 
+import processors
 import tool_common
 import delivery_match_adapter
 import delivery_stage1_adapter
 
 
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
+
 TRANSFER_TARGETS = {
     "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
     "SAV": {"name": "SAV盈仓", "line": "LA-SAV"},
     "DAL": {"name": "DAL盈仓", "line": "LA-DAL"},
 }
 TRANSFER_KEYWORDS = ["调拨", "仓间", "调入"]
+
+# 功能一无效批次补充关键词。原始代码里已有：取消、作废、废单、无效、删除、关闭。
+ADDITIONAL_INVALID_BATCH_KEYWORDS = ["废单", "快递", "公共单", "清除", "自提"]
+
+# LTL最高优先级识别词：哪怕运输类型显示FTL，只要备注命中这些词，功能一先按LTL处理。
+LTL_PRIORITY_KEYWORDS = ["LTL", "散货", "散板"]
+LTL_REMARK_COLUMNS = ["备注", "备注信息", "MEMO", "跟进记录", "内部备注", "派送区域"]
 
 
 def _sync_common_rules():
@@ -27,14 +36,86 @@ def _sync_common_rules():
     delivery_match_adapter.DECIMAL_COLUMNS = tool_common.DECIMAL_OUTPUT_COLUMNS
 
 
+def _contains_any_keyword(value, keywords):
+    if value is None or pd.isna(value):
+        return False
+    text = str(value)
+    upper_text = text.upper()
+    for keyword in keywords:
+        k = str(keyword)
+        if not k:
+            continue
+        if k.upper() in upper_text:
+            return True
+    return False
+
+
+def _row_text(row, columns):
+    values = []
+    for col in columns:
+        if col in row.index:
+            value = row.get(col, "")
+            if value is not None and not pd.isna(value):
+                values.append(str(value))
+    return " ".join(values)
+
+
 def _patch_invalid_batch_keywords(delivery_workflow_module):
     """派送一无效批次剔除关键词补充。"""
     keywords = list(getattr(delivery_workflow_module, "INVALID_BATCH_KEYWORDS", []))
-    for keyword in ["清除", "自提"]:
+    for keyword in ADDITIONAL_INVALID_BATCH_KEYWORDS:
         if keyword not in keywords:
             keywords.append(keyword)
     delivery_workflow_module.INVALID_BATCH_KEYWORDS = keywords
     return delivery_workflow_module
+
+
+def _apply_ltl_priority_to_detail(detail_df):
+    """备注命中LTL/散货/散板时，优先按LTL处理。"""
+    if detail_df is None or detail_df.empty:
+        return detail_df
+
+    out = detail_df.copy()
+    remark_cols = [col for col in LTL_REMARK_COLUMNS if col in out.columns]
+    if not remark_cols:
+        return out
+
+    mask = out.apply(lambda row: _contains_any_keyword(_row_text(row, remark_cols), LTL_PRIORITY_KEYWORDS), axis=1)
+    if not mask.any():
+        return out
+
+    out.loc[mask, "标准运输类型"] = "LTL"
+    if "运输类型" in out.columns:
+        out.loc[mask, "运输类型"] = "LTL"
+    if "运输方式" in out.columns:
+        out.loc[mask, "运输方式"] = "LTL"
+    if "派送方式" in out.columns:
+        out.loc[mask, "派送方式"] = "散板出库"
+    if "车型标准值" in out.columns:
+        out.loc[mask, "车型标准值"] = "不适用"
+    if "装车类型标准值" in out.columns:
+        out.loc[mask, "装车类型标准值"] = "散板"
+    return out
+
+
+def _patch_ltl_priority_from_remarks():
+    """功能一原始明细清洗后、合并车次前，按备注优先纠正LTL。"""
+    current_func = processors.process_delivery_stage1_from_files
+    if getattr(current_func, "_ltl_remark_priority", False):
+        return
+
+    original_func = getattr(processors, "_original_process_delivery_stage1_from_files", current_func)
+    processors._original_process_delivery_stage1_from_files = original_func
+
+    def process_delivery_stage1_from_files_with_ltl_priority(*args, **kwargs):
+        result = original_func(*args, **kwargs)
+        if isinstance(result, tuple) and len(result) >= 1:
+            detail_df = _apply_ltl_priority_to_detail(result[0])
+            return (detail_df,) + tuple(result[1:])
+        return result
+
+    process_delivery_stage1_from_files_with_ltl_priority._ltl_remark_priority = True
+    processors.process_delivery_stage1_from_files = process_delivery_stage1_from_files_with_ltl_priority
 
 
 def _normalize_batch_key(value):
@@ -90,7 +171,8 @@ def _stage1_force_totals_with_unique_cost_rule(cleaned_batches, detail_df):
     if cleaned_batches is None or cleaned_batches.empty or detail_df is None or detail_df.empty:
         return cleaned_batches
 
-    detail = delivery_stage1_adapter.repair_delivery_stage1_numeric_columns(detail_df)
+    detail = _apply_ltl_priority_to_detail(detail_df)
+    detail = delivery_stage1_adapter.repair_delivery_stage1_numeric_columns(detail)
     detail = delivery_stage1_adapter._ensure_numeric(detail, delivery_stage1_adapter.NUMERIC_COLS)
     if "批次号" not in detail.columns:
         return cleaned_batches
@@ -138,7 +220,8 @@ def _apply_trip_cost_rule(cleaned_batches, raw_detail):
     if "批次号" not in raw_detail.columns or "派送成本" not in raw_detail.columns:
         return cleaned_batches
 
-    detail = raw_detail.copy()
+    detail = _apply_ltl_priority_to_detail(raw_detail)
+    detail = detail.copy()
     detail["批次号_匹配Key"] = detail["批次号"].apply(_normalize_batch_key)
     detail["派送成本"] = pd.to_numeric(detail["派送成本"], errors="coerce")
 
@@ -465,5 +548,6 @@ def bootstrap(delivery_workflow_module):
     delivery_stage1_adapter._force_cleaned_totals_from_detail = _stage1_force_totals_with_unique_cost_rule
     delivery_match_adapter.patch_delivery_workflow(delivery_workflow_module)
     delivery_stage1_adapter.patch_delivery_stage1(delivery_workflow_module)
+    _patch_ltl_priority_from_remarks()
     _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_module)
     return delivery_workflow_module
