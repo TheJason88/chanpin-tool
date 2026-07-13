@@ -22,7 +22,7 @@ ADDITIONAL_INVALID_BATCH_KEYWORDS = ["废单", "快递", "公共单", "清除", 
 # LTL最高优先级识别词：哪怕运输类型显示FTL，只要备注命中这些词，功能一先按LTL处理。
 LTL_PRIORITY_KEYWORDS = ["LTL", "散货", "散板"]
 LTL_REMARK_COLUMNS = ["备注", "备注信息", "MEMO", "跟进记录", "内部备注", "派送区域"]
-START_TIME_CANDIDATES = ["批次出库时间", "出库时间", "实际出库时间", "批次出库时间"]
+START_TIME_CANDIDATES = ["批次出库时间", "出库时间", "实际出库时间"]
 END_TIME_CANDIDATES = ["批次签收时间", "签收时间", "实际签收时间", "送达时间", "妥投时间"]
 
 
@@ -71,6 +71,22 @@ def _find_existing_col(df, candidates):
     return None
 
 
+def _standardize_warehouse_value(value):
+    try:
+        return processors.standardize_warehouse(value)
+    except Exception:
+        text = str(value).upper().strip()
+        if "LA" in text or "美西" in text or "CA" == text:
+            return "LA"
+        if "NJ" in text or "新泽西" in text:
+            return "NJ"
+        if "SAV" in text or "萨凡纳" in text:
+            return "SAV"
+        if "DAL" in text or "达拉斯" in text:
+            return "DAL"
+        return text
+
+
 def _is_ltl_series(df):
     if df is None or df.empty:
         return pd.Series(False, index=getattr(df, "index", []))
@@ -83,12 +99,55 @@ def _is_ltl_series(df):
     return mask
 
 
+def _delivery_time_threshold_for_row(row):
+    """
+    分区域派送时效异常阈值。仅当行里已经有派送区域时启用；否则沿用通用30天清洗。
+    规则里的“超过”按严格大于处理。
+    """
+    warehouse = _standardize_warehouse_value(row.get("仓库", ""))
+    region = str(row.get("派送区域", row.get("区域", ""))).strip()
+    region_upper = region.upper()
+
+    if "LOCAL" in region_upper or "本地" in region or region == "Local":
+        return 3.0
+
+    if warehouse == "LA":
+        if "中短途" in region:
+            return 7.0
+        if "美中" in region:
+            return 10.0
+        if "美东" in region or "美南" in region:
+            return 15.0
+        return 30.0
+
+    if warehouse in ["NJ", "SAV", "DAL"]:
+        if "中距离" in region:
+            return 6.0
+        if "远距离" in region:
+            return 10.0
+        return 30.0
+
+    return 30.0
+
+
+def _delivery_time_threshold_series(df):
+    if df is None or df.empty:
+        return pd.Series(dtype="float64", index=getattr(df, "index", []))
+    if "派送区域" not in df.columns and "区域" not in df.columns:
+        return pd.Series(30.0, index=df.index)
+    return df.apply(_delivery_time_threshold_for_row, axis=1).astype(float)
+
+
 def _clean_delivery_time_columns(df):
     """
     派送时效清洗口径：
     - 出库时间/签收时间任一缺失，派送时效留空，不再显示0；
-    - 派送时效<=0或>30视为无效，留空；
+    - 派送时效<=0视为无效，留空；
     - LTL不参与派送时效统计，时效留空；
+    - 有派送区域时，按区域阈值清洗：
+      Local>3天；LA中短途>7天、LA美中>10天、LA美东/美南>15天；
+      NJ/SAV/DAL中距离>6天、远距离>10天；
+    - 没有派送区域时，继续使用>30天兜底阈值；
     - 是否有效时效同步改为布尔口径，供后续均值/P80自然排除无效行。
     """
     if df is None or df.empty or "派送时效" not in df.columns:
@@ -99,7 +158,8 @@ def _clean_delivery_time_columns(df):
     end_col = _find_existing_col(out, END_TIME_CANDIDATES)
 
     duration = pd.to_numeric(out["派送时效"], errors="coerce")
-    invalid = duration.isna() | (duration <= 0) | (duration > 30) | _is_ltl_series(out)
+    thresholds = _delivery_time_threshold_series(out)
+    invalid = duration.isna() | (duration <= 0) | duration.gt(thresholds) | _is_ltl_series(out)
 
     if start_col:
         start_time = pd.to_datetime(out[start_col], errors="coerce")
@@ -108,8 +168,7 @@ def _clean_delivery_time_columns(df):
         end_time = pd.to_datetime(out[end_col], errors="coerce")
         invalid = invalid | end_time.isna()
 
-    out["派送时效"] = duration
-    out.loc[invalid, "派送时效"] = pd.NA
+    out["派送时效"] = duration.mask(invalid)
     if "是否有效时效" in out.columns:
         out["是否有效时效"] = ~invalid
     return out
@@ -158,7 +217,7 @@ def _apply_ltl_priority_to_detail(detail_df):
 def _patch_ltl_priority_from_remarks():
     """功能一原始明细清洗后、合并车次前，按备注优先纠正LTL。"""
     current_func = processors.process_delivery_stage1_from_files
-    if getattr(current_func, "_ltl_remark_priority_v3", False):
+    if getattr(current_func, "_ltl_remark_priority_v4", False):
         return
 
     original_func = getattr(processors, "_original_process_delivery_stage1_from_files", current_func)
@@ -171,7 +230,7 @@ def _patch_ltl_priority_from_remarks():
             return (detail_df,) + tuple(result[1:])
         return result
 
-    process_delivery_stage1_from_files_with_ltl_priority._ltl_remark_priority_v3 = True
+    process_delivery_stage1_from_files_with_ltl_priority._ltl_remark_priority_v4 = True
     processors.process_delivery_stage1_from_files = process_delivery_stage1_from_files_with_ltl_priority
 
 
@@ -332,9 +391,9 @@ def _patch_stage2_original_file_period(delivery_workflow_module):
 
 
 def _patch_stage2_prepare_time_rules(delivery_workflow_module):
-    """派送二在生成报表前重洗时效：缺日期/0时效/LTL均不参与均值与P80。"""
+    """派送二在生成报表前重洗时效：缺日期/0时效/LTL/区域超阈值均不参与均值与P80。"""
     current_func = delivery_workflow_module.prepare_stage2_for_report
-    if getattr(current_func, "_cleans_delivery_time", False):
+    if getattr(current_func, "_cleans_delivery_time_v2", False):
         return delivery_workflow_module
 
     original_func = getattr(delivery_workflow_module, "_original_prepare_stage2_for_report", current_func)
@@ -344,7 +403,7 @@ def _patch_stage2_prepare_time_rules(delivery_workflow_module):
         matched = original_func(cleaned_batches, match_df, period_type)
         return _clean_delivery_time_columns(matched)
 
-    prepare_stage2_for_report_with_clean_time._cleans_delivery_time = True
+    prepare_stage2_for_report_with_clean_time._cleans_delivery_time_v2 = True
     delivery_workflow_module.prepare_stage2_for_report = prepare_stage2_for_report_with_clean_time
     return delivery_workflow_module
 
