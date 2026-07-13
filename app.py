@@ -35,6 +35,7 @@ DEFAULT_PRODUCT_TYPE = "全部"
 DESTINATION_TYPES = ["全部", "FBA", "FBX"]
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 NORMAL_PERIOD_TYPES = [PLACEHOLDER, "按月统计", "按周统计", ORIGINAL_FILE_PERIOD]
+DELIVERY_PERIOD_TYPES = [PLACEHOLDER, "按月统计", "按周统计", ORIGINAL_FILE_PERIOD]
 
 _bootstrap_error = None
 try:
@@ -277,8 +278,11 @@ date_range = None
 if analysis_module == DELIVERY_STAGE1_MODULE:
     st.info("派送原数据处理执行全量清洗，不按时间范围筛选；可按目的地类型筛选：全部 / FBA / FBX。")
 elif analysis_module == DELIVERY_STAGE2_MODULE:
-    period_type = st.selectbox("4. 选择统计周期", [PLACEHOLDER, "按月统计", "按周统计"], index=0, key="stage2_period_select")
-    st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。选择全部时输出FBA和FBX专项表；选择FBA/FBX时只输出对应目的地的专项表。")
+    period_type = st.selectbox("4. 选择统计周期", DELIVERY_PERIOD_TYPES, index=0, key="stage2_period_select")
+    if period_type == ORIGINAL_FILE_PERIOD:
+        st.info("派送二按原文件时间范围：不拆分月/周，按派送一结果中的批次出库时间最小日期到最大日期，将全部匹配后数据汇总为一个统计周期。")
+    else:
+        st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。选择全部时输出FBA和FBX专项表；选择FBA/FBX时只输出对应目的地的专项表。")
 elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
     period_type = st.selectbox("3. 选择统计周期", NORMAL_PERIOD_TYPES, index=0, key="normal_period_select")
     if period_type == ORIGINAL_FILE_PERIOD:
@@ -292,6 +296,7 @@ st.caption(
     "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间。"
     "普通模块不做产品类型筛选，统一按上传文件中的全部有效数据处理。"
     "普通模块支持：按月统计 / 按周统计 / 按原文件时间范围。"
+    "派送二支持：按月统计 / 按周统计 / 按原文件时间范围。"
     "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
     "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
     "6B支持多文件上传；结构完全相同的匹配文件默认纵向合并。"
