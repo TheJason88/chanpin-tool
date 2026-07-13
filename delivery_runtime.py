@@ -21,6 +21,16 @@ def _sync_common_rules():
     delivery_match_adapter.DECIMAL_COLUMNS = tool_common.DECIMAL_OUTPUT_COLUMNS
 
 
+def _patch_invalid_batch_keywords(delivery_workflow_module):
+    """派送一无效批次剔除关键词补充。"""
+    keywords = list(getattr(delivery_workflow_module, "INVALID_BATCH_KEYWORDS", []))
+    for keyword in ["清除"]:
+        if keyword not in keywords:
+            keywords.append(keyword)
+    delivery_workflow_module.INVALID_BATCH_KEYWORDS = keywords
+    return delivery_workflow_module
+
+
 def _normalize_batch_key(value):
     if pd.isna(value):
         return ""
@@ -239,6 +249,7 @@ def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_modul
 def bootstrap(delivery_workflow_module):
     """集中应用派送运行时补丁，app.py只调用这一处，避免多处散落 patch。"""
     _sync_common_rules()
+    _patch_invalid_batch_keywords(delivery_workflow_module)
     _patch_stage2_original_file_period(delivery_workflow_module)
     _patch_cost_report_single_batch_only()
     # 关键修正：把成本聚合规则挂到功能一强制回填函数本身，避免后置 wrapper 未生效时派送成本仍按明细简单相加。
