@@ -7,6 +7,9 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
+ORIGINAL_FILE_PERIOD = "按原文件时间范围"
+
+
 def _sync_common_rules():
     # 统一字段别名和调拨仓规则，避免多个补丁模块各自维护一套。
     delivery_stage1_adapter.VOLUME_CANDIDATES = tool_common.FIELD_ALIASES["出库体积"]
@@ -142,6 +145,37 @@ def _apply_trip_cost_rule(cleaned_batches, raw_detail):
     return out
 
 
+def _original_file_period_label(df, date_col="批次出库时间"):
+    if df is None or df.empty or date_col not in df.columns:
+        return "原文件全部时间范围"
+    valid_dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
+    if valid_dates.empty:
+        return "原文件全部时间范围"
+    return f"{valid_dates.min().strftime('%Y-%m-%d')} ~ {valid_dates.max().strftime('%Y-%m-%d')}"
+
+
+def _patch_stage2_original_file_period(delivery_workflow_module):
+    """派送功能二支持按原文件时间范围：不拆月/周，按批次出库时间最小值到最大值汇总。"""
+    current_func = delivery_workflow_module.add_analysis_period
+    if getattr(current_func, "_supports_original_file_period", False):
+        return delivery_workflow_module
+
+    original_func = getattr(delivery_workflow_module, "_original_add_analysis_period", current_func)
+    delivery_workflow_module._original_add_analysis_period = original_func
+
+    def add_analysis_period_with_original_file_range(df, period_type):
+        if period_type != ORIGINAL_FILE_PERIOD:
+            return original_func(df, period_type)
+        out = df.copy()
+        out["批次出库时间"] = pd.to_datetime(out["批次出库时间"], errors="coerce")
+        out["统计周期"] = _original_file_period_label(out, "批次出库时间")
+        return out
+
+    add_analysis_period_with_original_file_range._supports_original_file_period = True
+    delivery_workflow_module.add_analysis_period = add_analysis_period_with_original_file_range
+    return delivery_workflow_module
+
+
 def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_module):
     if hasattr(delivery_workflow_module, "_unified_stage1_process_wrapped"):
         return delivery_workflow_module
@@ -174,6 +208,7 @@ def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_modul
 def bootstrap(delivery_workflow_module):
     """集中应用派送运行时补丁，app.py只调用这一处，避免多处散落 patch。"""
     _sync_common_rules()
+    _patch_stage2_original_file_period(delivery_workflow_module)
     # 关键修正：把成本聚合规则挂到功能一强制回填函数本身，避免后置 wrapper 未生效时派送成本仍按明细简单相加。
     delivery_stage1_adapter._force_cleaned_totals_from_detail = _stage1_force_totals_with_unique_cost_rule
     delivery_match_adapter.patch_delivery_workflow(delivery_workflow_module)
