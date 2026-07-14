@@ -40,6 +40,7 @@ HEA2,Amazon-HEA2,,18031,180,PA,Amazon/HEA2
 HGR6,Amazon-HGR6,"55 W Oak Ridge Dr, Hagerstown, MD",21740,217,MD,Amazon/HGR6
 HIA1,Amazon-HIA1,"城市级候选ZIP，待复核：Middletown, PA",17057,170,PA,Amazon/HIA1
 HLI2,Amazon-HLI2,,95023,950,CA,Amazon/HLI2
+HOU7,Amazon-HOU7,"16225-A Tomball Pkwy, Houston, TX",77064,770,TX,Amazon/HOU7
 HOU8,Amazon-HOU8,"2303 Hurricane Lane, Fresno, TX",77545,775,TX,Amazon/HOU8
 HSV1,Amazon-HSV1,"城市级候选ZIP，待复核：Madison / Huntsville, AL",35756,357,AL,Amazon/HSV1
 HSV2,Amazon-HSV2,"28869 Fanning Dr NW, Madison, AL",35756,357,AL,Amazon/HSV2
@@ -60,6 +61,7 @@ IUSW,Amazon-IUSW,,92344,923,CA,Amazon/IUSW
 IUTE,Amazon-IUTE,,85338,853,AZ,Amazon/IUTE
 JAX3,Amazon-JAX3,"城市级候选ZIP，待复核：Jacksonville, FL",32210,322,FL,Amazon/JAX3
 JVL1,Amazon-JVL1,"城市级候选ZIP，待复核：Beloit, WI",53511,535,WI,Amazon/JVL1
+LAN2,Amazon-LAN2,"6500 W Mt Hope Hwy, Lansing, MI",48917,489,MI,Amazon/LAN2
 LAS1,Amazon-LAS1,,89044,890,NV,Amazon/LAS1
 LAS6,Amazon-LAS6,,89115,891,NV,Amazon/LAS6
 LAX9,Amazon-LAX9,,92337,923,CA,Amazon/LAX9
@@ -68,6 +70,7 @@ LFT1,Amazon-LFT1,"城市级候选ZIP，待复核：Carencro, LA",70520,705,LA,Am
 LGB4,Amazon-LGB4,,92374,923,CA,Amazon/LGB4
 LGB6,Amazon-LGB6,"20901 Krameria Ave, Riverside, CA",92518,925,CA,Amazon/LGB6
 LGB8,Amazon-LGB8,,92376,923,CA,Amazon/LGB8
+LGB9,Amazon-LGB9,"4375 N Perris Blvd, Perris, CA",92571,925,CA,Amazon/LGB9
 LIT2,Amazon-LIT2,,72117,721,AR,Amazon/LIT2
 MCC1,Amazon-MCC1,,95742,957,CA,Amazon/MCC1
 MCE1,Amazon-MCE1,,95380,953,CA,Amazon/MCE1
