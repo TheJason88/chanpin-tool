@@ -231,6 +231,7 @@ def process_pickup_timing_by_pickup_date(df, warehouse, product_type, period_typ
     detail_df = df.copy()
     detail_df.loc[~detail_df["是否有效"], "提柜时效"] = np.nan
     result_df = processors.build_time_ops_one_row_summary(detail_df, "提柜时效", "提柜")
+    result_df = processors.round_output_numbers(result_df, processors.RESULT_DECIMALS)
     return detail_df, result_df
 
 
