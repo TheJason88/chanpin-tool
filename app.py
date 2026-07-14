@@ -18,6 +18,7 @@ try:
     import delivery_stage1_adapter
     import tool_common
     import delivery_runtime
+    import delivery_audit_backfill
 except Exception as exc:
     _dependency_error = exc
 
@@ -41,6 +42,8 @@ _bootstrap_error = None
 try:
     # 不在每次下拉框变化时强制 reload。Streamlit rerun 只重新执行页面逻辑，模块初始化保持轻量。
     delivery_runtime.bootstrap(delivery_workflow)
+    # 5A 若上传已补过“邮编异常审核”的派送二报告，这里正式回写到主明细，避免反复补邮编。
+    delivery_audit_backfill.apply_to_workflow(delivery_workflow)
 except Exception as exc:
     _bootstrap_error = exc
 
