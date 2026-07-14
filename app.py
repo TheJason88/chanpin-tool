@@ -18,7 +18,6 @@ try:
     import delivery_stage1_adapter
     import tool_common
     import delivery_runtime
-    import delivery_audit_backfill
 except Exception as exc:
     _dependency_error = exc
 
@@ -41,9 +40,8 @@ DELIVERY_PERIOD_TYPES = [PLACEHOLDER, "按月统计", "按周统计", ORIGINAL_F
 _bootstrap_error = None
 try:
     # 不在每次下拉框变化时强制 reload。Streamlit rerun 只重新执行页面逻辑，模块初始化保持轻量。
+    # 注意：不要在启动阶段加载非必要补丁模块，避免 Reboot 后首页长时间卡住。
     delivery_runtime.bootstrap(delivery_workflow)
-    # 5A 若上传已补过“邮编异常审核”的派送二报告，这里正式回写到主明细，避免反复补邮编。
-    delivery_audit_backfill.apply_to_workflow(delivery_workflow)
 except Exception as exc:
     _bootstrap_error = exc
 
@@ -67,6 +65,12 @@ def _text(value):
 def _numeric_value(value):
     value = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
     return 0.0 if pd.isna(value) else float(value)
+
+
+def _load_backfill_helpers():
+    """按需加载补录回写/提柜动作口径模块，不参与首页启动链路。"""
+    import delivery_audit_backfill
+    return delivery_audit_backfill
 
 
 def classify_delivery_destination_type(row):
@@ -238,7 +242,7 @@ def normal_module_date_column(module_name):
     if module_name == "货量分析":
         return "ETA"
     if module_name in ["提柜分析", "提柜时效分析"]:
-        return "实际抵仓时间"
+        return "提柜时间"
     if module_name in ["拆柜分析", "拆柜时效分析"]:
         return "拆柜完成时间"
     return ""
@@ -301,7 +305,7 @@ elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
         date_range = st.date_input("4. 选择时间范围", value=(month_start, today), format="YYYY-MM-DD", key="normal_date_range")
 
 st.caption(
-    "说明：货量=ETA；提柜=实际抵仓时间；拆柜=拆柜完成时间。"
+    "说明：货量=ETA；提柜=提柜时间；提柜时效=Available时间到实际抵仓时间；拆柜=拆柜完成时间。"
     "普通模块不做产品类型筛选，统一按上传文件中的全部有效数据处理。"
     "普通模块支持：按月统计 / 按周统计 / 按原文件时间范围。"
     "派送二支持：按月统计 / 按周统计 / 按原文件时间范围；并单独输出LA至NJ/SAV/DAL盈仓调拨数据。"
@@ -386,7 +390,8 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
             elif not stage1_file:
                 st.warning("请先上传派送一结果或已补充邮编异常审核的派送二报告。")
             else:
-                cleaned_batches = delivery_workflow.read_stage1_cleaned_batches(stage1_file)
+                audit_helpers = _load_backfill_helpers()
+                cleaned_batches = audit_helpers.read_stage1_or_stage2_with_audit_updates(stage1_file)
                 cleaned_batches = sanitize_stage2_input_df(cleaned_batches)
                 match_df, merge_message = combine_uploaded_match_files(match_files)
                 match_df = sanitize_stage2_input_df(match_df)
@@ -429,16 +434,30 @@ else:
                     processor_period_type = "按周统计" if period_type == ORIGINAL_FILE_PERIOD else period_type
                     normal_start_date = None if period_type == ORIGINAL_FILE_PERIOD else date_range[0]
                     normal_end_date = None if period_type == ORIGINAL_FILE_PERIOD else date_range[1]
-                    detail_df, result_df, final_module = processors.process_uploaded_file(
-                        uploaded_file=uploaded_file,
-                        sheet_name=sheet_name,
-                        warehouse=warehouse_for_processing,
-                        product_type=DEFAULT_PRODUCT_TYPE,
-                        analysis_module=analysis_module,
-                        period_type=processor_period_type,
-                        start_date=normal_start_date,
-                        end_date=normal_end_date,
-                    )
+                    if analysis_module in ["提柜分析", "提柜时效分析"]:
+                        audit_helpers = _load_backfill_helpers()
+                        uploaded_file.seek(0)
+                        source_df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+                        detail_df, result_df = audit_helpers.process_pickup_timing_by_pickup_date(
+                            source_df,
+                            warehouse_for_processing,
+                            DEFAULT_PRODUCT_TYPE,
+                            processor_period_type,
+                            start_date=normal_start_date,
+                            end_date=normal_end_date,
+                        )
+                        final_module = analysis_module
+                    else:
+                        detail_df, result_df, final_module = processors.process_uploaded_file(
+                            uploaded_file=uploaded_file,
+                            sheet_name=sheet_name,
+                            warehouse=warehouse_for_processing,
+                            product_type=DEFAULT_PRODUCT_TYPE,
+                            analysis_module=analysis_module,
+                            period_type=processor_period_type,
+                            start_date=normal_start_date,
+                            end_date=normal_end_date,
+                        )
                     if period_type == ORIGINAL_FILE_PERIOD:
                         detail_df, result_df = rebuild_normal_result_for_original_file_range(detail_df, analysis_module)
                     st.subheader("数据处理结果")
