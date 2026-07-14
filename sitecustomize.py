@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import builtins
 import re
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Set
 
 
 EXTRA_FBA_REFERENCES = [
@@ -43,7 +43,8 @@ EXTRA_FBA_REFERENCES = [
 ]
 
 RAW_ADDRESS_SOURCE_COLS = [
-    "源文件地址", "源文件地址参考", "地址", "目的地", "修正后目的地", "目的地址", "派送地址", "收货地址", "Destination", "Address", "ADDRESS", "转仓地址",
+    "源文件地址", "源文件地址参考", "地址", "目的地", "修正后目的地", "目的地址", "派送地址", "收货地址",
+    "Destination", "Address", "ADDRESS", "转仓地址",
 ]
 RAW_CITY_SOURCE_COLS = ["源文件城市", "城市", "目的城市", "City", "CITY"]
 RAW_STATE_SOURCE_COLS = ["源文件省州", "省/州", "省州", "省份", "州", "目的州", "State", "STATE", "Destination State", "DestinationState"]
@@ -55,6 +56,12 @@ MATCH_CITY_SOURCE_COLS = ["城市", "目的城市", "City", "CITY"]
 MATCH_STATE_SOURCE_COLS = ["省/州", "省州", "省份", "州", "目的州", "State", "STATE", "Destination State", "DestinationState"]
 MATCH_ZIP_SOURCE_COLS = ["邮编", "目的地邮编", "标准邮编", "ZIP", "Zip", "zipcode", "ZipCode", "PostalCode", "Postal Code"]
 MATCH_REFERENCE_COLS = ["匹配文件地址参考", "匹配文件地址", "匹配文件城市", "匹配文件省州", "匹配文件邮编"]
+
+AUDIT_ZIP_COLS = [
+    "补充标准邮编", "待填邮编", "补充邮编", "目的地邮编", "邮编", "标准邮编", "标准邮编集合",
+    "匹配文件邮编", "源文件邮编",
+]
+AUDIT_STATE_COLS = ["补充目的州", "目的州", "州", "省/州", "省州", "State", "STATE", "匹配文件省州", "源文件省州"]
 
 
 _ORIGINAL_IMPORT = builtins.__import__
@@ -101,6 +108,78 @@ def _normalize_batch_key(value: Any) -> str:
     if re.fullmatch(r"\d+\.0", text):
         return text[:-2]
     return text
+
+
+def _batch_tokens_from_row(row) -> Set[str]:
+    tokens: List[str] = []
+    for col in ["批次号集合", "批次号"]:
+        try:
+            if col in row.index:
+                tokens.extend(_split_batch_ids(row.get(col, "")))
+        except Exception:
+            continue
+    return {t for t in (_normalize_batch_key(x) for x in tokens) if t}
+
+
+def _normalize_zip_one(value: Any) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    if re.fullmatch(r"\d+\.0", text):
+        text = text[:-2]
+    if re.fullmatch(r"\d{5}", text):
+        return text
+    if re.fullmatch(r"\d{4}", text):
+        return "0" + text
+    match = re.search(r"(?<!\d)(\d{5})(?!\d)", text)
+    if match:
+        return match.group(1)
+    match4 = re.search(r"(?<!\d)(\d{4})(?!\d)", text)
+    if match4:
+        return "0" + match4.group(1)
+    return ""
+
+
+def _zip_values_from_cell(value: Any) -> List[str]:
+    text = _clean_text(value)
+    if not text:
+        return []
+    values: List[str] = []
+    for part in re.split(r"[,，;；/\s]+", text):
+        z = _normalize_zip_one(part)
+        if z and z not in values:
+            values.append(z)
+    if not values:
+        for z in re.findall(r"(?<!\d)(\d{5})(?!\d)", text):
+            if z not in values:
+                values.append(z)
+    return values
+
+
+def _zip_values_from_row(row) -> List[str]:
+    values: List[str] = []
+    for col in AUDIT_ZIP_COLS:
+        try:
+            if col not in row.index:
+                continue
+            for z in _zip_values_from_cell(row.get(col, "")):
+                if z not in values:
+                    values.append(z)
+        except Exception:
+            continue
+    return values
+
+
+def _state_from_row(row) -> str:
+    for col in AUDIT_STATE_COLS:
+        try:
+            if col in row.index and not _is_blank(row.get(col, "")):
+                state = _clean_text(row.get(col, "")).upper()
+                match = re.search(r"\b([A-Z]{2})\b", state)
+                return match.group(1) if match else state
+        except Exception:
+            continue
+    return ""
 
 
 def _first_existing_col(df, candidates: Iterable[str]) -> str:
@@ -297,6 +376,92 @@ def _stage2_match_df_from_call(args, kwargs):
     return None
 
 
+def _find_main_rows_for_audit_row(main_df, audit_row):
+    result: Set[Any] = set()
+    audit_id = _clean_text(audit_row.get("分析批次ID", "")) if "分析批次ID" in audit_row.index else ""
+    audit_tokens = _batch_tokens_from_row(audit_row)
+
+    if audit_id and "分析批次ID" in main_df.columns:
+        try:
+            matched = main_df.index[main_df["分析批次ID"].astype(str).str.strip() == audit_id].tolist()
+            result.update(matched)
+        except Exception:
+            pass
+
+    if audit_tokens:
+        exact_matches: List[Any] = []
+        overlap_matches: List[Any] = []
+        for idx, main_row in main_df.iterrows():
+            main_tokens = _batch_tokens_from_row(main_row)
+            if not main_tokens:
+                continue
+            if main_tokens == audit_tokens:
+                exact_matches.append(idx)
+            elif main_tokens.intersection(audit_tokens):
+                overlap_matches.append(idx)
+        result.update(exact_matches or overlap_matches)
+
+    return list(result)
+
+
+def _apply_zip_audit_updates_robust(main_df, audit_df):
+    try:
+        import pandas as pd
+        if main_df is None or getattr(main_df, "empty", True) or audit_df is None or getattr(audit_df, "empty", True):
+            return main_df
+        df = main_df.copy()
+        audit = audit_df.copy()
+        for col in ["标准邮编集合", "邮编前三位集合", "目的州", "邮编来源", "目的地邮编待补充"]:
+            if col not in df.columns:
+                df[col] = ""
+
+        for _, audit_row in audit.iterrows():
+            zips = _zip_values_from_row(audit_row)
+            if not zips:
+                continue
+            state = _state_from_row(audit_row)
+            target_indexes = _find_main_rows_for_audit_row(df, audit_row)
+            for idx in target_indexes:
+                df.at[idx, "标准邮编集合"] = ",".join(zips)
+                df.at[idx, "邮编前三位集合"] = ",".join([z[:3] for z in zips if len(z) == 5])
+                if state:
+                    df.at[idx, "目的州"] = state
+                df.at[idx, "邮编来源"] = "邮编异常审核人工补充"
+                df.at[idx, "目的地邮编待补充"] = False
+
+        # 最终用标准邮编集合重新计算一次，避免 Excel 里 True/False 字符串导致已补邮编行继续进审核页。
+        df["目的地邮编待补充"] = df["标准邮编集合"].apply(lambda x: len(_zip_values_from_cell(x)) == 0)
+        return df
+    except Exception:
+        return main_df
+
+
+def _read_stage1_or_stage2_with_audit_updates_robust(excel_file):
+    import pandas as pd
+
+    excel_file.seek(0)
+    xls = pd.ExcelFile(excel_file)
+    if "派送二_匹配后合并数据" in xls.sheet_names:
+        sheet_name = "派送二_匹配后合并数据"
+    elif "清洗后数据" in xls.sheet_names:
+        sheet_name = "清洗后数据"
+    elif "派送一_清洗合并数据" in xls.sheet_names:
+        sheet_name = "派送一_清洗合并数据"
+    elif "派送二_批次车次聚合" in xls.sheet_names:
+        sheet_name = "派送二_批次车次聚合"
+    else:
+        sheet_name = xls.sheet_names[0]
+
+    excel_file.seek(0)
+    df = pd.read_excel(excel_file, sheet_name=sheet_name, dtype=str)
+
+    if "邮编异常审核" in xls.sheet_names:
+        excel_file.seek(0)
+        audit_df = pd.read_excel(excel_file, sheet_name="邮编异常审核", dtype=str)
+        df = _apply_zip_audit_updates_robust(df, audit_df)
+    return df
+
+
 def _patch_delivery_reference(module):
     try:
         import pandas as pd
@@ -317,7 +482,7 @@ def _patch_delivery_reference(module):
 
 def _patch_delivery_match_adapter(module):
     try:
-        if getattr(module, "_address_reference_patch_v3", False):
+        if getattr(module, "_address_reference_patch_v4", False):
             return
 
         original_prepare = module.prepare_manual_match_flexible
@@ -346,7 +511,8 @@ def _patch_delivery_match_adapter(module):
         module.prepare_manual_match_flexible = prepare_manual_match_with_address_refs
         module.apply_manual_match_to_cleaned_batches_flexible = apply_manual_match_with_address_refs
         module._finalize_zip_audit_sheet = finalize_zip_audit_with_address_refs
-        module._address_reference_patch_v3 = True
+        module.read_stage1_or_stage2_with_audit_updates = _read_stage1_or_stage2_with_audit_updates_robust
+        module._address_reference_patch_v4 = True
     except Exception:
         return
 
@@ -360,11 +526,12 @@ def _patch_after_delivery_bootstrap(delivery_workflow_module):
         try:
             delivery_workflow_module.prepare_manual_match = delivery_match_adapter.prepare_manual_match_flexible
             delivery_workflow_module.apply_manual_match_to_cleaned_batches = delivery_match_adapter.apply_manual_match_to_cleaned_batches_flexible
+            delivery_workflow_module.read_stage1_cleaned_batches = delivery_match_adapter.read_stage1_or_stage2_with_audit_updates
         except Exception:
             pass
 
         base_stage1 = delivery_workflow_module.process_stage1_raw_files_to_cleaned_batches
-        if not getattr(base_stage1, "_source_address_reference_patch_v3", False):
+        if not getattr(base_stage1, "_source_address_reference_patch_v4", False):
             def process_stage1_with_source_address(*args, **kwargs):
                 result = base_stage1(*args, **kwargs)
                 if isinstance(result, tuple) and len(result) == 4:
@@ -376,11 +543,11 @@ def _patch_after_delivery_bootstrap(delivery_workflow_module):
                     return cleaned_batches, invalid_detail, zip_audit_df, raw_detail
                 return result
 
-            process_stage1_with_source_address._source_address_reference_patch_v3 = True
+            process_stage1_with_source_address._source_address_reference_patch_v4 = True
             delivery_workflow_module.process_stage1_raw_files_to_cleaned_batches = process_stage1_with_source_address
 
         base_build = delivery_match_adapter.build_split_stage2_report
-        if not getattr(base_build, "_source_address_reference_patch_v3", False):
+        if not getattr(base_build, "_source_address_reference_patch_v4", False):
             def build_split_stage2_report_with_source_address(*args, **kwargs):
                 report = base_build(*args, **kwargs)
                 if isinstance(report, dict):
@@ -395,7 +562,7 @@ def _patch_after_delivery_bootstrap(delivery_workflow_module):
                         report["邮编异常审核"] = _reorder_zip_audit_columns(audit)
                 return report
 
-            build_split_stage2_report_with_source_address._source_address_reference_patch_v3 = True
+            build_split_stage2_report_with_source_address._source_address_reference_patch_v4 = True
             delivery_match_adapter.build_split_stage2_report = build_split_stage2_report_with_source_address
     except Exception:
         return
@@ -404,7 +571,7 @@ def _patch_after_delivery_bootstrap(delivery_workflow_module):
 def _patch_delivery_runtime(module):
     try:
         bootstrap = getattr(module, "bootstrap", None)
-        if bootstrap is None or getattr(bootstrap, "_source_address_reference_patch_v3", False):
+        if bootstrap is None or getattr(bootstrap, "_source_address_reference_patch_v4", False):
             return
 
         def bootstrap_with_source_address(delivery_workflow_module):
@@ -412,7 +579,7 @@ def _patch_delivery_runtime(module):
             _patch_after_delivery_bootstrap(delivery_workflow_module)
             return result
 
-        bootstrap_with_source_address._source_address_reference_patch_v3 = True
+        bootstrap_with_source_address._source_address_reference_patch_v4 = True
         module.bootstrap = bootstrap_with_source_address
     except Exception:
         return
