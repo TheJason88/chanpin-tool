@@ -31,15 +31,34 @@ EXTRA_FBA_REFERENCES = [
         "州": "CA",
         "站点名称": "Amazon/LGB9",
     },
+    {
+        "FBA仓点代码": "HOU7",
+        "目的地示例": "Amazon-HOU7",
+        "地址": "16225-A Tomball Pkwy, Houston, TX",
+        "邮编": "77064",
+        "邮编前三位": "770",
+        "州": "TX",
+        "站点名称": "Amazon/HOU7",
+    },
 ]
 
-ADDRESS_SOURCE_COLS = [
+RAW_ADDRESS_SOURCE_COLS = [
     "源文件地址", "源文件地址参考", "地址", "目的地", "修正后目的地", "目的地址", "派送地址", "收货地址", "Destination", "转仓地址",
 ]
-CITY_SOURCE_COLS = ["源文件城市", "城市", "目的城市", "City", "CITY"]
-STATE_SOURCE_COLS = ["源文件省州", "省/州", "省州", "省份", "州", "目的州", "State", "STATE", "DestinationState"]
-ZIP_SOURCE_COLS = ["源文件邮编", "邮编", "目的地邮编", "标准邮编", "ZIP", "Zip", "zipcode", "ZipCode", "PostalCode", "Postal Code"]
-REFERENCE_COLS = ["源文件地址参考", "源文件地址", "源文件城市", "源文件省州", "源文件邮编"]
+RAW_CITY_SOURCE_COLS = ["源文件城市", "城市", "目的城市", "City", "CITY"]
+RAW_STATE_SOURCE_COLS = ["源文件省州", "省/州", "省州", "省份", "州", "目的州", "State", "STATE", "DestinationState"]
+RAW_ZIP_SOURCE_COLS = ["源文件邮编", "邮编", "目的地邮编", "标准邮编", "ZIP", "Zip", "zipcode", "ZipCode", "PostalCode", "Postal Code"]
+RAW_REFERENCE_COLS = ["源文件地址参考", "源文件地址", "源文件城市", "源文件省州", "源文件邮编"]
+
+MATCH_ADDRESS_SOURCE_COLS = ["地址", "目的地", "修正后目的地", "目的地址", "派送地址", "收货地址", "Destination", "Address", "ADDRESS"]
+MATCH_CITY_SOURCE_COLS = ["城市", "目的城市", "City", "CITY"]
+MATCH_STATE_SOURCE_COLS = ["省/州", "省州", "省份", "州", "目的州", "State", "STATE", "Destination State"]
+MATCH_ZIP_SOURCE_COLS = ["邮编", "目的地邮编", "标准邮编", "ZIP", "Zip", "zipcode", "ZipCode", "PostalCode", "Postal Code"]
+MATCH_REFERENCE_COLS = ["匹配文件地址参考", "匹配文件地址", "匹配文件城市", "匹配文件省州", "匹配文件邮编"]
+
+
+_ORIGINAL_IMPORT = builtins.__import__
+_PATCHING = False
 
 
 def _is_blank(value: Any) -> bool:
@@ -86,45 +105,52 @@ def _normalize_batch_key(value: Any) -> str:
     return text
 
 
-def _combine_from_columns(df, columns: List[str]) -> str:
-    if df is None or getattr(df, "empty", True):
+def _first_existing_col(df, candidates: Iterable[str]) -> str:
+    if df is None:
         return ""
-    values: List[Any] = []
-    for col in columns:
-        if col in df.columns:
-            values.extend(df[col].tolist())
-    return _combine(values)
+    for col in candidates:
+        if col in getattr(df, "columns", []):
+            return col
+    return ""
 
 
-def _address_ref_from_group(group) -> Dict[str, str]:
-    address = _combine_from_columns(group, ADDRESS_SOURCE_COLS)
-    city = _combine_from_columns(group, CITY_SOURCE_COLS)
-    state = _combine_from_columns(group, STATE_SOURCE_COLS)
-    zip_code = _combine_from_columns(group, ZIP_SOURCE_COLS)
-    parts = [address, city, state, zip_code]
+def _extract_ref_from_row(row, address_col="", city_col="", state_col="", zip_col="", prefix="源文件") -> Dict[str, str]:
+    address = _clean_text(row.get(address_col, "")) if address_col else ""
+    city = _clean_text(row.get(city_col, "")) if city_col else ""
+    state = _clean_text(row.get(state_col, "")) if state_col else ""
+    zip_code = _clean_text(row.get(zip_col, "")) if zip_col else ""
+    ref = _combine([address, city, state, zip_code], sep=", ")
     return {
-        "源文件地址": address,
-        "源文件城市": city,
-        "源文件省州": state,
-        "源文件邮编": zip_code,
-        "源文件地址参考": _combine(parts),
+        f"{prefix}地址参考": ref,
+        f"{prefix}地址": address,
+        f"{prefix}城市": city,
+        f"{prefix}省州": state,
+        f"{prefix}邮编": zip_code,
     }
 
 
-def _ensure_address_reference_columns(df):
-    if df is None or getattr(df, "empty", True):
-        return df
-    out = df.copy()
-    for col in REFERENCE_COLS:
-        if col not in out.columns:
-            out[col] = ""
-    for idx, _ in out.iterrows():
-        row_df = out.loc[[idx]]
-        ref = _address_ref_from_group(row_df)
-        for col in REFERENCE_COLS:
-            if _is_blank(out.at[idx, col]) and ref.get(col):
-                out.at[idx, col] = ref[col]
-    return out
+def _ensure_columns(df, cols: Iterable[str]):
+    try:
+        for col in cols:
+            if col not in df.columns:
+                df[col] = ""
+    except Exception:
+        pass
+    return df
+
+
+def _address_ref_from_group(group):
+    address_col = _first_existing_col(group, RAW_ADDRESS_SOURCE_COLS)
+    city_col = _first_existing_col(group, RAW_CITY_SOURCE_COLS)
+    state_col = _first_existing_col(group, RAW_STATE_SOURCE_COLS)
+    zip_col = _first_existing_col(group, RAW_ZIP_SOURCE_COLS)
+    refs = []
+    for _, row in group.iterrows():
+        refs.append(_extract_ref_from_row(row, address_col, city_col, state_col, zip_col, prefix="源文件"))
+    merged = {}
+    for col in RAW_REFERENCE_COLS:
+        merged[col] = _combine(ref.get(col, "") for ref in refs)
+    return merged
 
 
 def _source_address_by_batch(raw_detail):
@@ -134,15 +160,14 @@ def _source_address_by_batch(raw_detail):
     raw["__批次匹配Key"] = raw["批次号"].apply(_normalize_batch_key)
     result = {}
     for key, group in raw.groupby("__批次匹配Key", dropna=False):
-        if not key:
-            continue
-        result[str(key)] = _address_ref_from_group(group)
+        if key:
+            result[str(key)] = _address_ref_from_group(group)
     return result
 
 
-def _merge_ref_dicts(refs: Iterable[Dict[str, str]]) -> Dict[str, str]:
+def _merge_ref_dicts(refs: Iterable[Dict[str, str]], cols: Iterable[str]) -> Dict[str, str]:
     merged = {}
-    for col in REFERENCE_COLS:
+    for col in cols:
         merged[col] = _combine(ref.get(col, "") for ref in refs)
     return merged
 
@@ -150,7 +175,7 @@ def _merge_ref_dicts(refs: Iterable[Dict[str, str]]) -> Dict[str, str]:
 def _enrich_cleaned_with_source_address(cleaned_batches, raw_detail):
     if cleaned_batches is None or getattr(cleaned_batches, "empty", True):
         return cleaned_batches
-    out = _ensure_address_reference_columns(cleaned_batches)
+    out = _ensure_columns(cleaned_batches.copy(), RAW_REFERENCE_COLS)
     batch_ref = _source_address_by_batch(raw_detail)
     if not batch_ref:
         return out
@@ -159,8 +184,81 @@ def _enrich_cleaned_with_source_address(cleaned_batches, raw_detail):
         refs = [batch_ref[_normalize_batch_key(batch)] for batch in batch_ids if _normalize_batch_key(batch) in batch_ref]
         if not refs:
             continue
-        merged = _merge_ref_dicts(refs)
-        for col in REFERENCE_COLS:
+        merged = _merge_ref_dicts(refs, RAW_REFERENCE_COLS)
+        for col in RAW_REFERENCE_COLS:
+            if merged.get(col):
+                out.at[idx, col] = merged[col]
+    return out
+
+
+def _match_address_reference_by_batch(match_df):
+    try:
+        import pandas as pd
+        import processors
+        if match_df is None or getattr(match_df, "empty", True):
+            return pd.DataFrame(columns=["批次号"] + MATCH_REFERENCE_COLS)
+        match = processors.normalize_columns(match_df).copy()
+        if "批次号" not in match.columns:
+            return pd.DataFrame(columns=["批次号"] + MATCH_REFERENCE_COLS)
+        address_col = _first_existing_col(match, MATCH_ADDRESS_SOURCE_COLS)
+        city_col = _first_existing_col(match, MATCH_CITY_SOURCE_COLS)
+        state_col = _first_existing_col(match, MATCH_STATE_SOURCE_COLS)
+        zip_col = _first_existing_col(match, MATCH_ZIP_SOURCE_COLS)
+        grouped = {}
+        for _, row in match.iterrows():
+            batch = _normalize_batch_key(row.get("批次号", ""))
+            if not batch:
+                continue
+            entry = grouped.setdefault(batch, {col: [] for col in MATCH_REFERENCE_COLS})
+            ref = _extract_ref_from_row(row, address_col, city_col, state_col, zip_col, prefix="匹配文件")
+            for col in MATCH_REFERENCE_COLS:
+                value = ref.get(col, "")
+                if value and value not in entry[col]:
+                    entry[col].append(value)
+        rows = []
+        for batch, values in grouped.items():
+            row = {"批次号": batch}
+            for col in MATCH_REFERENCE_COLS:
+                row[col] = _combine(values[col])
+            rows.append(row)
+        return pd.DataFrame(rows, columns=["批次号"] + MATCH_REFERENCE_COLS)
+    except Exception:
+        try:
+            import pandas as pd
+            return pd.DataFrame(columns=["批次号"] + MATCH_REFERENCE_COLS)
+        except Exception:
+            return None
+
+
+def _reorder_zip_audit_columns(df):
+    if df is None or getattr(df, "empty", True):
+        return df
+    out = _ensure_columns(df.copy(), RAW_REFERENCE_COLS + MATCH_REFERENCE_COLS)
+    desired_front = [
+        "分析批次ID", "仓库", "标准运输类型", "派送方式", "车次号", "批次号集合",
+        "匹配文件地址参考", "匹配文件地址", "匹配文件城市", "匹配文件省州", "匹配文件邮编",
+        "源文件地址参考", "源文件地址", "源文件城市", "源文件省州", "源文件邮编",
+        "补充标准邮编", "补充目的州",
+    ]
+    cols = [c for c in desired_front if c in out.columns] + [c for c in out.columns if c not in desired_front]
+    return out[cols]
+
+
+def _copy_match_refs_to_rows(df, match_df):
+    if df is None or getattr(df, "empty", True):
+        return df
+    out = _ensure_columns(df.copy(), MATCH_REFERENCE_COLS)
+    match_ref = _match_address_reference_by_batch(match_df)
+    if match_ref is None or getattr(match_ref, "empty", True):
+        return out
+    lookup = match_ref.set_index("批次号", drop=False).to_dict("index")
+    for idx, row in out.iterrows():
+        batch_ids = _split_batch_ids(row.get("批次号集合", row.get("批次号", "")))
+        refs = [lookup[_normalize_batch_key(batch)] for batch in batch_ids if _normalize_batch_key(batch) in lookup]
+        if not refs:
+            continue
+        merged = _merge_ref_dicts(refs, MATCH_REFERENCE_COLS)
+        for col in MATCH_REFERENCE_COLS:
             if merged.get(col):
                 out.at[idx, col] = merged[col]
     return out
@@ -169,15 +267,11 @@ def _enrich_cleaned_with_source_address(cleaned_batches, raw_detail):
 def _merge_address_from_matched(audit, matched):
     if audit is None or getattr(audit, "empty", True):
         return audit
-    out = _ensure_address_reference_columns(audit)
+    out = _ensure_columns(audit.copy(), RAW_REFERENCE_COLS + MATCH_REFERENCE_COLS)
     if matched is None or getattr(matched, "empty", True):
         return out
-    matched = _ensure_address_reference_columns(matched)
-
+    matched = _ensure_columns(matched.copy(), RAW_REFERENCE_COLS + MATCH_REFERENCE_COLS)
     key_cols = [c for c in ["分析批次ID", "批次号集合"] if c in out.columns and c in matched.columns]
-    if not key_cols:
-        return out
-
     for key_col in key_cols:
         lookup = matched.drop_duplicates(subset=[key_col], keep="first").set_index(key_col, drop=False)
         for idx, row in out.iterrows():
@@ -185,23 +279,10 @@ def _merge_address_from_matched(audit, matched):
             if _is_blank(key) or key not in lookup.index:
                 continue
             source = lookup.loc[key]
-            for col in REFERENCE_COLS:
+            for col in RAW_REFERENCE_COLS + MATCH_REFERENCE_COLS:
                 if _is_blank(out.at[idx, col]) and col in source.index and not _is_blank(source.get(col, "")):
                     out.at[idx, col] = source.get(col, "")
     return out
-
-
-def _reorder_zip_audit_columns(df):
-    if df is None or getattr(df, "empty", True):
-        return df
-    out = df.copy()
-    desired_front = [
-        "分析批次ID", "仓库", "标准运输类型", "派送方式", "车次号", "批次号集合",
-        "源文件地址参考", "源文件地址", "源文件城市", "源文件省州", "源文件邮编",
-        "补充标准邮编", "补充目的州",
-    ]
-    cols = [c for c in desired_front if c in out.columns] + [c for c in out.columns if c not in desired_front]
-    return out[cols]
 
 
 def _patch_delivery_reference(module):
@@ -222,11 +303,47 @@ def _patch_delivery_reference(module):
         return
 
 
+def _patch_delivery_match_adapter(module):
+    try:
+        if getattr(module, "_address_reference_patch_v2", False):
+            return
+
+        original_prepare = module.prepare_manual_match_flexible
+        def prepare_manual_match_with_address_refs(match_df):
+            base = original_prepare(match_df)
+            extra = _match_address_reference_by_batch(match_df)
+            if base is None or getattr(base, "empty", True):
+                return _ensure_columns(base, MATCH_REFERENCE_COLS) if base is not None else base
+            base = base.copy()
+            base["批次号"] = base["批次号"].apply(_normalize_batch_key)
+            if extra is not None and not getattr(extra, "empty", True):
+                base = base.merge(extra, on="批次号", how="left")
+            base = _ensure_columns(base, MATCH_REFERENCE_COLS)
+            return base
+
+        original_apply = module.apply_manual_match_to_cleaned_batches_flexible
+        def apply_manual_match_with_address_refs(cleaned_batches, match_df):
+            out = original_apply(cleaned_batches, match_df)
+            return _copy_match_refs_to_rows(out, match_df)
+
+        original_finalize = module._finalize_zip_audit_sheet
+        def finalize_zip_audit_with_address_refs(df):
+            out = original_finalize(df)
+            return _reorder_zip_audit_columns(out)
+
+        module.prepare_manual_match_flexible = prepare_manual_match_with_address_refs
+        module.apply_manual_match_to_cleaned_batches_flexible = apply_manual_match_with_address_refs
+        module._finalize_zip_audit_sheet = finalize_zip_audit_with_address_refs
+        module._address_reference_patch_v2 = True
+    except Exception:
+        return
+
+
 def _patch_after_delivery_bootstrap(delivery_workflow_module):
     try:
-        import pandas as pd  # noqa: F401
         import tool_common
         import delivery_match_adapter
+        _patch_delivery_match_adapter(delivery_match_adapter)
 
         base_stage1 = delivery_workflow_module.process_stage1_raw_files_to_cleaned_batches
         if not getattr(base_stage1, "_source_address_reference_patch", False):
@@ -264,7 +381,7 @@ def _patch_after_delivery_bootstrap(delivery_workflow_module):
 def _patch_delivery_runtime(module):
     try:
         bootstrap = getattr(module, "bootstrap", None)
-        if bootstrap is None or getattr(bootstrap, "_source_address_reference_patch", False):
+        if bootstrap is None or getattr(bootstrap, "_source_address_reference_patch_v2", False):
             return
 
         def bootstrap_with_source_address(delivery_workflow_module):
@@ -272,26 +389,31 @@ def _patch_delivery_runtime(module):
             _patch_after_delivery_bootstrap(delivery_workflow_module)
             return result
 
-        bootstrap_with_source_address._source_address_reference_patch = True
+        bootstrap_with_source_address._source_address_reference_patch_v2 = True
         module.bootstrap = bootstrap_with_source_address
     except Exception:
         return
 
 
-_ORIGINAL_IMPORT = builtins.__import__
-
-
 def _patched_import(name, globals=None, locals=None, fromlist=(), level=0):
+    global _PATCHING
     module = _ORIGINAL_IMPORT(name, globals, locals, fromlist, level)
+    if _PATCHING:
+        return module
     try:
+        _PATCHING = True
         root_name = name.split(".", 1)[0]
         target = module
         if root_name == "delivery_reference":
             _patch_delivery_reference(target)
+        elif root_name == "delivery_match_adapter":
+            _patch_delivery_match_adapter(target)
         elif root_name == "delivery_runtime":
             _patch_delivery_runtime(target)
     except Exception:
         pass
+    finally:
+        _PATCHING = False
     return module
 
 
