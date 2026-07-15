@@ -202,6 +202,7 @@ def process_pickup_timing_by_pickup_date(df, warehouse, product_type, period_typ
     提柜分析的统计维度改为“提柜时间”：
     - 日期筛选、周/月归属、柜号去重排序都按提柜时间；
     - 提柜时效仍沿用原口径：LA/NJ/SAV 为 Available时间→实际抵仓时间，其他仓为提柜时间→实际抵仓时间。
+    - 开始/结束节点都存在但时效刚好等于0天时，按0.5天计入平均和P80；缺失或小于0仍按异常留空。
     """
     df = processors.prepare_base_df(df)
     df = processors.filter_warehouse(df, warehouse)
@@ -226,6 +227,8 @@ def process_pickup_timing_by_pickup_date(df, warehouse, product_type, period_typ
     df["开始时间"] = pd.to_datetime(df["开始时间"], errors="coerce")
     df["结束时间"] = df["实际抵仓时间"]
     df["提柜时效"] = (df["结束时间"] - df["开始时间"]).dt.total_seconds() / 86400
+    zero_duration_mask = df["开始时间"].notna() & df["结束时间"].notna() & df["提柜时效"].eq(0)
+    df.loc[zero_duration_mask, "提柜时效"] = 0.5
     df = processors.mark_duration_abnormal(df, "提柜时效", "开始时间", "结束时间", min_days=0.01, max_days=20)
 
     detail_df = df.copy()
