@@ -133,6 +133,16 @@ def _build_analysis_id_index(df):
     return id_index
 
 
+def _ensure_object_columns(df, columns):
+    """Pandas 3 + Arrow string columns reject bool assignment; use object dtype before backfill writes."""
+    for col in columns:
+        if col not in df.columns:
+            df[col] = ""
+        else:
+            df[col] = df[col].astype("object")
+    return df
+
+
 def apply_zip_audit_updates(main_df, audit_df):
     """
     Consume the filled 邮编异常审核 sheet and write the补充邮编 back to the main stage-2 data.
@@ -143,9 +153,8 @@ def apply_zip_audit_updates(main_df, audit_df):
 
     df = main_df.copy()
     audit = audit_df.copy()
-    for col in ["标准邮编集合", "邮编前三位集合", "目的州", "邮编来源", "目的地邮编待补充"]:
-        if col not in df.columns:
-            df[col] = ""
+    backfill_columns = ["标准邮编集合", "邮编前三位集合", "目的州", "邮编来源", "目的地邮编待补充"]
+    df = _ensure_object_columns(df, backfill_columns)
 
     token_index = _build_batch_token_index(df)
     id_index = _build_analysis_id_index(df)
@@ -174,7 +183,7 @@ def apply_zip_audit_updates(main_df, audit_df):
             df.at[idx, "目的地邮编待补充"] = False
 
     # Recalculate from the actual zip column; do not trust previous True/False string values.
-    df["目的地邮编待补充"] = df["标准邮编集合"].apply(lambda value: len(_zip_values_from_cell(value)) == 0)
+    df["目的地邮编待补充"] = df["标准邮编集合"].apply(lambda value: len(_zip_values_from_cell(value)) == 0).astype("object")
     return df
 
 
