@@ -19,7 +19,17 @@ MAIN_SHEET_CANDIDATES = [
 ]
 AUDIT_SHEET_NAME = "邮编异常审核"
 LINEHAUL_ROUTES = ["LA-NJ", "LA-DAL", "LA-CHI", "LA-SAV"]
-LINEHAUL_SHEET_COLUMNS = ["仓库", "统计周期", "专线线路", "发车数", "派送时效", "货量"]
+LINEHAUL_TARGET_NAMES = {
+    "LA-NJ": "NJ干线商圈",
+    "LA-DAL": "DAL干线商圈",
+    "LA-CHI": "CHI干线商圈",
+    "LA-SAV": "SAV干线商圈",
+}
+LINEHAUL_SHEET_COLUMNS = [
+    "指标名称", "发货仓", "干线目标区域", "专线线路", "统计周期", "车次数",
+    "总出库体积", "总出库卡板数", "总派送成本", "平均整车价", "每方平均价",
+    "平均每车出库体积", "平均派送时效", "P80派送时效", "批次号集合", "车次号集合",
+]
 
 # 干线商圈口径：NJ/DAL维持原规则；CHI/SAV按实际物流商圈扩大。
 LINEHAUL_MARKET_RULES = pd.DataFrame([
@@ -77,6 +87,20 @@ def _split_batch_keys(value):
         if key and key not in result:
             result.append(key)
     return result
+
+
+def _combine_unique_text(values):
+    result = []
+    if values is None:
+        return ""
+    for value in values:
+        if _is_blank(value):
+            continue
+        for part in re.split(r"[,，;；\n]+", str(value)):
+            text = part.strip()
+            if text and text not in result:
+                result.append(text)
+    return ",".join(result)
 
 
 def _batch_tokens_from_row(row):
@@ -196,15 +220,15 @@ def apply_linehaul_market_rules():
 
 def _build_linehaul_sheet(matched):
     """
-    生成LA四条干线的独立结果表：
+    生成LA四条干线的独立结果表，字段丰富度与调拨数据保持一致：
     - 每个统计周期固定输出 LA-NJ / LA-DAL / LA-CHI / LA-SAV 四行；
-    - 发车数仅统计FTL车次；
-    - 货量按命中该干线的出库体积求和；
-    - 派送时效取有效派送时效平均值，缺失时留空。
+    - 全部指标按FTL车次汇总，LTL不计入干线车次、成本及货量；
+    - 同时输出体积、板数、成本、均价、平均装载、平均/P80时效、批次和车次信息。
     """
     if matched is None or getattr(matched, "empty", True):
         return pd.DataFrame(columns=LINEHAUL_SHEET_COLUMNS)
-    if "仓库" not in matched.columns or "统计周期" not in matched.columns or "专线线路" not in matched.columns:
+    required = ["仓库", "统计周期", "专线线路"]
+    if any(col not in matched.columns for col in required):
         return pd.DataFrame(columns=LINEHAUL_SHEET_COLUMNS)
 
     source = matched.copy()
@@ -212,7 +236,7 @@ def _build_linehaul_sheet(matched):
     if source.empty:
         return pd.DataFrame(columns=LINEHAUL_SHEET_COLUMNS)
 
-    for col in ["出库体积", "派送时效"]:
+    for col in ["出库体积", "出库卡板数", "派送成本", "派送时效"]:
         if col not in source.columns:
             source[col] = pd.NA
         source[col] = pd.to_numeric(source[col], errors="coerce")
@@ -222,6 +246,11 @@ def _build_linehaul_sheet(matched):
     else:
         source["_是否FTL"] = source.get("标准运输类型", pd.Series("", index=source.index)).astype(str).str.upper().eq("FTL")
 
+    if "批次号集合" not in source.columns:
+        source["批次号集合"] = source.get("批次号", "")
+    if "车次号" not in source.columns:
+        source["车次号"] = ""
+
     periods = [p for p in source["统计周期"].dropna().astype(str).unique().tolist() if p.strip()]
     periods = sorted(periods)
 
@@ -229,23 +258,44 @@ def _build_linehaul_sheet(matched):
     for period in periods:
         period_source = source[source["统计周期"].astype(str) == period]
         for line in LINEHAUL_ROUTES:
-            group = period_source[period_source["专线线路"].astype(str).str.strip() == line]
-            dispatch_count = int(group["_是否FTL"].sum()) if not group.empty else 0
-            volume = float(group["出库体积"].sum(min_count=1)) if not group.empty and group["出库体积"].notna().any() else 0.0
+            group = period_source[
+                (period_source["专线线路"].astype(str).str.strip() == line)
+                & period_source["_是否FTL"]
+            ].copy()
+
+            trip_count = int(len(group))
+            total_volume = float(group["出库体积"].sum(min_count=1)) if not group.empty and group["出库体积"].notna().any() else 0.0
+            total_pallets = float(group["出库卡板数"].sum(min_count=1)) if not group.empty and group["出库卡板数"].notna().any() else 0.0
+            total_cost = float(group["派送成本"].sum(min_count=1)) if not group.empty and group["派送成本"].notna().any() else 0.0
             valid_duration = group["派送时效"].dropna() if not group.empty else pd.Series(dtype="float64")
+
             rows.append({
-                "仓库": "LA",
-                "统计周期": period,
+                "指标名称": "LA干线数据",
+                "发货仓": "LA",
+                "干线目标区域": LINEHAUL_TARGET_NAMES[line],
                 "专线线路": line,
-                "发车数": dispatch_count,
-                "派送时效": valid_duration.mean() if not valid_duration.empty else pd.NA,
-                "货量": volume,
+                "统计周期": period,
+                "车次数": trip_count,
+                "总出库体积": total_volume,
+                "总出库卡板数": total_pallets,
+                "总派送成本": total_cost,
+                "平均整车价": total_cost / trip_count if trip_count else pd.NA,
+                "每方平均价": total_cost / total_volume if total_volume else pd.NA,
+                "平均每车出库体积": total_volume / trip_count if trip_count else pd.NA,
+                "平均派送时效": valid_duration.mean() if not valid_duration.empty else pd.NA,
+                "P80派送时效": processors.safe_p80(valid_duration) if not valid_duration.empty else pd.NA,
+                "批次号集合": _combine_unique_text(group["批次号集合"]) if not group.empty else "",
+                "车次号集合": _combine_unique_text(group["车次号"]) if not group.empty else "",
             })
 
     result = pd.DataFrame(rows, columns=LINEHAUL_SHEET_COLUMNS)
-    result["发车数"] = pd.to_numeric(result["发车数"], errors="coerce").fillna(0).round(0).astype("Int64")
-    result["派送时效"] = pd.to_numeric(result["派送时效"], errors="coerce").round(2)
-    result["货量"] = pd.to_numeric(result["货量"], errors="coerce").fillna(0).round(2)
+    result["车次数"] = pd.to_numeric(result["车次数"], errors="coerce").fillna(0).round(0).astype("Int64")
+    result["总出库卡板数"] = pd.to_numeric(result["总出库卡板数"], errors="coerce").fillna(0).round(0).astype("Int64")
+    for col in [
+        "总出库体积", "总派送成本", "平均整车价", "每方平均价",
+        "平均每车出库体积", "平均派送时效", "P80派送时效",
+    ]:
+        result[col] = pd.to_numeric(result[col], errors="coerce").round(2)
     return result
 
 
@@ -270,7 +320,7 @@ def apply_stage2_linehaul_sheet_patch():
     import delivery_match_adapter
 
     current = delivery_match_adapter.build_split_stage2_report
-    if getattr(current, "_includes_la_linehaul_sheet", False):
+    if getattr(current, "_includes_la_linehaul_sheet_v2", False):
         return delivery_match_adapter
 
     def build_split_stage2_report_with_linehaul(delivery_workflow_module, cleaned_batches, match_df, period_type="按周统计"):
@@ -285,7 +335,7 @@ def apply_stage2_linehaul_sheet_patch():
 
         return _insert_sheet_after(reports, "调拨数据", "干线数据", linehaul_sheet)
 
-    build_split_stage2_report_with_linehaul._includes_la_linehaul_sheet = True
+    build_split_stage2_report_with_linehaul._includes_la_linehaul_sheet_v2 = True
     delivery_match_adapter.build_split_stage2_report = build_split_stage2_report_with_linehaul
     return delivery_match_adapter
 
