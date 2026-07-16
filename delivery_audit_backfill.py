@@ -18,6 +18,8 @@ MAIN_SHEET_CANDIDATES = [
     "派送二_批次车次聚合",
 ]
 AUDIT_SHEET_NAME = "邮编异常审核"
+LINEHAUL_ROUTES = ["LA-NJ", "LA-DAL", "LA-CHI", "LA-SAV"]
+LINEHAUL_SHEET_COLUMNS = ["仓库", "统计周期", "专线线路", "发车数", "派送时效", "货量"]
 
 # 干线商圈口径：NJ/DAL维持原规则；CHI/SAV按实际物流商圈扩大。
 LINEHAUL_MARKET_RULES = pd.DataFrame([
@@ -47,6 +49,12 @@ def _is_blank(value):
             return True
     text = str(value).strip()
     return text.lower() in ["", "nan", "none", "null", "<na>", "false"] or text in ["/", "//", ";", ";;", "-", "0"]
+
+
+def _truthy(value):
+    if value is True:
+        return True
+    return str(value).strip().lower() in ["true", "1", "是", "yes", "y"]
 
 
 def _normalize_batch_key(value):
@@ -186,6 +194,102 @@ def apply_linehaul_market_rules():
     return delivery_workflow
 
 
+def _build_linehaul_sheet(matched):
+    """
+    生成LA四条干线的独立结果表：
+    - 每个统计周期固定输出 LA-NJ / LA-DAL / LA-CHI / LA-SAV 四行；
+    - 发车数仅统计FTL车次；
+    - 货量按命中该干线的出库体积求和；
+    - 派送时效取有效派送时效平均值，缺失时留空。
+    """
+    if matched is None or getattr(matched, "empty", True):
+        return pd.DataFrame(columns=LINEHAUL_SHEET_COLUMNS)
+    if "仓库" not in matched.columns or "统计周期" not in matched.columns or "专线线路" not in matched.columns:
+        return pd.DataFrame(columns=LINEHAUL_SHEET_COLUMNS)
+
+    source = matched.copy()
+    source = source[source["仓库"].astype(str).str.strip().isin(["LA", "美西仓", "美西二号仓", "CA"])].copy()
+    if source.empty:
+        return pd.DataFrame(columns=LINEHAUL_SHEET_COLUMNS)
+
+    for col in ["出库体积", "派送时效"]:
+        if col not in source.columns:
+            source[col] = pd.NA
+        source[col] = pd.to_numeric(source[col], errors="coerce")
+
+    if "是否FTL发车" in source.columns:
+        source["_是否FTL"] = source["是否FTL发车"].apply(_truthy)
+    else:
+        source["_是否FTL"] = source.get("标准运输类型", pd.Series("", index=source.index)).astype(str).str.upper().eq("FTL")
+
+    periods = [p for p in source["统计周期"].dropna().astype(str).unique().tolist() if p.strip()]
+    periods = sorted(periods)
+
+    rows = []
+    for period in periods:
+        period_source = source[source["统计周期"].astype(str) == period]
+        for line in LINEHAUL_ROUTES:
+            group = period_source[period_source["专线线路"].astype(str).str.strip() == line]
+            dispatch_count = int(group["_是否FTL"].sum()) if not group.empty else 0
+            volume = float(group["出库体积"].sum(min_count=1)) if not group.empty and group["出库体积"].notna().any() else 0.0
+            valid_duration = group["派送时效"].dropna() if not group.empty else pd.Series(dtype="float64")
+            rows.append({
+                "仓库": "LA",
+                "统计周期": period,
+                "专线线路": line,
+                "发车数": dispatch_count,
+                "派送时效": valid_duration.mean() if not valid_duration.empty else pd.NA,
+                "货量": volume,
+            })
+
+    result = pd.DataFrame(rows, columns=LINEHAUL_SHEET_COLUMNS)
+    result["发车数"] = pd.to_numeric(result["发车数"], errors="coerce").fillna(0).round(0).astype("Int64")
+    result["派送时效"] = pd.to_numeric(result["派送时效"], errors="coerce").round(2)
+    result["货量"] = pd.to_numeric(result["货量"], errors="coerce").fillna(0).round(2)
+    return result
+
+
+def _insert_sheet_after(report_dict, after_name, sheet_name, sheet_df):
+    """按Excel工作表顺序，把新表插到指定工作表之后。"""
+    out = {}
+    inserted = False
+    for name, data in report_dict.items():
+        if name == sheet_name:
+            continue
+        out[name] = data
+        if name == after_name:
+            out[sheet_name] = sheet_df
+            inserted = True
+    if not inserted:
+        out[sheet_name] = sheet_df
+    return out
+
+
+def apply_stage2_linehaul_sheet_patch():
+    """功能二LA结果在“调拨数据”后增加“干线数据”表；非LA结果保持原样。"""
+    import delivery_match_adapter
+
+    current = delivery_match_adapter.build_split_stage2_report
+    if getattr(current, "_includes_la_linehaul_sheet", False):
+        return delivery_match_adapter
+
+    def build_split_stage2_report_with_linehaul(delivery_workflow_module, cleaned_batches, match_df, period_type="按周统计"):
+        reports = current(delivery_workflow_module, cleaned_batches, match_df, period_type)
+        if not isinstance(reports, dict):
+            return reports
+
+        matched = reports.get("派送二_匹配后合并数据")
+        linehaul_sheet = _build_linehaul_sheet(matched)
+        if linehaul_sheet.empty:
+            return reports
+
+        return _insert_sheet_after(reports, "调拨数据", "干线数据", linehaul_sheet)
+
+    build_split_stage2_report_with_linehaul._includes_la_linehaul_sheet = True
+    delivery_match_adapter.build_split_stage2_report = build_split_stage2_report_with_linehaul
+    return delivery_match_adapter
+
+
 def apply_zip_audit_updates(main_df, audit_df):
     """
     Consume the filled 邮编异常审核 sheet and write the补充邮编 back to the main stage-2 data.
@@ -230,8 +334,9 @@ def apply_zip_audit_updates(main_df, audit_df):
 
 
 def read_stage1_or_stage2_with_audit_updates(excel_file):
-    # 功能二开始读取5A时同步应用最新干线商圈规则。
+    # 功能二开始读取5A时同步应用最新干线商圈规则和LA干线独立表。
     apply_linehaul_market_rules()
+    apply_stage2_linehaul_sheet_patch()
 
     excel_file.seek(0)
     xls = pd.ExcelFile(excel_file)
@@ -304,5 +409,6 @@ def apply_pickup_action_date_patch():
 def apply_to_workflow(delivery_workflow_module):
     delivery_workflow_module.read_stage1_cleaned_batches = read_stage1_or_stage2_with_audit_updates
     apply_linehaul_market_rules()
+    apply_stage2_linehaul_sheet_patch()
     apply_pickup_action_date_patch()
     return delivery_workflow_module
