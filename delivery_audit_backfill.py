@@ -19,6 +19,24 @@ MAIN_SHEET_CANDIDATES = [
 ]
 AUDIT_SHEET_NAME = "邮编异常审核"
 
+# 干线商圈口径：NJ/DAL维持原规则；CHI/SAV按实际物流商圈扩大。
+LINEHAUL_MARKET_RULES = pd.DataFrame([
+    {"干线区域": "NJ州", "专线线路": "LA-NJ", "邮编规则": "070-089", "地区规则": "NJ"},
+    {"干线区域": "Dallas, TX", "专线线路": "LA-DAL", "邮编规则": "750-753", "地区规则": "Dallas / TX"},
+    {
+        "干线区域": "Chicago商圈",
+        "专线线路": "LA-CHI",
+        "邮编规则": "600-608",
+        "地区规则": "Chicago及Illinois侧核心仓储带（Chicago / Joliet / Channahon / Monee / Matteson / Aurora等）",
+    },
+    {
+        "干线区域": "Savannah港口商圈",
+        "专线线路": "LA-SAV",
+        "邮编规则": "313-314",
+        "地区规则": "Savannah港口及周边仓储带（Savannah / Garden City / Pooler / Port Wentworth / Rincon / Ellabell等）",
+    },
+])
+
 
 def _is_blank(value):
     try:
@@ -67,7 +85,6 @@ def _normalize_zip(value):
     text = str(value).strip()
     if re.fullmatch(r"\d+\.0", text):
         text = text[:-2]
-    # Prefer the shared normalizer when available, then fall back to local parsing.
     try:
         zip_code, _, valid, _ = processors.normalize_zip_value(text)
         if valid and zip_code:
@@ -143,6 +160,32 @@ def _ensure_object_columns(df, columns):
     return df
 
 
+def _market_line_from_zip(zip_code):
+    """功能二干线邮编识别：NJ/DAL不变，CHI/SAV扩大到审慎的核心商圈。"""
+    z = _normalize_zip(zip_code)
+    if len(z) != 5:
+        return "", ""
+    prefix3 = int(z[:3])
+    if 70 <= prefix3 <= 89:
+        return "LA-NJ", "干线规则：NJ州邮编070-089"
+    if 750 <= prefix3 <= 753:
+        return "LA-DAL", "干线规则：Dallas TX邮编750-753"
+    if 600 <= prefix3 <= 608:
+        return "LA-CHI", "干线规则：Chicago商圈邮编600-608"
+    if 313 <= prefix3 <= 314:
+        return "LA-SAV", "干线规则：Savannah港口商圈邮编313-314"
+    return "未知线路", "邮编未命中干线规则"
+
+
+def apply_linehaul_market_rules():
+    """按需覆盖功能二干线规则，不进入首页启动链路。"""
+    import delivery_workflow
+
+    delivery_workflow.LINEHAUL_RULES = LINEHAUL_MARKET_RULES.copy()
+    delivery_workflow.line_from_zip = _market_line_from_zip
+    return delivery_workflow
+
+
 def apply_zip_audit_updates(main_df, audit_df):
     """
     Consume the filled 邮编异常审核 sheet and write the补充邮编 back to the main stage-2 data.
@@ -182,12 +225,14 @@ def apply_zip_audit_updates(main_df, audit_df):
             df.at[idx, "邮编来源"] = "邮编异常审核人工补充"
             df.at[idx, "目的地邮编待补充"] = False
 
-    # Recalculate from the actual zip column; do not trust previous True/False string values.
     df["目的地邮编待补充"] = df["标准邮编集合"].apply(lambda value: len(_zip_values_from_cell(value)) == 0).astype("object")
     return df
 
 
 def read_stage1_or_stage2_with_audit_updates(excel_file):
+    # 功能二开始读取5A时同步应用最新干线商圈规则。
+    apply_linehaul_market_rules()
+
     excel_file.seek(0)
     xls = pd.ExcelFile(excel_file)
     sheet_name = xls.sheet_names[0]
@@ -257,8 +302,7 @@ def apply_pickup_action_date_patch():
 
 
 def apply_to_workflow(delivery_workflow_module):
-    # app.py calls delivery_workflow.read_stage1_cleaned_batches for 5A files.
     delivery_workflow_module.read_stage1_cleaned_batches = read_stage1_or_stage2_with_audit_updates
-    # Ordinary 提柜分析 is dispatched through processors.process_uploaded_file.
+    apply_linehaul_market_rules()
     apply_pickup_action_date_patch()
     return delivery_workflow_module
