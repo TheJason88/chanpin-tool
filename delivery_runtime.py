@@ -517,6 +517,7 @@ def _build_transfer_cost_report(matched):
         trip_count = len(group)
         total_volume = group["出库体积"].sum()
         total_cost = group["派送成本"].sum()
+        average_group = processors.average_sample_rows(group)
         rows.append({
             "指标名称": "调拨成本",
             "仓库": warehouse,
@@ -528,10 +529,10 @@ def _build_transfer_cost_report(matched):
             "车次数": int(trip_count),
             "总出库体积": total_volume,
             "总派送成本": total_cost,
-            "平均整车价": total_cost / trip_count if trip_count else pd.NA,
-            "每方平均价": total_cost / total_volume if total_volume else pd.NA,
-            "平均每车出库体积": total_volume / trip_count if trip_count else pd.NA,
-            "P80每车出库体积": pd.NA,
+            "平均整车价": average_group["派送成本"].mean() if not average_group.empty else pd.NA,
+            "每方平均价": processors.mean_detail_ratio(average_group, "派送成本", "出库体积"),
+            "平均每车出库体积": average_group["出库体积"].mean() if not average_group.empty else pd.NA,
+            "P80每车出库体积": processors.safe_p80(average_group["出库体积"]) if not average_group.empty else pd.NA,
         })
     return pd.DataFrame(rows)[columns]
 
@@ -552,6 +553,7 @@ def _build_transfer_report(matched):
         total_volume = group["出库体积"].sum()
         total_pallets = group["出库卡板数"].sum()
         total_cost = group["派送成本"].sum()
+        average_group = processors.average_sample_rows(group)
         rows.append({
             "指标名称": "LA仓间调拨",
             "发货仓": warehouse,
@@ -562,9 +564,9 @@ def _build_transfer_report(matched):
             "总出库体积": total_volume,
             "总出库卡板数": total_pallets,
             "总派送成本": total_cost,
-            "平均整车价": total_cost / trip_count if trip_count else pd.NA,
-            "每方平均价": total_cost / total_volume if total_volume else pd.NA,
-            "平均每车出库体积": total_volume / trip_count if trip_count else pd.NA,
+            "平均整车价": average_group["派送成本"].mean() if not average_group.empty else pd.NA,
+            "每方平均价": processors.mean_detail_ratio(average_group, "派送成本", "出库体积"),
+            "平均每车出库体积": average_group["出库体积"].mean() if not average_group.empty else pd.NA,
             "批次号集合": _combine_series_text(group.get("批次号集合")),
             "车次号集合": _combine_series_text(group.get("车次号")),
         })

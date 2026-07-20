@@ -549,7 +549,8 @@ def build_sheet1_volume_dispatch_time_report(df):
         if warehouse == "LA":
             lh_time = linehaul_df(group)
             for line, lg in lh_time.groupby("专线线路", dropna=False):
-                rows.append(report_row("3.派送时效", "LA干线派送时效", warehouse, period, "干线线路", line, avg_time=lg["派送时效"].mean(), p80_time=processors.safe_p80(lg["派送时效"]), note="平均值与P80，仅有效时效参与计算"))
+                average_lg = processors.average_sample_rows(lg)
+                rows.append(report_row("3.派送时效", "LA干线派送时效", warehouse, period, "干线线路", line, avg_time=average_lg["派送时效"].mean(), p80_time=processors.safe_p80(average_lg["派送时效"]), note="平均值与P80，仅有效时效且备注不含‘里/外’的明细参与计算"))
     return pd.DataFrame(rows)
 
 
