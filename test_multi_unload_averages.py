@@ -3,7 +3,9 @@ import unittest
 import pandas as pd
 
 import delivery_audit_backfill
+import delivery_match_adapter
 import delivery_runtime
+import delivery_workflow
 
 
 class MultiUnloadAverageTests(unittest.TestCase):
@@ -56,6 +58,45 @@ class MultiUnloadAverageTests(unittest.TestCase):
             report = delivery_audit_backfill._build_linehaul_sheet(rows)
             row = report.loc[report["专线线路"] == "LA-NJ"].iloc[0]
             self.assertEqual(row["平均派送时效"], 2)
+
+    def test_stage1_and_stage2_keep_all_trip_remarks_as_last_column(self):
+        detail = pd.DataFrame([
+            {
+                "原始行号": 2, "仓库": "LA", "标准运输类型": "FTL", "车次号": "T1", "批次号": "A",
+                "出库时间": "2026-07-01", "签收时间": "2026-07-03", "出库体积": 10, "出库卡板数": 2,
+                "派送成本": 100, "FBA/FBX": "FBX", "备注": "正常批次",
+            },
+            {
+                "原始行号": 3, "仓库": "LA", "标准运输类型": "FTL", "车次号": "T1", "批次号": "B",
+                "出库时间": "2026-07-01", "签收时间": "2026-07-03", "出库体积": 30, "出库卡板数": 4,
+                "派送成本": 600, "FBA/FBX": "FBX", "备注": "里仓两卸",
+            },
+        ])
+        stage1 = delivery_workflow.build_cleaned_batches_from_detail(detail)
+        self.assertEqual(stage1.columns[-1], "备注")
+        self.assertIn("正常批次", stage1.iloc[0]["备注"])
+        self.assertIn("里仓两卸", stage1.iloc[0]["备注"])
+
+        delivery_runtime.bootstrap(delivery_workflow)
+        stage2 = delivery_workflow.prepare_stage2_for_report(stage1, pd.DataFrame(), "按周统计")
+        self.assertEqual(stage2.columns[-1], "同车次备注集合")
+        self.assertIn("里仓两卸", stage2.iloc[0]["同车次备注集合"])
+
+        exported = delivery_match_adapter._finalize_sheet(stage2, "明细")
+        self.assertEqual(exported.columns[-1], "同车次备注集合")
+        self.assertIn("里仓两卸", exported.iloc[0]["同车次备注集合"])
+
+    def test_stage1_remark_marker_excludes_entire_trip_from_linehaul_averages(self):
+        rows = self.rows.copy()
+        rows["同车次备注集合"] = ["正常", "外仓两卸"]
+        rows["匹配备注集合"] = ""
+        report = delivery_audit_backfill._build_linehaul_sheet(rows)
+        row = report.loc[report["专线线路"] == "LA-NJ"].iloc[0]
+        self.assertEqual(row["车次数"], 2)
+        self.assertEqual(row["总出库体积"], 40)
+        self.assertEqual(row["平均每车出库体积"], 10)
+        self.assertEqual(row["平均派送时效"], 2)
+        self.assertEqual(row["P80派送时效"], 2)
 
 
 if __name__ == "__main__":

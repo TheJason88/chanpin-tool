@@ -50,7 +50,7 @@ FIELD_ALIASES = {
     "出库体积": ["出库体积", "体积", "方数", "CBM", "Volume"],
     "出库卡板数": ["出库卡板数", "卡板数", "板数", "托盘数", "Pallets"],
     "调入仓库": ["调入仓库", "调入仓", "目的仓库", "调拨目的仓", "Transfer To Warehouse"],
-    "备注": ["备注", "Note", "Remark", "Remarks"],
+    "备注": ["备注", "备注信息", "MEMO", "跟进记录", "内部备注", "Note", "Remark", "Remarks"],
     "创建时间": ["创建时间", "Create Time"],
     "创建人": ["创建人", "Creator"],
     "是否转仓": ["是否转仓", "转仓", "Is Transfer"],
@@ -168,7 +168,7 @@ def safe_p90(series):
 
 
 MULTI_UNLOAD_REMARK_MARKERS = ("里", "外")
-MULTI_UNLOAD_REMARK_COLUMNS = ("匹配备注集合", "备注", "备注信息", "MEMO", "跟进记录", "内部备注")
+MULTI_UNLOAD_REMARK_COLUMNS = ("同车次备注集合", "匹配备注集合", "备注", "备注信息", "MEMO", "跟进记录", "内部备注")
 
 
 def average_sample_rows(df):
