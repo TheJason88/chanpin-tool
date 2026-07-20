@@ -167,6 +167,37 @@ def safe_p90(series):
     return clean_series.quantile(0.9)
 
 
+MULTI_UNLOAD_REMARK_MARKERS = ("里", "外")
+MULTI_UNLOAD_REMARK_COLUMNS = ("匹配备注集合", "备注", "备注信息", "MEMO", "跟进记录", "内部备注")
+
+
+def average_sample_rows(df):
+    """Return detail rows eligible for averages/P80.
+
+    A remark containing either ``里`` or ``外`` marks a batch that shares a
+    two-stop trip with a non-transfer batch.  It remains in all totals, but it
+    must not contribute an observation to an average or percentile.
+    """
+    if df is None or df.empty:
+        return df.copy()
+    remark_cols = [col for col in MULTI_UNLOAD_REMARK_COLUMNS if col in df.columns]
+    if not remark_cols:
+        return df.copy()
+    combined = df[remark_cols].fillna("").astype(str).agg(" ".join, axis=1)
+    excluded = combined.str.contains("里|外", regex=True, na=False)
+    return df.loc[~excluded].copy()
+
+
+def mean_detail_ratio(df, numerator_col, denominator_col):
+    """Mean of eligible row-level ratios, never a ratio of aggregate totals."""
+    if df is None or df.empty:
+        return np.nan
+    numerator = pd.to_numeric(df[numerator_col], errors="coerce")
+    denominator = pd.to_numeric(df[denominator_col], errors="coerce")
+    ratios = numerator.div(denominator.where(denominator.ne(0))).replace([np.inf, -np.inf], np.nan).dropna()
+    return ratios.mean() if not ratios.empty else np.nan
+
+
 def normalized_ratio_values(counts, decimals=RESULT_DECIMALS):
     counts = [0 if pd.isna(v) else float(v) for v in counts]
     total = sum(counts)

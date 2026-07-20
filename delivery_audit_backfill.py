@@ -267,7 +267,8 @@ def _build_linehaul_sheet(matched):
             total_volume = float(group["出库体积"].sum(min_count=1)) if not group.empty and group["出库体积"].notna().any() else 0.0
             total_pallets = float(group["出库卡板数"].sum(min_count=1)) if not group.empty and group["出库卡板数"].notna().any() else 0.0
             total_cost = float(group["派送成本"].sum(min_count=1)) if not group.empty and group["派送成本"].notna().any() else 0.0
-            valid_duration = group["派送时效"].dropna() if not group.empty else pd.Series(dtype="float64")
+            average_group = processors.average_sample_rows(group)
+            valid_duration = average_group["派送时效"].dropna() if not average_group.empty else pd.Series(dtype="float64")
 
             rows.append({
                 "指标名称": "LA干线数据",
@@ -279,9 +280,9 @@ def _build_linehaul_sheet(matched):
                 "总出库体积": total_volume,
                 "总出库卡板数": total_pallets,
                 "总派送成本": total_cost,
-                "平均整车价": total_cost / trip_count if trip_count else pd.NA,
-                "每方平均价": total_cost / total_volume if total_volume else pd.NA,
-                "平均每车出库体积": total_volume / trip_count if trip_count else pd.NA,
+                "平均整车价": average_group["派送成本"].mean() if not average_group.empty else pd.NA,
+                "每方平均价": processors.mean_detail_ratio(average_group, "派送成本", "出库体积"),
+                "平均每车出库体积": average_group["出库体积"].mean() if not average_group.empty else pd.NA,
                 "平均派送时效": valid_duration.mean() if not valid_duration.empty else pd.NA,
                 "P80派送时效": processors.safe_p80(valid_duration) if not valid_duration.empty else pd.NA,
                 "批次号集合": _combine_unique_text(group["批次号集合"]) if not group.empty else "",
