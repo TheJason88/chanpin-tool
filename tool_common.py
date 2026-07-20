@@ -59,8 +59,9 @@ TRANSFER_WAREHOUSE_INFO = {
 INTEGER_OUTPUT_COLUMNS = ["排名", "车次数", "发车数", "派送数", "出库卡板数"]
 DECIMAL_OUTPUT_COLUMNS = [
     "数值", "占比", "出库体积", "FBA出库体积", "FBX出库体积", "派送成本", "派送时效",
-    "总出库体积", "总派送成本", "平均整车价", "每方平均价", "平均每车出库体积",
-    "P80每车出库体积", "平均派送时效", "P80派送时效",
+    "总出库体积", "总出库卡板数", "总派送成本", "平均整车价", "P80整车价", "每方平均价",
+    "平均每车出库体积", "P80每车出库体积", "平均每车出库卡板数", "P80每车出库卡板数",
+    "平均派送时效", "P80派送时效",
 ]
 
 TEXT_COLUMN_KEYWORDS = ["邮编", "ZIP", "zip", "批次号", "车次号"]
@@ -381,15 +382,8 @@ def merge_case_duplicate_output_rows(df, sheet_type=""):
         return _recalc_rank_and_share(out, "出库体积", "排名", "占比", ["仓库", "统计周期"])
 
     if sheet_type == "成本":
-        keys = ["指标名称", "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组"]
-        sum_cols = ["车次数", "总出库体积", "总派送成本"]
-        out = _group_sum_preserve_order(out, keys, sum_cols)
-        if "平均整车价" in out.columns:
-            out["平均整车价"] = pd.to_numeric(out.get("总派送成本"), errors="coerce") / pd.to_numeric(out.get("车次数"), errors="coerce").replace(0, pd.NA)
-        if "每方平均价" in out.columns:
-            out["每方平均价"] = pd.to_numeric(out.get("总派送成本"), errors="coerce") / pd.to_numeric(out.get("总出库体积"), errors="coerce").replace(0, pd.NA)
-        if "平均每车出库体积" in out.columns:
-            out["平均每车出库体积"] = pd.to_numeric(out.get("总出库体积"), errors="coerce") / pd.to_numeric(out.get("车次数"), errors="coerce").replace(0, pd.NA)
+        # 成本计算层已经基于业务筛选后的逐车明细生成平均值/P80。
+        # 导出层只统一大小写和数值格式，不再聚合或用总量相除覆盖指标。
         return out
 
     return out

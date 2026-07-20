@@ -3,6 +3,7 @@ import re
 import pandas as pd
 
 import processors
+import tool_common
 import delivery_reference
 
 
@@ -624,6 +625,9 @@ def build_station_cost_report(matched):
         _expand_cost_by_station(cost_source[cost_source["主产品类型"] == "FBX"], "FBX平台仓"),
     ], ignore_index=True)
     if not expanded.empty:
+        # 在明细聚合前统一平台/仓点大小写，避免导出层为了合并大小写重复项
+        # 再次按“总额/车次数”重算并覆盖已筛选样本的平均值与P80。
+        expanded = tool_common.normalize_case_insensitive_labels(expanded)
         group_cols = ["仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组"]
         for keys, group in expanded.groupby(group_cols, dropna=False):
             total_volume = group["出库体积"].sum()
