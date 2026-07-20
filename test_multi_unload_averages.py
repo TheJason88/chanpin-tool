@@ -14,14 +14,14 @@ class MultiUnloadAverageTests(unittest.TestCase):
             [
                 {
                     "仓库": "LA", "统计周期": "2026-W28", "专线线路": "LA-NJ",
-                    "是否FTL发车": True, "出库体积": 10, "出库卡板数": 2,
-                    "派送成本": 100, "派送时效": 2, "匹配备注集合": "正常",
+                    "是否FTL发车": True, "出库体积": 50, "出库卡板数": 2,
+                    "派送成本": 500, "派送时效": 2, "匹配备注集合": "正常",
                     "批次号集合": "A", "车次号": "T1", "出库类型": "调拨",
                     "调入仓库": "NJ", "业务场景": "仓间调拨",
                 },
                 {
                     "仓库": "LA", "统计周期": "2026-W28", "专线线路": "LA-NJ",
-                    "是否FTL发车": True, "出库体积": 30, "出库卡板数": 4,
+                    "是否FTL发车": True, "出库体积": 60, "出库卡板数": 4,
                     "派送成本": 600, "派送时效": 20, "匹配备注集合": "里外两卸",
                     "批次号集合": "B", "车次号": "T2", "出库类型": "调拨",
                     "调入仓库": "NJ", "业务场景": "仓间调拨",
@@ -33,11 +33,11 @@ class MultiUnloadAverageTests(unittest.TestCase):
         report = delivery_audit_backfill._build_linehaul_sheet(self.rows)
         row = report.loc[report["专线线路"] == "LA-NJ"].iloc[0]
         self.assertEqual(row["车次数"], 2)
-        self.assertEqual(row["总出库体积"], 40)
-        self.assertEqual(row["总派送成本"], 700)
-        self.assertEqual(row["平均整车价"], 100)
+        self.assertEqual(row["总出库体积"], 110)
+        self.assertEqual(row["总派送成本"], 1100)
+        self.assertEqual(row["平均整车价"], 500)
         self.assertEqual(row["每方平均价"], 10)
-        self.assertEqual(row["平均每车出库体积"], 10)
+        self.assertEqual(row["平均每车出库体积"], 50)
         self.assertEqual(row["平均派送时效"], 2)
         self.assertEqual(row["P80派送时效"], 2)
 
@@ -45,11 +45,11 @@ class MultiUnloadAverageTests(unittest.TestCase):
         report = delivery_runtime._build_transfer_report(self.rows)
         row = report.iloc[0]
         self.assertEqual(row["车次数"], 2)
-        self.assertEqual(row["总出库体积"], 40)
-        self.assertEqual(row["总派送成本"], 700)
-        self.assertEqual(row["平均整车价"], 100)
+        self.assertEqual(row["总出库体积"], 110)
+        self.assertEqual(row["总派送成本"], 1100)
+        self.assertEqual(row["平均整车价"], 500)
         self.assertEqual(row["每方平均价"], 10)
-        self.assertEqual(row["平均每车出库体积"], 10)
+        self.assertEqual(row["平均每车出库体积"], 50)
 
     def test_either_marker_is_sufficient(self):
         for marker in ("里", "外", "里外"):
@@ -93,10 +93,36 @@ class MultiUnloadAverageTests(unittest.TestCase):
         report = delivery_audit_backfill._build_linehaul_sheet(rows)
         row = report.loc[report["专线线路"] == "LA-NJ"].iloc[0]
         self.assertEqual(row["车次数"], 2)
-        self.assertEqual(row["总出库体积"], 40)
-        self.assertEqual(row["平均每车出库体积"], 10)
+        self.assertEqual(row["总出库体积"], 110)
+        self.assertEqual(row["平均每车出库体积"], 50)
         self.assertEqual(row["平均派送时效"], 2)
         self.assertEqual(row["P80派送时效"], 2)
+
+    def test_under_45_cbm_trip_is_totals_only_and_45_is_eligible(self):
+        rows = self.rows.copy()
+        rows["匹配备注集合"] = "正常"
+        rows["同车次备注集合"] = "正常"
+        rows[["出库体积", "派送成本", "派送时效"]] = rows[["出库体积", "派送成本", "派送时效"]].astype(float)
+        rows.loc[0, ["出库体积", "派送成本", "派送时效"]] = [45, 450, 2]
+        rows.loc[1, ["出库体积", "派送成本", "派送时效"]] = [44.99, 899.8, 20]
+
+        linehaul = delivery_audit_backfill._build_linehaul_sheet(rows)
+        linehaul_row = linehaul.loc[linehaul["专线线路"] == "LA-NJ"].iloc[0]
+        self.assertEqual(linehaul_row["车次数"], 2)
+        self.assertEqual(linehaul_row["总出库体积"], 89.99)
+        self.assertEqual(linehaul_row["总派送成本"], 1349.8)
+        self.assertEqual(linehaul_row["平均整车价"], 450)
+        self.assertEqual(linehaul_row["每方平均价"], 10)
+        self.assertEqual(linehaul_row["平均每车出库体积"], 45)
+        self.assertEqual(linehaul_row["平均派送时效"], 2)
+        self.assertEqual(linehaul_row["P80派送时效"], 2)
+
+        transfer = delivery_runtime._build_transfer_report(rows).iloc[0]
+        self.assertEqual(transfer["车次数"], 2)
+        self.assertAlmostEqual(transfer["总出库体积"], 89.99, places=2)
+        self.assertEqual(transfer["平均整车价"], 450)
+        self.assertEqual(transfer["每方平均价"], 10)
+        self.assertEqual(transfer["平均每车出库体积"], 45)
 
 
 if __name__ == "__main__":
