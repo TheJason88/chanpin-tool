@@ -170,6 +170,10 @@ def safe_p90(series):
 MULTI_UNLOAD_REMARK_MARKERS = ("里", "外")
 MULTI_UNLOAD_REMARK_COLUMNS = ("同车次备注集合", "匹配备注集合", "备注", "备注信息", "MEMO", "跟进记录", "内部备注")
 MIN_TRANSFER_LINEHAUL_AVERAGE_VOLUME = 45
+REGULAR_DELIVERY_MIN_AVERAGE_VOLUME = {
+    "大车地板": 45,
+    "大车卡板": 30,
+}
 
 
 def average_sample_rows(df):
@@ -192,6 +196,33 @@ def average_sample_rows(df):
         volume = pd.to_numeric(df["出库体积"], errors="coerce")
         excluded = excluded | volume.lt(MIN_TRANSFER_LINEHAUL_AVERAGE_VOLUME)
     return df.loc[~excluded].copy()
+
+
+def regular_delivery_average_sample_rows(df):
+    """Return ordinary-trip rows eligible for load/cost averages and P80.
+
+    Totals continue to use the unfiltered detail rows.  Only average/P80
+    samples exclude under-loaded 53-foot trips: floor-loaded trips below
+    45 CBM and pallet-loaded trips below 30 CBM.  Boundary values remain
+    eligible.
+    """
+    if df is None or df.empty:
+        return df.copy()
+    out = df.copy()
+    volume = pd.to_numeric(out.get("出库体积", pd.Series(np.nan, index=out.index)), errors="coerce")
+    if "车型装车分组" in out.columns:
+        vehicle_group = out["车型装车分组"].fillna("").astype(str)
+    else:
+        vehicle = out.get("车型标准值", pd.Series("", index=out.index)).fillna("").astype(str)
+        loading = out.get("装车类型标准值", pd.Series("", index=out.index)).fillna("").astype(str)
+        is_large = vehicle.str.contains(r"53|大车", regex=True, na=False)
+        vehicle_group = pd.Series("", index=out.index, dtype="object")
+        vehicle_group.loc[is_large & loading.str.contains("地板", na=False)] = "大车地板"
+        vehicle_group.loc[is_large & loading.str.contains("卡板", na=False)] = "大车卡板"
+    excluded = pd.Series(False, index=out.index)
+    for group_name, min_volume in REGULAR_DELIVERY_MIN_AVERAGE_VOLUME.items():
+        excluded |= vehicle_group.eq(group_name) & volume.lt(min_volume)
+    return out.loc[~excluded].copy()
 
 
 def mean_detail_ratio(df, numerator_col, denominator_col):
