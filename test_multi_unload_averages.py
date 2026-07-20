@@ -201,28 +201,35 @@ class MultiUnloadAverageTests(unittest.TestCase):
 
         self.assertEqual(regular["批次号集合"].tolist(), ["B"])
 
-    def test_mci4_reference_fills_zip_state_and_station_code(self):
-        reference = delivery_reference.match_fba_reference("Amazon-MCI4")
+    def test_added_fba_references_fill_zip_state_and_station_code(self):
+        cases = [
+            ("MCI4", "10501 NW 136th St, Kansas City, MO 64153", "64153", "MO"),
+            ("CMH7", "1245 Beech Rd SW, New Albany, OH 43054", "43054", "OH"),
+        ]
+        for code, address, zip_code, state in cases:
+            with self.subTest(code=code):
+                reference = delivery_reference.match_fba_reference(f"Amazon-{code}")
 
-        self.assertEqual(reference["代码"], "MCI4")
-        self.assertEqual(reference["邮编"], "64153")
-        self.assertEqual(reference["州"], "MO")
+                self.assertEqual(reference["代码"], code)
+                self.assertEqual(reference["邮编"], zip_code)
+                self.assertEqual(reference["州"], state)
+                self.assertEqual(delivery_reference.FBA_REFERENCE_MAP[code]["地址"], address)
 
-        rows = pd.DataFrame([{
-            "仓库": "LA",
-            "系统产品类型": "FBA",
-            "目的地": "Amazon-MCI4",
-            "修正后目的地": "Amazon-MCI4",
-            "FBA仓点代码": "MCI4",
-            "邮编是否有效": False,
-        }])
-        matched = delivery_reference.apply_delivery_reference_memory(rows).iloc[0]
+                rows = pd.DataFrame([{
+                    "仓库": "LA",
+                    "系统产品类型": "FBA",
+                    "目的地": f"Amazon-{code}",
+                    "修正后目的地": f"Amazon-{code}",
+                    "FBA仓点代码": code,
+                    "邮编是否有效": False,
+                }])
+                matched = delivery_reference.apply_delivery_reference_memory(rows).iloc[0]
 
-        self.assertEqual(matched["标准邮编"], "64153")
-        self.assertEqual(matched["邮编前三位"], "641")
-        self.assertEqual(matched["目的州"], "MO")
-        self.assertEqual(matched["规则匹配代码"], "MCI4")
-        self.assertFalse(bool(matched["目的地邮编待补充"]))
+                self.assertEqual(matched["标准邮编"], zip_code)
+                self.assertEqual(matched["邮编前三位"], zip_code[:3])
+                self.assertEqual(matched["目的州"], state)
+                self.assertEqual(matched["规则匹配代码"], code)
+                self.assertFalse(bool(matched["目的地邮编待补充"]))
 
 
 if __name__ == "__main__":
