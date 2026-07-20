@@ -167,6 +167,14 @@ def _format_numbers(df, sheet_type=""):
 
 
 def _finalize_sheet(df, sheet_type=""):
+    if sheet_type == "明细" and df is not None:
+        out = df.copy()
+        remarks = out.get("同车次备注集合", pd.Series("", index=out.index)).copy()
+        out = _strip_remark_columns(out)
+        out["同车次备注集合"] = remarks
+        out = _drop_empty_columns(out, preserve=["同车次备注集合"])
+        out = out[[col for col in out.columns if col != "同车次备注集合"] + ["同车次备注集合"]]
+        return _format_numbers(out, sheet_type=sheet_type)
     return _format_numbers(_drop_empty_columns(_strip_remark_columns(df)), sheet_type=sheet_type)
 
 

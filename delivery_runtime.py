@@ -665,6 +665,10 @@ def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_modul
             cleaned_batches = tool_common.apply_dominant_destination_from_detail(cleaned_batches, raw_detail)
             cleaned_batches = _apply_trip_cost_rule(cleaned_batches, raw_detail)
             cleaned_batches = _clean_delivery_time_columns(cleaned_batches)
+            if cleaned_batches is not None and not cleaned_batches.empty:
+                if "备注" not in cleaned_batches.columns:
+                    cleaned_batches["备注"] = ""
+                cleaned_batches = cleaned_batches[[col for col in cleaned_batches.columns if col != "备注"] + ["备注"]]
             if cleaned_batches is not None and not cleaned_batches.empty and "目的地邮编待补充" in cleaned_batches.columns:
                 zip_audit_df = cleaned_batches[tool_common.normalize_boolean_series(cleaned_batches["目的地邮编待补充"])].copy()
             return cleaned_batches, invalid_detail, zip_audit_df, raw_detail
