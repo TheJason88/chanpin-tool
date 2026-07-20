@@ -169,22 +169,28 @@ def safe_p90(series):
 
 MULTI_UNLOAD_REMARK_MARKERS = ("里", "外")
 MULTI_UNLOAD_REMARK_COLUMNS = ("同车次备注集合", "匹配备注集合", "备注", "备注信息", "MEMO", "跟进记录", "内部备注")
+MIN_TRANSFER_LINEHAUL_AVERAGE_VOLUME = 45
 
 
 def average_sample_rows(df):
-    """Return detail rows eligible for averages/P80.
+    """Return transfer/linehaul detail rows eligible for averages/P80.
 
     A remark containing either ``里`` or ``外`` marks a batch that shares a
     two-stop trip with a non-transfer batch.  It remains in all totals, but it
-    must not contribute an observation to an average or percentile.
+    must not contribute an observation to an average or percentile. A trip
+    below 45 CBM follows the same totals-only rule; exactly 45 CBM is eligible.
     """
     if df is None or df.empty:
         return df.copy()
     remark_cols = [col for col in MULTI_UNLOAD_REMARK_COLUMNS if col in df.columns]
-    if not remark_cols:
-        return df.copy()
-    combined = df[remark_cols].fillna("").astype(str).agg(" ".join, axis=1)
-    excluded = combined.str.contains("里|外", regex=True, na=False)
+    if remark_cols:
+        combined = df[remark_cols].fillna("").astype(str).agg(" ".join, axis=1)
+        excluded = combined.str.contains("里|外", regex=True, na=False)
+    else:
+        excluded = pd.Series(False, index=df.index)
+    if "出库体积" in df.columns:
+        volume = pd.to_numeric(df["出库体积"], errors="coerce")
+        excluded = excluded | volume.lt(MIN_TRANSFER_LINEHAUL_AVERAGE_VOLUME)
     return df.loc[~excluded].copy()
 
 
