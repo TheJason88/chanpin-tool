@@ -6,6 +6,7 @@ import delivery_audit_backfill
 import delivery_match_adapter
 import delivery_runtime
 import delivery_workflow
+import processors
 
 
 class MultiUnloadAverageTests(unittest.TestCase):
@@ -123,6 +124,61 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(transfer["平均整车价"], 450)
         self.assertEqual(transfer["每方平均价"], 10)
         self.assertEqual(transfer["平均每车出库体积"], 45)
+
+    def test_regular_delivery_floor_and_pallet_thresholds_filter_only_average_samples(self):
+        rows = pd.DataFrame([
+            {"车型装车分组": "大车地板", "出库体积": 45, "出库卡板数": 9, "派送成本": 450},
+            {"车型装车分组": "大车地板", "出库体积": 44.99, "出库卡板数": 99, "派送成本": 999},
+            {"车型装车分组": "大车卡板", "出库体积": 30, "出库卡板数": 10, "派送成本": 300},
+            {"车型装车分组": "大车卡板", "出库体积": 29.99, "出库卡板数": 88, "派送成本": 888},
+            {"车型装车分组": "小车", "出库体积": 10, "出库卡板数": 2, "派送成本": 100},
+        ])
+
+        eligible = processors.regular_delivery_average_sample_rows(rows)
+
+        self.assertEqual(eligible.index.tolist(), [0, 2, 4])
+        self.assertAlmostEqual(rows["出库体积"].sum(), 159.98, places=2)
+
+    def test_regular_cost_report_uses_filtered_detail_for_all_average_and_p80_metrics(self):
+        rows = pd.DataFrame([
+            {
+                "仓库": "LA", "统计周期": "2026-W28", "是否FTL发车": True,
+                "车型标准值": "53尺大车", "装车类型标准值": "地板",
+                "主产品类型": "FBA", "FBA仓点代码集合": "ONT8",
+                "出库体积": 45, "出库卡板数": 9, "派送成本": 450,
+            },
+            {
+                "仓库": "LA", "统计周期": "2026-W28", "是否FTL发车": True,
+                "车型标准值": "53尺大车", "装车类型标准值": "地板",
+                "主产品类型": "FBA", "FBA仓点代码集合": "ONT8",
+                "出库体积": 44, "出库卡板数": 99, "派送成本": 999,
+            },
+        ])
+
+        report = delivery_match_adapter.build_station_cost_report(rows)
+        row = report.loc[report["指标名称"] == "FBA及FBX平台仓成本"].iloc[0]
+
+        self.assertEqual(row["车次数"], 2)
+        self.assertEqual(row["总出库体积"], 89)
+        self.assertEqual(row["总出库卡板数"], 108)
+        self.assertEqual(row["总派送成本"], 1449)
+        self.assertEqual(row["平均整车价"], 450)
+        self.assertEqual(row["P80整车价"], 450)
+        self.assertEqual(row["每方平均价"], 10)
+        self.assertEqual(row["平均每车出库体积"], 45)
+        self.assertEqual(row["P80每车出库体积"], 45)
+        self.assertEqual(row["平均每车出库卡板数"], 9)
+        self.assertEqual(row["P80每车出库卡板数"], 9)
+
+    def test_regular_cost_source_excludes_recognized_linehaul_trips(self):
+        rows = pd.DataFrame([
+            {"专线线路": "LA-NJ", "批次号集合": "A", "派送成本": 500},
+            {"专线线路": "未知线路", "批次号集合": "B", "派送成本": 600},
+        ])
+
+        regular = delivery_runtime._filter_regular_single_batch_trips_for_cost(rows)
+
+        self.assertEqual(regular["批次号集合"].tolist(), ["B"])
 
 
 if __name__ == "__main__":

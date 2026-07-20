@@ -476,12 +476,14 @@ def _filter_positive_cost_rows(df):
 
 
 def _filter_regular_single_batch_trips_for_cost(matched):
-    """普通派送成本只看单批次单车次、且派送成本大于0；调拨成本另行汇总。"""
+    """普通派送成本只看非干线/非调拨的单批次单车次，且派送成本大于0。"""
     if matched is None or matched.empty:
         return matched
     out = matched.copy()
     transfer_targets = out.apply(_transfer_target_from_row, axis=1)
     regular = out[~transfer_targets.isin(TRANSFER_TARGETS.keys())].copy()
+    if "专线线路" in regular.columns:
+        regular = regular[regular["专线线路"].astype(str).isin(["", "未知线路", "非LA干线"])].copy()
     if regular.empty:
         return regular
     batch_counts = regular.apply(lambda row: len(_unique_batch_keys_from_row(row)), axis=1)
