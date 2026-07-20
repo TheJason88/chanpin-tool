@@ -4,6 +4,7 @@ import pandas as pd
 
 import delivery_audit_backfill
 import delivery_match_adapter
+import delivery_reference
 import delivery_runtime
 import delivery_workflow
 import processors
@@ -199,6 +200,29 @@ class MultiUnloadAverageTests(unittest.TestCase):
         regular = delivery_runtime._filter_regular_single_batch_trips_for_cost(rows)
 
         self.assertEqual(regular["批次号集合"].tolist(), ["B"])
+
+    def test_mci4_reference_fills_zip_state_and_station_code(self):
+        reference = delivery_reference.match_fba_reference("Amazon-MCI4")
+
+        self.assertEqual(reference["代码"], "MCI4")
+        self.assertEqual(reference["邮编"], "64153")
+        self.assertEqual(reference["州"], "MO")
+
+        rows = pd.DataFrame([{
+            "仓库": "LA",
+            "系统产品类型": "FBA",
+            "目的地": "Amazon-MCI4",
+            "修正后目的地": "Amazon-MCI4",
+            "FBA仓点代码": "MCI4",
+            "邮编是否有效": False,
+        }])
+        matched = delivery_reference.apply_delivery_reference_memory(rows).iloc[0]
+
+        self.assertEqual(matched["标准邮编"], "64153")
+        self.assertEqual(matched["邮编前三位"], "641")
+        self.assertEqual(matched["目的州"], "MO")
+        self.assertEqual(matched["规则匹配代码"], "MCI4")
+        self.assertFalse(bool(matched["目的地邮编待补充"]))
 
 
 if __name__ == "__main__":
