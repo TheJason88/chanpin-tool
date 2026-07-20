@@ -7,6 +7,7 @@ import delivery_match_adapter
 import delivery_runtime
 import delivery_workflow
 import processors
+import tool_common
 
 
 class MultiUnloadAverageTests(unittest.TestCase):
@@ -169,6 +170,25 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(row["P80每车出库体积"], 45)
         self.assertEqual(row["平均每车出库卡板数"], 9)
         self.assertEqual(row["P80每车出库卡板数"], 9)
+
+        exported = tool_common.clean_for_excel_output(report, sheet_type="成本")
+        exported_row = exported.loc[exported["指标名称"] == "FBA及FBX平台仓成本"].iloc[0]
+        self.assertEqual(exported_row["总派送成本"], 1449)
+        self.assertEqual(exported_row["平均整车价"], 450)
+        self.assertEqual(exported_row["P80整车价"], 450)
+        self.assertEqual(exported_row["每方平均价"], 10)
+        self.assertEqual(exported_row["平均每车出库体积"], 45)
+        self.assertEqual(exported_row["P80每车出库体积"], 45)
+        self.assertEqual(exported_row["平均每车出库卡板数"], 9)
+        self.assertEqual(exported_row["P80每车出库卡板数"], 9)
+
+        workbook = tool_common.write_sheets_to_excel({"成本": report})
+        workbook_row = pd.read_excel(workbook, sheet_name="成本").loc[
+            lambda df: df["指标名称"] == "FBA及FBX平台仓成本"
+        ].iloc[0]
+        self.assertEqual(workbook_row["平均整车价"], 450)
+        self.assertEqual(workbook_row["每方平均价"], 10)
+        self.assertEqual(workbook_row["平均每车出库体积"], 45)
 
     def test_regular_cost_source_excludes_recognized_linehaul_trips(self):
         rows = pd.DataFrame([
