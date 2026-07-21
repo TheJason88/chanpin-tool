@@ -6,6 +6,7 @@ import delivery_audit_backfill
 import delivery_match_adapter
 import delivery_reference
 import delivery_runtime
+import delivery_stage1_adapter
 import delivery_workflow
 import processors
 import tool_common
@@ -230,6 +231,55 @@ class MultiUnloadAverageTests(unittest.TestCase):
                 self.assertEqual(matched["目的州"], state)
                 self.assertEqual(matched["规则匹配代码"], code)
                 self.assertFalse(bool(matched["目的地邮编待补充"]))
+
+    def test_zz_fbx_platform_and_text_code_flow_through_stage1_and_stage2_outputs(self):
+        source = pd.DataFrame([{
+            "仓库": "LA",
+            "出库时间": "2026-07-20",
+            "签收时间": "2026-07-22",
+            "目的地": "谷仓16号仓",
+            "派送方式": "卡车派送",
+            "运输类型": "FTL",
+            "车型": "53尺大车",
+            "装车类型": "卡板",
+            "车次号": "T-FBX-1",
+            "批次号": "B-FBX-1",
+            "出库体积": 30,
+            "出库卡板数": 10,
+            "派送成本": 300,
+        }])
+
+        detail, _, _ = processors.process_delivery_stage1_from_df(source, "LA")
+        detail_row = detail.iloc[0]
+        self.assertEqual(detail_row["系统产品类型"], "FBX平台仓")
+        self.assertEqual(detail_row["平台名称"], "谷仓")
+        self.assertEqual(detail_row["FBX代码"], "16号仓")
+
+        detail = delivery_stage1_adapter.repair_delivery_stage1_numeric_columns(detail)
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(detail)
+        cleaned_row = cleaned.iloc[0]
+        self.assertEqual(cleaned_row["平台名称"], "谷仓")
+        self.assertEqual(cleaned_row["FBX代码集合"], "16号仓")
+        self.assertEqual(cleaned_row["平台仓代码集合"], "16号仓")
+        self.assertEqual(cleaned_row["平台仓配对集合"], "谷仓||16号仓")
+
+        delivery_runtime.bootstrap(delivery_workflow)
+        matched = delivery_workflow.prepare_stage2_for_report(
+            cleaned,
+            pd.DataFrame(columns=["批次号", "标准邮编"]),
+            "按周统计",
+        )
+        self.assertEqual(matched.iloc[0]["FBX代码集合"], "16号仓")
+
+        report = delivery_match_adapter.build_fbx_platform_warehouse_sheet(matched)
+        report_row = report.iloc[0]
+        self.assertEqual(report_row["平台仓"], "谷仓")
+        self.assertEqual(report_row["FBX代码"], "16号仓")
+
+        workbook = tool_common.write_sheets_to_excel({"FBX平台仓货量": report})
+        exported_row = pd.read_excel(workbook, sheet_name="FBX平台仓货量").iloc[0]
+        self.assertEqual(exported_row["平台仓"], "谷仓")
+        self.assertEqual(exported_row["FBX代码"], "16号仓")
 
 
 if __name__ == "__main__":

@@ -92,6 +92,22 @@ def _valid_platform_label(value):
     return not any(k in text for k in INVALID_LABEL_KEYWORDS)
 
 
+def _sync_fbx_code_columns(df):
+    """兼容历史“平台仓代码集合”，同时保证新列“FBX代码集合”始终可用。"""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    if "FBX代码集合" not in out.columns:
+        out["FBX代码集合"] = out.get("平台仓代码集合", "")
+    if "平台仓代码集合" not in out.columns:
+        out["平台仓代码集合"] = out.get("FBX代码集合", "")
+    new_blank = out["FBX代码集合"].apply(_is_blank)
+    old_blank = out["平台仓代码集合"].apply(_is_blank)
+    out.loc[new_blank & ~old_blank, "FBX代码集合"] = out.loc[new_blank & ~old_blank, "平台仓代码集合"]
+    out.loc[old_blank & ~new_blank, "平台仓代码集合"] = out.loc[old_blank & ~new_blank, "FBX代码集合"]
+    return out
+
+
 def _infer_transfer_target(text):
     upper = str(text).upper()
     for target, info in TRANSFER_WAREHOUSE_INFO.items():
@@ -192,7 +208,7 @@ def _finalize_zip_audit_sheet(df):
         "分析批次ID", "仓库", "标准运输类型", "派送方式", "车次号", "批次号集合",
         ZIP_FILL_COL, STATE_FILL_COL,
         "出库类型", "业务场景", "调入仓库", "出库体积", "出库卡板数", "派送成本",
-        "系统产品类型", "主产品类型", "平台名称", "平台仓代码集合", "FBA仓点代码集合",
+        "系统产品类型", "主产品类型", "平台名称", "FBX代码集合", "平台仓代码集合", "FBA仓点代码集合",
         "标准邮编集合", "目的州", "邮编来源", "目的地邮编待补充",
     ]
     cols = [c for c in preferred if c in out.columns] + [c for c in out.columns if c not in preferred]
@@ -267,8 +283,8 @@ def prepare_manual_match_flexible(match_df):
         return pd.DataFrame(columns=["批次号", "补充标准邮编", "补充目的州", "补充邮编是否有效"])
 
     state_col = _find_col(match, ["目的州", "省/州", "州", "到达州", "目的地州", "State", "Destination State"])
-    platform_col = _find_col(match, ["平台名称", "平台", "渠道", "客户平台"])
-    warehouse_code_col = _find_col(match, ["平台仓代码", "仓库代码", "仓库Code", "仓点代码", "目的仓代码", "Warehouse Code"])
+    platform_col = _find_col(match, ["平台名称", "平台仓", "平台", "渠道", "客户平台"])
+    warehouse_code_col = _find_col(match, ["FBX代码", "平台仓代码", "仓库代码", "仓库Code", "仓点代码", "目的仓代码", "Warehouse Code"])
     remark_cols = [c for c in REMARK_COLS if c in match.columns]
     grouped = {}
     for _, row in match.iterrows():
@@ -320,14 +336,14 @@ def prepare_manual_match_flexible(match_df):
 
 
 def apply_manual_match_to_cleaned_batches_flexible(cleaned_batches, match_df):
-    df = _fill_transfer_zip_memory(_fill_fba_zip_memory(cleaned_batches))
+    df = _sync_fbx_code_columns(_fill_transfer_zip_memory(_fill_fba_zip_memory(cleaned_batches)))
     match = prepare_manual_match_flexible(match_df)
     if df.empty or match.empty:
         df["目的地邮编待补充"] = df["标准邮编集合"].apply(lambda x: len(_split_values(x)) == 0)
-        return _fill_transfer_zip_memory(df)
+        return _sync_fbx_code_columns(_fill_transfer_zip_memory(df))
 
     match_map = match.set_index("批次号").to_dict("index")
-    for col in ["目的州", "邮编来源", "匹配备注集合", "平台仓代码集合", "平台仓配对集合", "平台名称"]:
+    for col in ["目的州", "邮编来源", "匹配备注集合", "FBX代码集合", "平台仓代码集合", "平台仓配对集合", "平台名称"]:
         if col not in df.columns:
             df[col] = ""
     for idx, row in df.iterrows():
@@ -360,6 +376,7 @@ def apply_manual_match_to_cleaned_batches_flexible(cleaned_batches, match_df):
         if remarks:
             df.at[idx, "匹配备注集合"] = _combine_unique(remarks)
         if wh_codes:
+            df.at[idx, "FBX代码集合"] = ",".join(wh_codes)
             df.at[idx, "平台仓代码集合"] = ",".join(wh_codes)
         if pairs:
             df.at[idx, "平台仓配对集合"] = ";".join(pairs)
@@ -376,7 +393,7 @@ def apply_manual_match_to_cleaned_batches_flexible(cleaned_batches, match_df):
             df.at[idx, "目的州"] = ",".join(states)
     df = _fill_transfer_zip_memory(df)
     df["目的地邮编待补充"] = df["标准邮编集合"].apply(lambda x: len(_split_values(x)) == 0)
-    return df
+    return _sync_fbx_code_columns(df)
 
 
 def _pick_zip_from_audit_row(row):
@@ -548,7 +565,8 @@ def _expand_cost_by_station(df, object_type):
                     if _valid_platform_label(platform) and _valid_platform_label(code):
                         objects.append((platform, code))
             else:
-                codes = [c for c in _split_values(row.get("平台仓代码集合", "")) if _valid_platform_label(c)]
+                code_values = row.get("FBX代码集合", row.get("平台仓代码集合", ""))
+                codes = [c for c in _split_values(code_values) if _valid_platform_label(c)]
                 platforms = [p for p in _split_values(row.get("平台名称", "")) if _valid_platform_label(p)]
                 if len(platforms) == len(codes) and codes:
                     objects.extend(list(zip(platforms, codes)))
@@ -587,19 +605,20 @@ def build_fba_rank_sheet(matched):
 
 def build_fbx_platform_warehouse_sheet(matched):
     if matched.empty:
-        return pd.DataFrame(columns=["仓库", "统计周期", "排名", "平台", "平台仓代码", "出库体积", "占比"])
-    source = matched[(matched.get("FBX出库体积", 0) > 0)].copy()
+        return pd.DataFrame(columns=["仓库", "统计周期", "排名", "平台仓", "FBX代码", "出库体积", "占比"])
+    source = _sync_fbx_code_columns(matched[(matched.get("FBX出库体积", 0) > 0)].copy())
     source = source[source["平台名称"].apply(_valid_platform_label)] if "平台名称" in source.columns else source.iloc[0:0]
-    expanded = _expand_volume_by_codes(source, "平台仓代码集合", "FBX出库体积", platform_col="平台名称", pair_col="平台仓配对集合", exclude_invalid=True)
+    code_col = "FBX代码集合" if "FBX代码集合" in source.columns else "平台仓代码集合"
+    expanded = _expand_volume_by_codes(source, code_col, "FBX出库体积", platform_col="平台名称", pair_col="平台仓配对集合", exclude_invalid=True)
     if expanded.empty:
-        return pd.DataFrame(columns=["仓库", "统计周期", "排名", "平台", "平台仓代码", "出库体积", "占比"])
+        return pd.DataFrame(columns=["仓库", "统计周期", "排名", "平台仓", "FBX代码", "出库体积", "占比"])
     agg = expanded.groupby(["仓库", "统计周期", "平台", "仓点代码"], dropna=False)["出库体积"].sum().reset_index()
     agg = agg[(agg["出库体积"] > 0) & agg["平台"].apply(_valid_platform_label) & agg["仓点代码"].apply(_valid_platform_label)]
     agg = agg.sort_values(["仓库", "统计周期", "出库体积"], ascending=[True, True, False])
     total = agg.groupby(["仓库", "统计周期"])["出库体积"].transform("sum")
     agg["占比"] = agg["出库体积"] / total
     agg["排名"] = agg.groupby(["仓库", "统计周期"])["出库体积"].rank(method="first", ascending=False).astype(int)
-    return agg.rename(columns={"仓点代码": "平台仓代码"})[["仓库", "统计周期", "排名", "平台", "平台仓代码", "出库体积", "占比"]]
+    return agg.rename(columns={"平台": "平台仓", "仓点代码": "FBX代码"})[["仓库", "统计周期", "排名", "平台仓", "FBX代码", "出库体积", "占比"]]
 
 
 def build_station_cost_report(matched):

@@ -150,7 +150,7 @@ def apply_delivery_reference_memory(df):
         return df
 
     out = df.copy()
-    for col in ["标准邮编", "邮编前三位", "邮编来源", "邮编修正类型", "邮编是否有效", "邮编异常原因", "目的州", "规则匹配类型", "规则匹配代码", "规则匹配邮编", "规则匹配州", "规则匹配方式"]:
+    for col in ["标准邮编", "邮编前三位", "邮编来源", "邮编修正类型", "邮编是否有效", "邮编异常原因", "目的州", "FBX代码", "规则匹配类型", "规则匹配代码", "规则匹配邮编", "规则匹配州", "规则匹配方式"]:
         if col not in out.columns:
             out[col] = ""
 
@@ -195,6 +195,7 @@ def apply_delivery_reference_memory(df):
             out.at[idx, "FBA仓点代码"] = ref.get("代码", "")
         if ref.get("类型") == "平台仓":
             out.at[idx, "平台名称"] = ref.get("平台", row.get("平台名称", ""))
+            out.at[idx, "FBX代码"] = ref.get("代码", row.get("FBX代码", ""))
 
     out["标准邮编"] = out["标准邮编"].fillna("").astype(str)
     out.loc[out["标准邮编"].isin(["nan", "None", "<NA>", "00000"]), "标准邮编"] = ""

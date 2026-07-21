@@ -60,7 +60,7 @@ TRANSFER_WAREHOUSE_INFO = {
 TRANSFER_TEXT_COLS = ["出库类型", "业务场景", "调入仓库", "目的地", "修正后目的地", "备注", "车次号", "批次号集合"]
 DESTINATION_OVERRIDE_COLS = [
     "实际目的地", "修正后目的地", "目的地", "调入仓库", "标准邮编集合", "邮编前三位集合", "目的州",
-    "邮编来源", "系统产品类型", "主产品类型", "平台名称", "平台仓代码集合", "FBA仓点代码集合",
+    "邮编来源", "系统产品类型", "主产品类型", "平台名称", "FBX代码集合", "平台仓代码集合", "FBA仓点代码集合",
     "FBA出库体积", "FBX出库体积", "目的地邮编待补充", "专线线路", "专线识别方式",
 ]
 
@@ -247,6 +247,7 @@ def _apply_transfer_destination_override(cleaned_batches):
         out.at[idx, "系统产品类型"] = "仓间调拨"
         out.at[idx, "主产品类型"] = "仓间调拨"
         out.at[idx, "平台名称"] = "盈仓"
+        out.at[idx, "FBX代码集合"] = ""
         out.at[idx, "平台仓代码集合"] = display
         out.at[idx, "FBA仓点代码集合"] = ""
         out.at[idx, "FBA出库体积"] = 0.0

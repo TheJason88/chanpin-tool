@@ -82,6 +82,19 @@ def combine_unique(series):
     return ",".join(list(dict.fromkeys(values)))
 
 
+def combine_platform_code_pairs(group):
+    pairs = []
+    for _, row in group.iterrows():
+        platform = str(row.get("平台名称", "")).strip()
+        code = str(row.get("FBX代码", "")).strip()
+        if processors.is_blank(platform) or platform == "非平台/未知" or processors.is_blank(code):
+            continue
+        pair = f"{platform}||{code}"
+        if pair not in pairs:
+            pairs.append(pair)
+    return ";".join(pairs)
+
+
 def normalize_zip_for_line(value):
     if processors.is_blank(value):
         return ""
@@ -303,7 +316,7 @@ def build_cleaned_batches_from_detail(valid_detail):
         if col not in df.columns:
             df[col] = pd.NaT
         df[col] = pd.to_datetime(df[col], errors="coerce")
-    for col in ["标准运输类型", "车次号", "批次号", "仓库", "出库类型", "业务场景", "系统产品类型", "FBA/FBX", "平台名称", "标准邮编", "邮编前三位", "目的州", "FBA仓点代码", "装车类型标准值", "车型标准值", "调入仓库", "邮编来源", "备注"]:
+    for col in ["标准运输类型", "车次号", "批次号", "仓库", "出库类型", "业务场景", "系统产品类型", "FBA/FBX", "平台名称", "FBX代码", "标准邮编", "邮编前三位", "目的州", "FBA仓点代码", "装车类型标准值", "车型标准值", "调入仓库", "邮编来源", "备注"]:
         if col not in df.columns:
             df[col] = ""
     rows = []
@@ -326,7 +339,7 @@ def build_cleaned_batches_from_detail(valid_detail):
                 "出库类型": first_nonblank(group["出库类型"]), "业务场景": first_nonblank(group["业务场景"]), "调入仓库": first_nonblank(group["调入仓库"]),
                 "批次出库时间": start_time, "批次签收时间": end_time, "派送时效": duration, "出库体积": group["出库体积"].sum(), "出库卡板数": group["出库卡板数"].sum(), "派送成本": group["派送成本"].sum(),
                 "FBA出库体积": fba_volume, "FBX出库体积": fbx_volume, "系统产品类型": product_summary_type(fba_volume, fbx_volume, group["系统产品类型"].astype(str).tolist()), "主产品类型": "FBA" if fba_volume >= fbx_volume and fba_volume > 0 else ("FBX" if fbx_volume > 0 else "未知"),
-                "平台名称": combine_unique(group["平台名称"]), "FBA仓点代码集合": combine_unique(group["FBA仓点代码"]), "标准邮编集合": combine_unique(group["标准邮编"]), "邮编前三位集合": combine_unique(group["邮编前三位"]), "目的州": combine_unique(group["目的州"]), "邮编来源": combine_unique(group["邮编来源"]),
+                "平台名称": combine_unique(group["平台名称"]), "FBX代码集合": combine_unique(group["FBX代码"]), "平台仓代码集合": combine_unique(group["FBX代码"]), "平台仓配对集合": combine_platform_code_pairs(group), "FBA仓点代码集合": combine_unique(group["FBA仓点代码"]), "标准邮编集合": combine_unique(group["标准邮编"]), "邮编前三位集合": combine_unique(group["邮编前三位"]), "目的州": combine_unique(group["目的州"]), "邮编来源": combine_unique(group["邮编来源"]),
                 "是否混合目的地": (fba_volume > 0 and fbx_volume > 0), "是否混装": len(set([x for x in group["装车类型标准值"].astype(str) if not processors.is_blank(x)])) > 1,
                 "备注": combine_unique(group["备注"]),
             })
@@ -337,7 +350,7 @@ def build_cleaned_batches_from_detail(valid_detail):
                 "分析批次ID": f"LTL_{r.get('原始行号', '')}", "仓库": r.get("仓库", ""), "标准运输类型": "LTL", "派送方式": "散板出库", "车型标准值": "不适用", "装车类型标准值": "散板", "车次号": "", "批次号集合": r.get("批次号", ""),
                 "出库类型": r.get("出库类型", ""), "业务场景": r.get("业务场景", ""), "调入仓库": r.get("调入仓库", ""), "批次出库时间": r.get("出库时间", pd.NaT), "批次签收时间": r.get("签收时间", pd.NaT), "派送时效": r.get("派送时效", np.nan),
                 "出库体积": r.get("出库体积", 0), "出库卡板数": r.get("出库卡板数", 0), "派送成本": r.get("派送成本", 0), "FBA出库体积": r.get("出库体积", 0) if product_group == "FBA" else 0, "FBX出库体积": r.get("出库体积", 0) if product_group == "FBX" else 0,
-                "系统产品类型": r.get("系统产品类型", ""), "主产品类型": product_group, "平台名称": r.get("平台名称", ""), "FBA仓点代码集合": r.get("FBA仓点代码", ""), "标准邮编集合": r.get("标准邮编", ""), "邮编前三位集合": r.get("邮编前三位", ""), "目的州": r.get("目的州", ""), "邮编来源": r.get("邮编来源", ""), "是否混合目的地": False, "是否混装": False,
+                "系统产品类型": r.get("系统产品类型", ""), "主产品类型": product_group, "平台名称": r.get("平台名称", ""), "FBX代码集合": r.get("FBX代码", ""), "平台仓代码集合": r.get("FBX代码", ""), "平台仓配对集合": f"{r.get('平台名称', '')}||{r.get('FBX代码', '')}" if product_group == "FBX" and not processors.is_blank(r.get("FBX代码", "")) else "", "FBA仓点代码集合": r.get("FBA仓点代码", ""), "标准邮编集合": r.get("标准邮编", ""), "邮编前三位集合": r.get("邮编前三位", ""), "目的州": r.get("目的州", ""), "邮编来源": r.get("邮编来源", ""), "是否混合目的地": False, "是否混装": False,
                 "备注": r.get("备注", ""),
             })
     result = pd.DataFrame(rows)

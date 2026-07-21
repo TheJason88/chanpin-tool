@@ -17,8 +17,8 @@ FIELD_ALIASES = {
     "派送成本": ["派送成本", "成本", "派送费用", "DeliveryCost", "Delivery Cost", "Cost", "cost"],
     "标准邮编": ["标准邮编", "目的地邮编", "邮编", "ZIP", "Zip", "zipcode", "ZipCode", "PostalCode", "Postal Code"],
     "目的州": ["目的州", "省/州", "州", "到达州", "目的地州", "State", "Destination State"],
-    "平台名称": ["平台名称", "平台", "渠道", "客户平台"],
-    "平台仓代码": ["平台仓代码", "仓库代码", "仓库Code", "仓点代码", "目的仓代码", "Warehouse Code"],
+    "平台名称": ["平台名称", "平台仓", "平台", "渠道", "客户平台"],
+    "平台仓代码": ["平台仓代码", "FBX代码", "仓库代码", "仓库Code", "仓点代码", "目的仓代码", "Warehouse Code"],
 }
 
 TRANSFER_WAREHOUSE_INFO = {
@@ -79,9 +79,9 @@ PLATFORM_DISPLAY_MAP = {
     "4px": "4PX",
 }
 
-PLATFORM_COLUMNS = ["平台", "平台名称", "补充平台名称"]
+PLATFORM_COLUMNS = ["平台仓", "平台", "平台名称", "补充平台名称"]
 CODE_COLUMNS = [
-    "平台仓代码", "仓点代码", "仓库代码", "平台仓代码集合", "补充平台仓代码",
+    "FBX代码", "FBX代码集合", "平台仓代码", "仓点代码", "仓库代码", "平台仓代码集合", "补充平台仓代码",
     "FBA仓点", "FBA仓点代码", "FBA仓点代码集合", "仓点",
 ]
 PAIR_COLUMNS = ["平台仓配对集合", "补充平台仓配对"]
@@ -212,7 +212,7 @@ def apply_dominant_destination_from_detail(cleaned_batches, detail_df):
         return cleaned_batches
     out = ensure_object_df(cleaned_batches)
     destination_cols = [
-        "系统产品类型", "主产品类型", "平台名称", "平台仓代码集合", "平台仓配对集合",
+        "系统产品类型", "主产品类型", "平台名称", "FBX代码集合", "平台仓代码集合", "平台仓配对集合",
         "FBA仓点代码集合", "标准邮编集合", "邮编前三位集合", "目的州", "邮编来源", "目的地邮编待补充",
     ]
     for col in destination_cols:
@@ -256,15 +256,17 @@ def apply_dominant_destination_from_detail(cleaned_batches, detail_df):
 
         fba_code = str(dominant.get("FBA仓点代码", "")).strip()
         platform = _normalize_platform_display(dominant.get("平台名称", ""))
-        platform_code = _normalize_code_display(dominant.get("平台仓代码", dominant.get("仓库代码", "")))
+        platform_code = _normalize_code_display(dominant.get("FBX代码", dominant.get("平台仓代码", dominant.get("仓库代码", ""))))
         if product == "FBA":
             out.at[idx, "FBA仓点代码集合"] = "" if fba_code.lower() in ["nan", "none", "<na>"] else _normalize_code_display(fba_code)
             out.at[idx, "平台名称"] = ""
+            out.at[idx, "FBX代码集合"] = ""
             out.at[idx, "平台仓代码集合"] = ""
             out.at[idx, "平台仓配对集合"] = ""
         elif product == "FBX":
             out.at[idx, "FBA仓点代码集合"] = ""
             out.at[idx, "平台名称"] = platform
+            out.at[idx, "FBX代码集合"] = platform_code
             out.at[idx, "平台仓代码集合"] = platform_code
             if platform and platform_code:
                 out.at[idx, "平台仓配对集合"] = f"{platform}||{platform_code}"

@@ -70,8 +70,8 @@ FIELD_ALIASES = {
     "工作单号": ["工作单号", "工作单", "运单号", "订单号", "SO", "SO号"],
     "柜号": ["柜号", "箱号", "Container", "Container No", "ContainerNo", "Container Number"],
 
-    "平台仓点": ["平台仓点", "平台仓", "平台仓库", "仓点名称", "平台仓代码"],
-    "平台名称": ["平台名称", "平台", "平台类型"],
+    "FBX代码": ["FBX代码", "平台仓代码", "平台仓点", "仓点代码", "目的仓代码", "Warehouse Code"],
+    "平台名称": ["平台名称", "平台仓", "平台", "平台类型"],
 }
 
 PLATFORM_KEYWORDS = [
@@ -510,6 +510,54 @@ def extract_platform_name(text):
     return "非平台/未知"
 
 
+def extract_fbx_code(text, platform_name="", explicit_code=""):
+    """从FBX平台仓目的地中拆出仓点代码；代码允许包含中文。"""
+    platform = platform_name if not is_blank(platform_name) else extract_platform_name(text)
+    if platform == "非平台/未知":
+        return ""
+
+    def clean_code(value):
+        if is_blank(value):
+            return ""
+        value = str(value).strip()
+        if re.fullmatch(r"\d+\.0", value):
+            value = value[:-2]
+        return value.strip(" -_/|:：,，;；()（）[]【】")
+
+    # 明确提供的代码优先；若误带平台名前缀，也统一拆成纯FBX代码。
+    candidate = clean_code(explicit_code)
+    source = candidate or ("" if is_blank(text) else str(text).strip())
+    if not source:
+        return ""
+
+    matching_keywords = [
+        keyword for keyword in PLATFORM_KEYWORDS
+        if extract_platform_name(keyword) == platform
+    ]
+    matching_keywords.append(str(platform))
+    for keyword in sorted(set(matching_keywords), key=len, reverse=True):
+        stripped = re.sub(re.escape(keyword), "", source, count=1, flags=re.IGNORECASE)
+        if stripped != source:
+            source = stripped
+            break
+    source = clean_code(source)
+    source = re.sub(r"^(?:平台仓|平台仓库|仓库)\s*", "", source, flags=re.IGNORECASE)
+    if not source:
+        return ""
+
+    # 优先提取“16号仓”这类中文仓号；其次提取紧邻平台名的英文/数字代码。
+    chinese_station = re.search(r"([A-Za-z0-9_-]*\d+[A-Za-z0-9_-]*号仓)", source, flags=re.IGNORECASE)
+    if chinese_station:
+        return chinese_station.group(1)
+    compact_code = re.match(r"([A-Za-z0-9][A-Za-z0-9_./-]{0,39})", source)
+    if compact_code:
+        return compact_code.group(1)
+    # 纯文字仓名同样允许作为FBX代码，但避免把完整地址误当代码。
+    if len(source) <= 40 and not re.search(r"[,，;；]|\b(?:ST|STREET|RD|ROAD|AVE|AVENUE|BLVD|DR|DRIVE)\b", source, flags=re.IGNORECASE):
+        return source
+    return ""
+
+
 def extract_fba_code(text):
     text = "" if pd.isna(text) else str(text).strip()
     match = re.search(r"Amazon[-_\s]*([A-Z0-9]+)", text, flags=re.IGNORECASE)
@@ -932,6 +980,13 @@ def process_delivery_stage1_from_df(df, warehouse, period_type="按周统计", s
     df["系统产品类型"] = df["修正后目的地"].apply(classify_system_product_type)
     df["FBA/FBX"] = df["系统产品类型"].apply(classify_delivery_product_group)
     df["平台名称"] = df["修正后目的地"].apply(extract_platform_name)
+    if "FBX代码" not in df.columns:
+        df["FBX代码"] = ""
+    df["FBX代码"] = df.apply(
+        lambda row: extract_fbx_code(row.get("修正后目的地", ""), row.get("平台名称", ""), row.get("FBX代码", ""))
+        if row.get("系统产品类型") == "FBX平台仓" else "",
+        axis=1,
+    )
     df["FBA仓点代码"] = df["修正后目的地"].apply(extract_fba_code)
 
     zip_results = df.apply(choose_row_zip, axis=1, result_type="expand")
@@ -1095,6 +1150,8 @@ def resolve_group_vehicle(series):
 
 def build_delivery_stage2(stage1_df, period_type="按周统计"):
     df = stage1_df.copy()
+    if "FBX代码" not in df.columns:
+        df["FBX代码"] = ""
     for col in ["出库体积", "出库卡板数", "派送成本"]:
         if col not in df.columns:
             df[col] = 0
@@ -1146,6 +1203,8 @@ def build_delivery_stage2(stage1_df, period_type="按周统计"):
                 "FBA出库体积": group.loc[group["FBA/FBX"] == "FBA", "出库体积"].sum(),
                 "FBX出库体积": group.loc[group["FBA/FBX"] == "FBX", "出库体积"].sum(),
                 "平台名称": combine_unique(group["平台名称"]),
+                "FBX代码集合": combine_unique(group["FBX代码"]),
+                "平台仓代码集合": combine_unique(group["FBX代码"]),
                 "标准邮编集合": combine_unique(group["标准邮编"]),
                 "邮编前三位集合": combine_unique(group["邮编前三位"]),
                 "目的州": combine_unique(group["目的州"]),
@@ -1179,6 +1238,8 @@ def build_delivery_stage2(stage1_df, period_type="按周统计"):
                 "FBA出库体积": r.get("出库体积", 0) if r.get("FBA/FBX") == "FBA" else 0,
                 "FBX出库体积": r.get("出库体积", 0) if r.get("FBA/FBX") == "FBX" else 0,
                 "平台名称": r.get("平台名称", ""),
+                "FBX代码集合": r.get("FBX代码", ""),
+                "平台仓代码集合": r.get("FBX代码", ""),
                 "标准邮编集合": r.get("标准邮编", ""),
                 "邮编前三位集合": r.get("邮编前三位", ""),
                 "目的州": r.get("目的州", ""),
