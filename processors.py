@@ -1230,6 +1230,69 @@ def combine_unique(series):
     return ",".join(values)
 
 
+TRIP_LTL_TO_FTL_VOLUME_THRESHOLD = 60.0
+
+
+def apply_trip_transport_type_rules(df, volume_threshold=TRIP_LTL_TO_FTL_VOLUME_THRESHOLD):
+    """先按仓库+车次审视整车，再决定批次最终运输类型。
+
+    同车次同时出现FTL和LTL时整车统一按FTL；同车次只有LTL且总出库
+    体积严格大于60CBM时也按FTL。60CBM本身仍保持LTL，空车次互不合并。
+    """
+    if df is None or df.empty:
+        return df
+
+    out = df.copy()
+    if "标准运输类型" not in out.columns:
+        source = out["运输类型"] if "运输类型" in out.columns else pd.Series("", index=out.index)
+        out["标准运输类型"] = source.apply(normalize_transport_type)
+    for col in ["仓库", "车次号"]:
+        if col not in out.columns:
+            out[col] = ""
+    if "出库体积" not in out.columns:
+        out["出库体积"] = 0
+
+    out["标准运输类型"] = out["标准运输类型"].astype(str).str.upper().str.strip()
+    if "原始运输类型集合" not in out.columns:
+        out["原始运输类型集合"] = out["标准运输类型"]
+    else:
+        original_blank = out["原始运输类型集合"].apply(is_blank)
+        out.loc[original_blank, "原始运输类型集合"] = out.loc[original_blank, "标准运输类型"]
+    if "运输类型重判原因" not in out.columns:
+        out["运输类型重判原因"] = ""
+    else:
+        out["运输类型重判原因"] = out["运输类型重判原因"].astype(object)
+
+    trip_text = out["车次号"].apply(lambda value: "" if is_blank(value) else str(value).strip())
+    warehouse_text = out["仓库"].apply(lambda value: "" if is_blank(value) else str(value).strip().upper())
+    real_trip_mask = trip_text.ne("")
+    out["_运输类型车次键"] = warehouse_text + "||" + trip_text
+
+    for _, indexes in out.loc[real_trip_mask].groupby("_运输类型车次键", dropna=False).groups.items():
+        group = out.loc[indexes]
+        original_types = {
+            str(value).upper().strip()
+            for value in group["标准运输类型"]
+            if str(value).upper().strip() in {"FTL", "LTL"}
+        }
+        total_volume = pd.to_numeric(group["出库体积"], errors="coerce").fillna(0).sum()
+
+        reason = ""
+        if {"FTL", "LTL"}.issubset(original_types):
+            reason = "同车次同时含FTL和LTL，整车统一重判为FTL"
+        elif original_types == {"LTL"} and float(total_volume) > float(volume_threshold):
+            reason = f"同车次纯LTL总出库体积>{float(volume_threshold):g}CBM，整车重判为FTL"
+
+        type_summary = ",".join(value for value in ["FTL", "LTL"] if value in original_types)
+        if type_summary:
+            out.loc[indexes, "原始运输类型集合"] = type_summary
+        if reason:
+            out.loc[indexes, "标准运输类型"] = "FTL"
+            out.loc[indexes, "运输类型重判原因"] = reason
+
+    return out.drop(columns=["_运输类型车次键"])
+
+
 def resolve_group_loading(series):
     values = [str(v) for v in series if not is_blank(v)]
     if any("地板" in v for v in values):
@@ -1266,6 +1329,7 @@ def build_delivery_stage2(stage1_df, period_type="按周统计"):
 
     if "标准运输类型" not in df.columns:
         df["标准运输类型"] = df["运输类型"].apply(normalize_transport_type)
+    df = apply_trip_transport_type_rules(df)
 
     rows = []
 
@@ -1274,7 +1338,11 @@ def build_delivery_stage2(stage1_df, period_type="按周统计"):
 
     if not ftl_df.empty:
         ftl_df["车次号"] = ftl_df["车次号"].astype(str).replace({"nan": ""})
-        ftl_df["车次聚合键"] = np.where(ftl_df["车次号"].apply(is_blank), "FTL_NO_TRIP_" + ftl_df["原始行号"].astype(str), ftl_df["车次号"])
+        ftl_df["车次聚合键"] = np.where(
+            ftl_df["车次号"].apply(is_blank),
+            "FTL_NO_TRIP_" + ftl_df["原始行号"].astype(str),
+            ftl_df["仓库"].astype(str).str.upper().str.strip() + "||" + ftl_df["车次号"],
+        )
         for trip, group in ftl_df.groupby("车次聚合键", dropna=False):
             vehicle = resolve_group_vehicle(group.get("车型标准值", pd.Series(dtype=str)))
             loading = resolve_group_loading(group.get("装车类型标准值", pd.Series(dtype=str)))
@@ -1288,6 +1356,8 @@ def build_delivery_stage2(stage1_df, period_type="按周统计"):
                 "分析批次ID": f"FTL_{trip}",
                 "仓库": first_nonblank(group["仓库"]),
                 "标准运输类型": "FTL",
+                "原始运输类型集合": combine_unique(group["原始运输类型集合"]),
+                "运输类型重判原因": first_nonblank(group["运输类型重判原因"]),
                 "派送方式": method,
                 "车型标准值": vehicle,
                 "装车类型标准值": loading,
@@ -1323,6 +1393,8 @@ def build_delivery_stage2(stage1_df, period_type="按周统计"):
                 "分析批次ID": f"LTL_{r.get('原始行号', '')}",
                 "仓库": r.get("仓库", ""),
                 "标准运输类型": r.get("标准运输类型", "LTL"),
+                "原始运输类型集合": r.get("原始运输类型集合", r.get("标准运输类型", "LTL")),
+                "运输类型重判原因": r.get("运输类型重判原因", ""),
                 "派送方式": "散板出库" if r.get("标准运输类型") == "LTL" else r.get("标准派送方式", "未知运输类型"),
                 "车型标准值": r.get("车型标准值", "不适用"),
                 "装车类型标准值": r.get("装车类型标准值", "散板"),
