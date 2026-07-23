@@ -203,7 +203,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(regular["批次号集合"].tolist(), ["B"])
 
     def test_trip_level_transport_rules_reclassify_mixed_and_over_60_ltl_into_ftl_cost(self):
-        def detail_row(row_no, trip, batch, transport, volume, cost, loading="散板", vehicle="不适用"):
+        def detail_row(row_no, trip, batch, transport, volume, cost, loading="卡板", vehicle="53尺大车"):
             return {
                 "原始行号": row_no,
                 "仓库": "LA",
@@ -220,17 +220,19 @@ class MultiUnloadAverageTests(unittest.TestCase):
                 "标准邮编": "92551",
                 "邮编前三位": "925",
                 "目的州": "CA",
-                "车型标准值": vehicle,
-                "装车类型标准值": loading,
+                "车型": vehicle,
+                "装车类型": loading,
+                "车型标准值": vehicle if transport == "FTL" else "不适用",
+                "装车类型标准值": loading if transport == "FTL" else "散板",
             }
 
         detail = pd.DataFrame([
-            detail_row(2, "MIX-1", "MIX-FTL", "FTL", 20, 100, loading="卡板", vehicle="53尺大车"),
-            detail_row(3, "MIX-1", "MIX-LTL", "LTL", 10, 200),
-            detail_row(4, "OVER-1", "OVER-A", "LTL", 31, 300),
-            detail_row(5, "OVER-1", "OVER-B", "LTL", 30, 310),
+            detail_row(2, "MIX-1", "MIX-FTL", "FTL", 20, 100, loading="托盘", vehicle="53尺大车"),
+            detail_row(3, "MIX-1", "MIX-LTL", "LTL", 10, 200, loading="托盘", vehicle="53尺大车"),
+            detail_row(4, "OVER-1", "OVER-A", "LTL", 31, 300, loading="地板", vehicle="53尺大车"),
+            detail_row(5, "OVER-1", "OVER-B", "LTL", 30, 310, loading="地板", vehicle="53尺大车"),
             detail_row(6, "EDGE-60", "EDGE-A", "LTL", 30, 150),
-            detail_row(7, "EDGE-60", "EDGE-B", "LTL", 30, 150),
+            detail_row(7, "EDGE-60", "EDGE-B", "LTL", 30, 150, loading="地板", vehicle="53尺大车"),
         ])
 
         cleaned = delivery_workflow.build_cleaned_batches_from_detail(detail)
@@ -246,7 +248,9 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(over["标准运输类型"], "FTL")
         self.assertIn(">60CBM", over["运输类型重判原因"])
         self.assertEqual(over["出库体积"], 61)
-        self.assertEqual(over["派送方式"], "53尺大车-未知装车类型")
+        self.assertEqual(over["车型标准值"], "53尺大车")
+        self.assertEqual(over["装车类型标准值"], "地板")
+        self.assertEqual(over["派送方式"], "53尺大车-地板")
 
         edge = cleaned.loc[cleaned["车次号"] == "EDGE-60"]
         self.assertEqual(len(edge), 2)
@@ -261,12 +265,14 @@ class MultiUnloadAverageTests(unittest.TestCase):
         )
         cost_ftl = metrics["成本FTL"]
         cost_ltl = metrics["成本LTL"]
+        station_cost_ftl = cost_ftl.loc[cost_ftl["指标名称"] == "FBA及FBX平台仓成本"]
 
-        self.assertEqual(cost_ftl["总出库体积"].sum(), 91)
-        self.assertEqual(cost_ftl["总派送成本"].sum(), 910)
-        self.assertEqual(set(cost_ftl["车型装车分组"]), {"大车卡板", "大车未知装车"})
+        self.assertEqual(station_cost_ftl["总出库体积"].sum(), 91)
+        self.assertEqual(station_cost_ftl["总派送成本"].sum(), 910)
+        self.assertEqual(set(station_cost_ftl["车型装车分组"]), {"大车卡板", "大车地板"})
         self.assertEqual(cost_ltl["总出库体积"].sum(), 60)
         self.assertEqual(cost_ltl["总派送成本"].sum(), 300)
+        self.assertEqual(cost_ltl["车型装车分组"].unique().tolist(), ["LTL"])
 
     def test_ltl_cost_report_groups_fba_and_fbx_platform_by_station(self):
         rows = pd.DataFrame([
