@@ -536,13 +536,13 @@ def _cost_vehicle_group(row):
     return "未知车型"
 
 
-def _expand_cost_by_station(df, object_type):
+def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
     rows = []
     if df.empty:
         return pd.DataFrame()
     for _, row in df.iterrows():
-        vehicle_group = _cost_vehicle_group(row)
-        if vehicle_group not in ["小车", "大车卡板", "大车地板"]:
+        vehicle_group = vehicle_group_override or _cost_vehicle_group(row)
+        if vehicle_group not in ["小车", "大车卡板", "大车地板", "LTL"]:
             continue
         volume = pd.to_numeric(row.get("出库体积", 0), errors="coerce")
         cost = pd.to_numeric(row.get("派送成本", 0), errors="coerce")
@@ -674,6 +674,65 @@ def build_station_cost_report(matched):
     return pd.DataFrame(rows)
 
 
+def build_ltl_station_cost_report(matched):
+    """按目的仓点汇总LTL成本，只保留三个总量指标。
+
+    LTL不按车次计算均值或P80；只统计派送成本大于0、且能明确匹配到
+    FBA仓点或FBX平台仓点的明细。
+    """
+    columns = [
+        "指标名称", "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组",
+        "总出库体积", "总出库卡板数", "总派送成本",
+    ]
+    if matched is None or matched.empty:
+        return pd.DataFrame(columns=columns)
+
+    source = matched.copy()
+    if "标准运输类型" in source.columns:
+        source = source[source["标准运输类型"].astype(str).str.upper().eq("LTL")].copy()
+    elif "是否FTL发车" in source.columns:
+        ftl_mask = tool_common.normalize_boolean_series(source["是否FTL发车"])
+        source = source[~ftl_mask].copy()
+    else:
+        return pd.DataFrame(columns=columns)
+
+    for col in ["出库体积", "出库卡板数", "派送成本"]:
+        if col not in source.columns:
+            source[col] = 0
+        source[col] = pd.to_numeric(source[col], errors="coerce").fillna(0)
+    if "主产品类型" not in source.columns:
+        return pd.DataFrame(columns=columns)
+
+    source = source[
+        source["主产品类型"].isin(["FBA", "FBX"])
+        & source["派送成本"].gt(0)
+    ].copy()
+    expanded = pd.concat([
+        _expand_cost_by_station(
+            source[source["主产品类型"] == "FBA"],
+            "FBA",
+            vehicle_group_override="LTL",
+        ),
+        _expand_cost_by_station(
+            source[source["主产品类型"] == "FBX"],
+            "FBX平台仓",
+            vehicle_group_override="LTL",
+        ),
+    ], ignore_index=True)
+    if expanded.empty:
+        return pd.DataFrame(columns=columns)
+
+    expanded = tool_common.normalize_case_insensitive_labels(expanded)
+    group_cols = ["仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组"]
+    result = expanded.groupby(group_cols, dropna=False, as_index=False).agg(
+        总出库体积=("出库体积", "sum"),
+        总出库卡板数=("出库卡板数", "sum"),
+        总派送成本=("派送成本", "sum"),
+    )
+    result.insert(0, "指标名称", "FBA及FBX平台仓LTL成本")
+    return result[columns]
+
+
 def _safe_round(df, sheet_type):
     # 先按原有逻辑保留两位小数，再把计数列改回整数。
     rounded = processors.round_output_numbers(df, processors.RESULT_DECIMALS) if df is not None else df
@@ -690,7 +749,8 @@ def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_d
         volume = volume[~volume["指标名称"].astype(str).isin(["FBA仓点货量排行", "FBX平台仓货量排行"])]
         dispatch = combined[combined["报告部分"].astype(str).str.startswith("2.")].copy()
         timing = combined[combined["报告部分"].astype(str).str.startswith("3.")].copy()
-    cost = build_station_cost_report(matched)
+    cost_ftl = build_station_cost_report(matched)
+    cost_ltl = build_ltl_station_cost_report(matched)
     zip_audit = matched[matched["目的地邮编待补充"]].copy() if "目的地邮编待补充" in matched.columns else pd.DataFrame()
     return {
         "货量": _safe_round(_finalize_sheet(volume, "货量"), "货量"),
@@ -698,7 +758,8 @@ def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_d
         "FBX平台仓货量": _safe_round(_finalize_sheet(build_fbx_platform_warehouse_sheet(matched), "FBX平台仓货量"), "FBX平台仓货量"),
         "发车量": _safe_round(_finalize_sheet(dispatch, "发车量"), "发车量"),
         "派送时效": _safe_round(_finalize_sheet(timing, "派送时效"), "派送时效"),
-        "成本": _safe_round(_finalize_sheet(cost, "成本"), "成本"),
+        "成本FTL": _safe_round(_finalize_sheet(cost_ftl, "成本"), "成本"),
+        "成本LTL": _safe_round(_finalize_sheet(cost_ltl, "成本"), "成本"),
         "派送二_匹配后合并数据": _safe_round(_finalize_sheet(matched, "明细"), "明细"),
         "邮编异常审核": _finalize_zip_audit_sheet(zip_audit),
         "区域识别规则": delivery_workflow_module.REGION_RULES_DF,
