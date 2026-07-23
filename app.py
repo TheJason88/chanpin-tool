@@ -119,10 +119,10 @@ def rebuild_zip_audit_from_cleaned(cleaned_batches):
 
 def get_stage2_report_sheet_names(destination_type="全部"):
     if destination_type == "FBA":
-        return ["货量", "FBA货量排行", "发车量", "派送时效", "调拨数据", "成本", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
+        return ["货量", "FBA货量排行", "发车量", "派送时效", "调拨数据", "成本FTL", "成本LTL", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
     if destination_type == "FBX":
-        return ["货量", "FBX平台仓货量", "发车量", "派送时效", "调拨数据", "成本", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
-    return ["货量", "FBA货量排行", "FBX平台仓货量", "发车量", "派送时效", "调拨数据", "成本", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
+        return ["货量", "FBX平台仓货量", "发车量", "派送时效", "调拨数据", "成本FTL", "成本LTL", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
+    return ["货量", "FBA货量排行", "FBX平台仓货量", "发车量", "派送时效", "调拨数据", "成本FTL", "成本LTL", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
 
 
 def _split_combined_report(combined):
@@ -142,7 +142,8 @@ def build_stage2_report_for_destination(cleaned_batches, match_df=None, period_t
 
     combined = delivery_workflow.build_sheet1_volume_dispatch_time_report(matched)
     volume, dispatch, timing = _split_combined_report(combined)
-    cost = delivery_match_adapter.build_station_cost_report(matched)
+    cost_ftl = delivery_match_adapter.build_station_cost_report(matched)
+    cost_ltl = delivery_match_adapter.build_ltl_station_cost_report(matched)
     if hasattr(delivery_match_adapter, "build_transfer_report"):
         transfer = delivery_match_adapter.build_transfer_report(matched)
     else:
@@ -164,7 +165,8 @@ def build_stage2_report_for_destination(cleaned_batches, match_df=None, period_t
         "发车量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(dispatch, "发车量"), "发车量"),
         "派送时效": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(timing, "派送时效"), "派送时效"),
         "调拨数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(transfer, "调拨数据"), "调拨数据"),
-        "成本": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(cost, "成本"), "成本"),
+        "成本FTL": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(cost_ftl, "成本"), "成本"),
+        "成本LTL": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(cost_ltl, "成本"), "成本"),
         "派送二_匹配后合并数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(matched, "明细"), "明细"),
         "邮编异常审核": delivery_match_adapter._finalize_zip_audit_sheet(zip_audit),
         "区域识别规则": delivery_workflow.REGION_RULES_DF,
@@ -263,7 +265,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
     if period_type == ORIGINAL_FILE_PERIOD:
         st.info("派送二按原文件时间范围：不拆分月/周，按派送一结果中的批次出库时间最小日期到最大日期，将全部匹配后数据汇总为一个统计周期。")
     else:
-        st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。选择全部时输出FBA和FBX专项表；选择FBA/FBX时只输出对应目的地的专项表。")
+        st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。选择全部时输出FBA和FBX专项表；选择FBA/FBX时只输出对应目的地的专项表。成本分为成本FTL和成本LTL；LTL按FBA/FBX平台仓点汇总总出库体积、总出库卡板数和总派送成本。")
 elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
     time_dimension = st.selectbox(
         "3. 选择统计时间指标",
@@ -288,6 +290,7 @@ st.caption(
     "派送二支持：按月统计 / 按周统计 / 按原文件时间范围；并单独输出LA至NJ/SAV/DAL盈仓调拨数据。"
     "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
     "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
+    "派送二成本拆分为成本FTL和成本LTL；LTL仅统计成本大于0且能明确匹配到FBA或FBX平台仓点的数据，只输出三个总量指标。"
     "6B支持多文件上传；结构完全相同的匹配文件默认纵向合并。"
     "邮编异常审核表请填写“补充标准邮编”，可选填写“补充目的州”。"
 )

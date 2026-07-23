@@ -619,7 +619,8 @@ def _patch_stage2_transfer_sheet():
             dispatch = combined[combined["报告部分"].astype(str).str.startswith("2.")].copy()
             timing = combined[combined["报告部分"].astype(str).str.startswith("3.")].copy()
 
-        cost = delivery_match_adapter.build_station_cost_report(matched)
+        cost_ftl = delivery_match_adapter.build_station_cost_report(matched)
+        cost_ltl = delivery_match_adapter.build_ltl_station_cost_report(matched)
         transfer_report = _build_transfer_report(matched)
         if "目的地邮编待补充" in matched.columns:
             zip_audit = matched[tool_common.normalize_boolean_series(matched["目的地邮编待补充"])].copy()
@@ -633,7 +634,8 @@ def _patch_stage2_transfer_sheet():
             "发车量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(dispatch, "发车量"), "发车量"),
             "派送时效": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(timing, "派送时效"), "派送时效"),
             "调拨数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(transfer_report, "调拨数据"), "调拨数据"),
-            "成本": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(cost, "成本"), "成本"),
+            "成本FTL": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(cost_ftl, "成本"), "成本"),
+            "成本LTL": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(cost_ltl, "成本"), "成本"),
             "派送二_匹配后合并数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(matched, "明细"), "明细"),
             "邮编异常审核": delivery_match_adapter._finalize_zip_audit_sheet(zip_audit),
             "区域识别规则": delivery_workflow_module.REGION_RULES_DF,

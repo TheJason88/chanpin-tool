@@ -202,6 +202,110 @@ class MultiUnloadAverageTests(unittest.TestCase):
 
         self.assertEqual(regular["批次号集合"].tolist(), ["B"])
 
+    def test_ltl_cost_report_groups_fba_and_fbx_platform_by_station(self):
+        rows = pd.DataFrame([
+            {
+                "仓库": "LA", "统计周期": "2026-W30", "标准运输类型": "LTL",
+                "是否FTL发车": False, "主产品类型": "FBA",
+                "FBA仓点代码集合": "ONT8", "平台名称": "",
+                "出库体积": 8, "出库卡板数": 2, "派送成本": 120,
+            },
+            {
+                "仓库": "LA", "统计周期": "2026-W30", "标准运输类型": "LTL",
+                "是否FTL发车": False, "主产品类型": "FBA",
+                "FBA仓点代码集合": "ONT8", "平台名称": "",
+                "出库体积": 12, "出库卡板数": 3, "派送成本": 180,
+            },
+            {
+                "仓库": "LA", "统计周期": "2026-W30", "标准运输类型": "LTL",
+                "是否FTL发车": False, "主产品类型": "FBX",
+                "平台名称": "谷仓", "FBX代码集合": "16号仓",
+                "平台仓配对集合": "谷仓||16号仓",
+                "出库体积": 6, "出库卡板数": 1, "派送成本": 90,
+            },
+            {
+                "仓库": "LA", "统计周期": "2026-W30", "标准运输类型": "LTL",
+                "是否FTL发车": False, "主产品类型": "FBX",
+                "平台名称": "非平台/未知", "FBX代码集合": "",
+                "出库体积": 5, "出库卡板数": 1, "派送成本": 75,
+            },
+            {
+                "仓库": "LA", "统计周期": "2026-W30", "标准运输类型": "FTL",
+                "是否FTL发车": True, "主产品类型": "FBA",
+                "FBA仓点代码集合": "ONT8",
+                "出库体积": 40, "出库卡板数": 8, "派送成本": 500,
+            },
+        ])
+
+        report = delivery_match_adapter.build_ltl_station_cost_report(rows)
+
+        self.assertEqual(
+            report.columns.tolist(),
+            [
+                "指标名称", "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组",
+                "总出库体积", "总出库卡板数", "总派送成本",
+            ],
+        )
+        self.assertEqual(set(report["仓点代码"]), {"ONT8", "16号仓"})
+        self.assertEqual(report["车型装车分组"].unique().tolist(), ["LTL"])
+
+        fba = report.loc[report["仓点代码"] == "ONT8"].iloc[0]
+        self.assertEqual(fba["总出库体积"], 20)
+        self.assertEqual(fba["总出库卡板数"], 5)
+        self.assertEqual(fba["总派送成本"], 300)
+
+        fbx = report.loc[report["仓点代码"] == "16号仓"].iloc[0]
+        self.assertEqual(fbx["对象类型"], "FBX平台仓")
+        self.assertEqual(fbx["平台"], "谷仓")
+        self.assertEqual(fbx["总出库体积"], 6)
+        self.assertEqual(fbx["总出库卡板数"], 1)
+        self.assertEqual(fbx["总派送成本"], 90)
+
+    def test_stage2_workbook_splits_ftl_and_ltl_cost_sheets_end_to_end(self):
+        source = pd.DataFrame([
+            {
+                "仓库": "LA", "出库时间": "2026-07-20", "签收时间": "2026-07-22",
+                "目的地": "Amazon-ONT8", "派送方式": "卡车派送", "运输类型": "LTL",
+                "批次号": "LTL-FBA-1", "出库体积": 8, "出库卡板数": 2, "派送成本": 120,
+            },
+            {
+                "仓库": "LA", "出库时间": "2026-07-20", "签收时间": "2026-07-22",
+                "目的地": "谷仓16号仓", "派送方式": "卡车派送", "运输类型": "LTL",
+                "批次号": "LTL-FBX-1", "出库体积": 6, "出库卡板数": 1, "派送成本": 90,
+            },
+            {
+                "仓库": "LA", "出库时间": "2026-07-20", "签收时间": "2026-07-22",
+                "目的地": "Amazon-ONT8", "派送方式": "卡车派送", "运输类型": "FTL",
+                "车型": "53尺大车", "装车类型": "卡板", "车次号": "FTL-1",
+                "批次号": "FTL-FBA-1", "出库体积": 30, "出库卡板数": 10, "派送成本": 300,
+            },
+        ])
+
+        delivery_runtime.bootstrap(delivery_workflow)
+        detail, _, _ = processors.process_delivery_stage1_from_df(source, "LA")
+        detail = delivery_stage1_adapter.repair_delivery_stage1_numeric_columns(detail)
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(detail)
+        metrics = delivery_workflow.process_stage2_analysis(
+            cleaned,
+            pd.DataFrame(columns=["批次号", "标准邮编"]),
+            period_type="按月统计",
+        )
+
+        self.assertIn("成本FTL", metrics)
+        self.assertIn("成本LTL", metrics)
+        ltl = metrics["成本LTL"]
+        self.assertEqual(set(ltl["仓点代码"]), {"ONT8", "16号仓"})
+        self.assertEqual(ltl["总出库体积"].sum(), 14)
+        self.assertEqual(ltl["总出库卡板数"].sum(), 3)
+        self.assertEqual(ltl["总派送成本"].sum(), 210)
+        self.assertNotIn("平均整车价", ltl.columns)
+        self.assertNotIn("P80整车价", ltl.columns)
+
+        workbook = tool_common.write_sheets_to_excel(metrics)
+        xls = pd.ExcelFile(workbook)
+        self.assertIn("成本FTL", xls.sheet_names)
+        self.assertIn("成本LTL", xls.sheet_names)
+
     def test_added_fba_references_fill_zip_state_and_station_code(self):
         cases = [
             ("MCI4", "10501 NW 136th St, Kansas City, MO 64153", "64153", "MO"),
