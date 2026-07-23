@@ -41,7 +41,10 @@ FIELD_ALIASES = {
     "车次号": ["车次号", "车次", "派送卡车", "卡车", "批次号", "批次", "Load No", "Trip No"],
     "派送卡车": ["派送卡车", "卡车", "Truck"],
     "批次号": ["批次号", "批次", "工作单号", "工作单", "订单号", "SO", "SO号"],
-    "派送方式": ["派送方式", "配送方式", "Delivery Method"],
+    "派送方式": [
+        "派送方式", "配送方式", "派送类型", "配送类型", "送货方式",
+        "Delivery Method", "Delivery Type",
+    ],
     "出库类型": ["出库类型", "业务类型", "Outbound Type"],
     "批次状态": ["批次状态", "状态", "Batch Status"],
     "运输类型": ["运输类型", "运输方式", "Transport Type", "Transportation Type"],
@@ -310,15 +313,22 @@ def filter_split_delivery_rows(df, module_name="柜量及提拆柜分析"):
 
     The source system currently exposes both ``拆送`` and ``拆柜`` wording for
     the same operating population, so both values are accepted. Direct-delivery
-    rows and blank values are excluded.
+    rows and blank values are excluded when the field is available. Some source
+    exports omit this field after users have already filtered the population;
+    those files are retained and explicitly marked for audit instead of failing.
     """
     df = df.copy()
-    require_columns(df, ["派送方式"], module_name)
+    if "派送方式" not in df.columns:
+        df["拆送筛选口径"] = "源文件未提供派送方式字段，按上传范围为拆送数据处理"
+        return df
+
     method = df["派送方式"].fillna("").astype(str).str.replace(r"\s+", "", regex=True)
     mask = pd.Series(False, index=df.index)
     for marker in SPLIT_DELIVERY_MARKERS:
         mask |= method.str.contains(marker, na=False, regex=False)
-    return df.loc[mask].copy()
+    result = df.loc[mask].copy()
+    result["拆送筛选口径"] = "按派送方式筛选拆送/拆柜"
+    return result
 
 
 def prepare_base_df(df):
@@ -929,7 +939,7 @@ def process_container_analysis(
     df = filter_warehouse(df, warehouse)
     module_name = "柜量及提拆柜分析"
     required_cols = [
-        "柜号", "客户名称", "派送方式", time_dimension,
+        "柜号", "客户名称", time_dimension,
         "提柜时间", "实际抵仓时间", "拆柜完成时间",
     ]
     if warehouse != "DAL":
