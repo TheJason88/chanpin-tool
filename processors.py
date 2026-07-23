@@ -89,6 +89,8 @@ LOW_VOLUME_SHARE_THRESHOLD = 0.005
 RESULT_DECIMALS = 2
 CONTAINER_NO_PATTERN = re.compile(r"^[A-Z]{3}[UJZ]\d{7}$")
 CHINESE_PATTERN = re.compile(r"[\u4e00-\u9fff]")
+CONTAINER_TIME_DIMENSIONS = ["ETA", "Available时间", "提柜时间", "实际抵仓时间", "拆柜完成时间"]
+SPLIT_DELIVERY_MARKERS = ("拆送", "拆柜")
 
 
 # =========================
@@ -301,6 +303,22 @@ def filter_date_range(df, date_col, start_date=None, end_date=None):
     if end_date is not None:
         df = df[df[date_col] < pd.to_datetime(end_date) + pd.Timedelta(days=1)]
     return df.copy()
+
+
+def filter_split_delivery_rows(df, module_name="柜量及提拆柜分析"):
+    """Keep only split-delivery container rows.
+
+    The source system currently exposes both ``拆送`` and ``拆柜`` wording for
+    the same operating population, so both values are accepted. Direct-delivery
+    rows and blank values are excluded.
+    """
+    df = df.copy()
+    require_columns(df, ["派送方式"], module_name)
+    method = df["派送方式"].fillna("").astype(str).str.replace(r"\s+", "", regex=True)
+    mask = pd.Series(False, index=df.index)
+    for marker in SPLIT_DELIVERY_MARKERS:
+        mask |= method.str.contains(marker, na=False, regex=False)
+    return df.loc[mask].copy()
 
 
 def prepare_base_df(df):
@@ -797,6 +815,48 @@ def build_time_ops_one_row_summary(df, duration_col, duration_label):
     return result_df.merge(duration_df, on=["仓库", "统计周期"], how="left")
 
 
+def build_combined_container_summary(df):
+    """Build one container summary containing volume, pickup and unload KPIs."""
+    result_df = build_volume_one_row_summary(df, include_us_customer=True)
+    duration_specs = [("提柜时效", "提柜"), ("拆柜时效", "拆柜")]
+
+    for duration_col, duration_label in duration_specs:
+        duration_cols = [
+            f"总平均{duration_label}时效", f"总P80{duration_label}时效",
+            f"T1平均{duration_label}时效", f"T1P80{duration_label}时效",
+            f"T2平均{duration_label}时效", f"T2P80{duration_label}时效",
+            f"T3平均{duration_label}时效", f"T3P80{duration_label}时效",
+        ]
+        if result_df.empty:
+            for col in duration_cols:
+                result_df[col] = np.nan
+            continue
+
+        rows = []
+        for keys, group in df.groupby(["仓库", "统计周期"], dropna=False):
+            if not isinstance(keys, tuple):
+                keys = (keys,)
+            row = {"仓库": keys[0], "统计周期": keys[1]}
+            values = pd.to_numeric(group[duration_col], errors="coerce")
+            row[f"总平均{duration_label}时效"] = values.mean()
+            row[f"总P80{duration_label}时效"] = safe_p80(values)
+            for channel in ["T1", "T2", "T3"]:
+                channel_values = pd.to_numeric(
+                    group.loc[group["T渠道类型"] == channel, duration_col],
+                    errors="coerce",
+                )
+                row[f"{channel}平均{duration_label}时效"] = channel_values.mean()
+                row[f"{channel}P80{duration_label}时效"] = safe_p80(channel_values)
+            rows.append(row)
+
+        result_df = result_df.merge(
+            pd.DataFrame(rows),
+            on=["仓库", "统计周期"],
+            how="left",
+        )
+    return result_df
+
+
 def mark_duration_abnormal(df, duration_col, start_col, end_col, min_days, max_days):
     df = df.copy()
     df["是否有效"] = (
@@ -843,84 +903,116 @@ def build_duration_summary(df, group_cols, duration_col, total_name, valid_name,
 
 
 # =========================
-# 7. 货量 / 提柜 / 拆柜 / 旧派送
+# 7. 柜量及提拆柜分析 / 旧派送
 # =========================
 
-def process_volume_analysis(df, warehouse, product_type, period_type, start_date=None, end_date=None):
+def process_container_analysis(
+    df,
+    warehouse,
+    period_type,
+    time_dimension,
+    start_date=None,
+    end_date=None,
+):
+    """Process one-row-per-container analytics on a user-selected time axis.
+
+    The selected time field consistently controls date filtering, container
+    deduplication, period attribution and the original-file range. The same
+    container population then produces both pickup and unload timing metrics.
+    """
+    if time_dimension not in CONTAINER_TIME_DIMENSIONS:
+        raise ValueError(
+            f"统计时间指标必须是以下字段之一：{CONTAINER_TIME_DIMENSIONS}；当前值：{time_dimension}"
+        )
+
     df = prepare_base_df(df)
     df = filter_warehouse(df, warehouse)
-    require_columns(df, ["柜号", "ETA", "客户名称"], "货量分析")
-    check_product_channel_available(df, "货量分析")
+    module_name = "柜量及提拆柜分析"
+    required_cols = [
+        "柜号", "客户名称", "派送方式", time_dimension,
+        "提柜时间", "实际抵仓时间", "拆柜完成时间",
+    ]
+    if warehouse != "DAL":
+        required_cols.append("Available时间")
+    require_columns(df, list(dict.fromkeys(required_cols)), module_name)
+    check_product_channel_available(df, module_name)
 
-    df = filter_date_range(df, "ETA", start_date, end_date)
-    df = filter_valid_container_rows(df, "货量分析")
-    df = deduplicate_by_container_no(df, sort_col="ETA")
-    df = add_period_column(df, period_type, "ETA")
+    df = filter_split_delivery_rows(df, module_name)
+    if df.empty:
+        raise ValueError("派送方式中没有识别到“拆送”或“拆柜”数据。")
+
+    for date_col in CONTAINER_TIME_DIMENSIONS:
+        if date_col not in df.columns:
+            df[date_col] = pd.NaT
+        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+
+    df = filter_date_range(df, time_dimension, start_date, end_date)
+    df = df[df[time_dimension].notna()].copy()
+    if df.empty:
+        raise ValueError(f"所选时间范围内没有有效的“{time_dimension}”数据。")
+
+    df = filter_valid_container_rows(df, module_name)
+    if df.empty:
+        raise ValueError("所选数据中没有符合标准格式的有效柜号。")
+    df = deduplicate_by_container_no(df, sort_col=time_dimension)
+    if period_type == "按原文件时间范围":
+        period_start = df[time_dimension].min().strftime("%Y-%m-%d")
+        period_end = df[time_dimension].max().strftime("%Y-%m-%d")
+        df["统计周期"] = f"{period_start} ~ {period_end}"
+    else:
+        df = add_period_column(df, period_type, time_dimension)
+    df["统计时间指标"] = time_dimension
 
     df["客户类型"] = df.apply(classify_customer_type_for_product_volume, axis=1)
     df["T渠道类型"] = df["产品渠道"].apply(classify_t_channel)
 
-    detail_df = df.copy()
-    result_df = build_volume_one_row_summary(detail_df, include_us_customer=True)
-    return detail_df, result_df
+    df["提柜时效开始时间"] = np.where(
+        df["仓库"].isin(["LA", "NJ", "SAV"]),
+        df["Available时间"],
+        df["提柜时间"],
+    )
+    df["提柜时效开始时间"] = pd.to_datetime(df["提柜时效开始时间"], errors="coerce")
+    df["提柜时效结束时间"] = df["实际抵仓时间"]
+    df["提柜时效"] = (
+        df["提柜时效结束时间"] - df["提柜时效开始时间"]
+    ).dt.total_seconds() / 86400
+    pickup_zero_mask = (
+        df["提柜时效开始时间"].notna()
+        & df["提柜时效结束时间"].notna()
+        & df["提柜时效"].eq(0)
+    )
+    df.loc[pickup_zero_mask, "提柜时效"] = 0.5
+    pickup_checked = mark_duration_abnormal(
+        df,
+        "提柜时效",
+        "提柜时效开始时间",
+        "提柜时效结束时间",
+        min_days=0.01,
+        max_days=20,
+    )
+    df["提柜时效是否有效"] = pickup_checked["是否有效"]
+    df["提柜时效异常原因"] = pickup_checked["异常原因"]
+    df.loc[~df["提柜时效是否有效"], "提柜时效"] = np.nan
 
-
-def process_pickup_timing(df, warehouse, product_type, period_type, start_date=None, end_date=None):
-    df = prepare_base_df(df)
-    df = filter_warehouse(df, warehouse)
-    df["客户类型"] = df.apply(classify_customer_type_for_time_ops, axis=1)
-
-    require_columns(df, ["柜号", "提柜时间", "实际抵仓时间"], "提柜分析")
-    check_product_channel_available(df, "提柜分析")
-    df = filter_date_range(df, "实际抵仓时间", start_date, end_date)
-    df = filter_valid_container_rows(df, "提柜分析")
-
-    df["提柜时间"] = pd.to_datetime(df["提柜时间"], errors="coerce")
-    df["实际抵仓时间"] = pd.to_datetime(df["实际抵仓时间"], errors="coerce")
-    if "Available时间" in df.columns:
-        df["Available时间"] = pd.to_datetime(df["Available时间"], errors="coerce")
-    else:
-        df["Available时间"] = pd.NaT
-
-    df = deduplicate_by_container_no(df, sort_col="实际抵仓时间")
-    df = add_period_column(df, period_type, "实际抵仓时间")
-    df["T渠道类型"] = df["产品渠道"].apply(classify_t_channel)
-    df["开始时间"] = np.where(df["仓库"].isin(["LA", "NJ", "SAV"]), df["Available时间"], df["提柜时间"])
-    df["开始时间"] = pd.to_datetime(df["开始时间"], errors="coerce")
-    df["结束时间"] = df["实际抵仓时间"]
-    df["提柜时效"] = (df["结束时间"] - df["开始时间"]).dt.total_seconds() / 86400
-    df = mark_duration_abnormal(df, "提柜时效", "开始时间", "结束时间", min_days=0.01, max_days=20)
-
-    detail_df = df.copy()
-    detail_df.loc[~detail_df["是否有效"], "提柜时效"] = np.nan
-    result_df = build_time_ops_one_row_summary(detail_df, "提柜时效", "提柜")
-    return detail_df, result_df
-
-
-def process_unload_timing(df, warehouse, product_type, period_type, start_date=None, end_date=None):
-    df = prepare_base_df(df)
-    df = filter_warehouse(df, warehouse)
-    df["客户类型"] = df.apply(classify_customer_type_for_time_ops, axis=1)
-
-    require_columns(df, ["柜号", "实际抵仓时间", "拆柜完成时间"], "拆柜分析")
-    check_product_channel_available(df, "拆柜分析")
-    df = filter_date_range(df, "拆柜完成时间", start_date, end_date)
-    df = filter_valid_container_rows(df, "拆柜分析")
-
-    df["实际抵仓时间"] = pd.to_datetime(df["实际抵仓时间"], errors="coerce")
-    df["拆柜完成时间"] = pd.to_datetime(df["拆柜完成时间"], errors="coerce")
-    df = deduplicate_by_container_no(df, sort_col="拆柜完成时间")
-
-    df = add_period_column(df, period_type, "拆柜完成时间")
-    df["T渠道类型"] = df["产品渠道"].apply(classify_t_channel)
-    df["开始时间"] = df["实际抵仓时间"]
-    df["结束时间"] = df["拆柜完成时间"]
-    df["拆柜时效"] = (df["结束时间"] - df["开始时间"]).dt.total_seconds() / 86400
-    df = mark_duration_abnormal(df, "拆柜时效", "开始时间", "结束时间", min_days=0.01, max_days=20)
+    df["拆柜时效开始时间"] = df["实际抵仓时间"]
+    df["拆柜时效结束时间"] = df["拆柜完成时间"]
+    df["拆柜时效"] = (
+        df["拆柜时效结束时间"] - df["拆柜时效开始时间"]
+    ).dt.total_seconds() / 86400
+    unload_checked = mark_duration_abnormal(
+        df,
+        "拆柜时效",
+        "拆柜时效开始时间",
+        "拆柜时效结束时间",
+        min_days=0.01,
+        max_days=20,
+    )
+    df["拆柜时效是否有效"] = unload_checked["是否有效"]
+    df["拆柜时效异常原因"] = unload_checked["异常原因"]
+    df.loc[~df["拆柜时效是否有效"], "拆柜时效"] = np.nan
 
     detail_df = df.copy()
-    detail_df.loc[~detail_df["是否有效"], "拆柜时效"] = np.nan
-    result_df = build_time_ops_one_row_summary(detail_df, "拆柜时效", "拆柜")
+    result_df = build_combined_container_summary(detail_df)
     return detail_df, result_df
 
 
@@ -1369,17 +1461,21 @@ def process_uploaded_file(
     analysis_module,
     period_type,
     start_date=None,
-    end_date=None
+    end_date=None,
+    time_dimension=None,
 ):
     uploaded_file.seek(0)
     df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
 
-    if analysis_module == "货量分析":
-        detail_df, result_df = process_volume_analysis(df, warehouse, product_type, period_type, start_date, end_date)
-    elif analysis_module in ["提柜分析", "提柜时效分析"]:
-        detail_df, result_df = process_pickup_timing(df, warehouse, product_type, period_type, start_date, end_date)
-    elif analysis_module in ["拆柜分析", "拆柜时效分析"]:
-        detail_df, result_df = process_unload_timing(df, warehouse, product_type, period_type, start_date, end_date)
+    if analysis_module == "柜量及提拆柜分析":
+        detail_df, result_df = process_container_analysis(
+            df,
+            warehouse,
+            period_type,
+            time_dimension,
+            start_date,
+            end_date,
+        )
     elif analysis_module in ["派送分析", "派送时效分析"]:
         detail_df, result_df = process_delivery_timing(df, warehouse, product_type, period_type, start_date, end_date)
     else:
