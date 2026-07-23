@@ -1313,6 +1313,15 @@ def resolve_group_vehicle(series):
     return "53尺大车"
 
 
+def original_or_standard_group_values(group, original_col, standard_col, normalizer=None):
+    """重判为FTL时优先读取原文件车型/装车类型，标准化列只作为缺列兜底。"""
+    if original_col in group.columns:
+        original = group[original_col]
+        if original.apply(lambda value: not is_blank(value)).any():
+            return original.apply(normalizer) if normalizer else original
+    return group.get(standard_col, pd.Series(dtype=str))
+
+
 def build_delivery_stage2(stage1_df, period_type="按周统计"):
     df = stage1_df.copy()
     if "FBX代码" not in df.columns:
@@ -1344,8 +1353,12 @@ def build_delivery_stage2(stage1_df, period_type="按周统计"):
             ftl_df["仓库"].astype(str).str.upper().str.strip() + "||" + ftl_df["车次号"],
         )
         for trip, group in ftl_df.groupby("车次聚合键", dropna=False):
-            vehicle = resolve_group_vehicle(group.get("车型标准值", pd.Series(dtype=str)))
-            loading = resolve_group_loading(group.get("装车类型标准值", pd.Series(dtype=str)))
+            vehicle = resolve_group_vehicle(original_or_standard_group_values(
+                group, "车型", "车型标准值", lambda value: normalize_vehicle_type(value, "FTL")[0]
+            ))
+            loading = resolve_group_loading(original_or_standard_group_values(
+                group, "装车类型", "装车类型标准值", lambda value: normalize_loading_type(value, "FTL")[0]
+            ))
             method = build_standard_delivery_method("FTL", vehicle, loading)
             start_time = group["出库时间"].min()
             end_time = group["签收时间"].max()

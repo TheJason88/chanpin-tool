@@ -316,7 +316,7 @@ def build_cleaned_batches_from_detail(valid_detail):
         if col not in df.columns:
             df[col] = pd.NaT
         df[col] = pd.to_datetime(df[col], errors="coerce")
-    for col in ["标准运输类型", "车次号", "批次号", "仓库", "出库类型", "业务场景", "系统产品类型", "FBA/FBX", "平台名称", "FBX代码", "标准邮编", "邮编前三位", "目的州", "FBA仓点代码", "装车类型标准值", "车型标准值", "调入仓库", "邮编来源", "备注"]:
+    for col in ["标准运输类型", "车次号", "批次号", "仓库", "出库类型", "业务场景", "系统产品类型", "FBA/FBX", "平台名称", "FBX代码", "标准邮编", "邮编前三位", "目的州", "FBA仓点代码", "装车类型", "车型", "装车类型标准值", "车型标准值", "调入仓库", "邮编来源", "备注"]:
         if col not in df.columns:
             df[col] = ""
     df = processors.apply_trip_transport_type_rules(df)
@@ -331,8 +331,12 @@ def build_cleaned_batches_from_detail(valid_detail):
             ftl_df["仓库"].astype(str).str.upper().str.strip() + "||" + ftl_df["车次号"],
         )
         for trip, group in ftl_df.groupby("车次聚合键", dropna=False):
-            vehicle = resolve_group_vehicle(group["车型标准值"])
-            loading = resolve_group_loading(group["装车类型标准值"])
+            vehicle = resolve_group_vehicle(processors.original_or_standard_group_values(
+                group, "车型", "车型标准值", lambda value: processors.normalize_vehicle_type(value, "FTL")[0]
+            ))
+            loading = resolve_group_loading(processors.original_or_standard_group_values(
+                group, "装车类型", "装车类型标准值", lambda value: processors.normalize_loading_type(value, "FTL")[0]
+            ))
             start_time = group["出库时间"].min()
             end_time = group["签收时间"].max()
             duration = (end_time - start_time).total_seconds() / 86400 if pd.notna(start_time) and pd.notna(end_time) else np.nan
