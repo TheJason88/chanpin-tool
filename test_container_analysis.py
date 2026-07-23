@@ -1,4 +1,5 @@
 import unittest
+from io import BytesIO
 
 import pandas as pd
 
@@ -197,6 +198,63 @@ class ContainerAnalysisTests(unittest.TestCase):
                 period_type="按月统计",
                 time_dimension="ETA",
             )
+
+    def test_missing_delivery_method_keeps_uploaded_scope_with_audit_note(self):
+        source = pd.DataFrame([
+            container_row("MSCU1234567")
+        ]).drop(columns=["派送方式"])
+
+        detail, summary = processors.process_container_analysis(
+            source,
+            warehouse="LA",
+            period_type="按月统计",
+            time_dimension="ETA",
+        )
+
+        self.assertEqual(summary.iloc[0]["总柜量"], 1)
+        self.assertEqual(
+            detail.iloc[0]["拆送筛选口径"],
+            "源文件未提供派送方式字段，按上传范围为拆送数据处理",
+        )
+
+    def test_delivery_method_alias_is_recognized_and_filtered(self):
+        source = pd.DataFrame([
+            container_row("MSCU1234567", delivery_method="拆送"),
+            container_row("TGHU7654321", delivery_method="直送"),
+        ]).rename(columns={"派送方式": "派送类型"})
+
+        detail, summary = processors.process_container_analysis(
+            source,
+            warehouse="LA",
+            period_type="按月统计",
+            time_dimension="ETA",
+        )
+
+        self.assertEqual(detail["标准柜号"].tolist(), ["MSCU1234567"])
+        self.assertEqual(summary.iloc[0]["总柜量"], 1)
+        self.assertEqual(detail.iloc[0]["拆送筛选口径"], "按派送方式筛选拆送/拆柜")
+
+    def test_uploaded_excel_without_delivery_method_runs_end_to_end(self):
+        source = pd.DataFrame([
+            container_row("MSCU1234567")
+        ]).drop(columns=["派送方式"])
+        uploaded = BytesIO()
+        source.to_excel(uploaded, index=False, sheet_name="订单")
+        uploaded.seek(0)
+
+        detail, summary, final_module = processors.process_uploaded_file(
+            uploaded_file=uploaded,
+            sheet_name="订单",
+            warehouse="LA",
+            product_type="全部",
+            analysis_module="柜量及提拆柜分析",
+            period_type="按月统计",
+            time_dimension="ETA",
+        )
+
+        self.assertEqual(final_module, "柜量及提拆柜分析")
+        self.assertEqual(summary.iloc[0]["总柜量"], 1)
+        self.assertIn("拆送筛选口径", detail.columns)
 
 
 if __name__ == "__main__":
