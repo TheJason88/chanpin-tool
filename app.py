@@ -22,12 +22,15 @@ try:
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-07-23-ltl-cost-v1"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-07-23-trip-transport-v2"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
         # 仅当运行时版本不一致时重新加载，保证新表结构与新统计规则同步生效。
+        processors = importlib.reload(processors)
+        delivery_stage1_adapter = importlib.reload(delivery_stage1_adapter)
         delivery_match_adapter = importlib.reload(delivery_match_adapter)
+        delivery_workflow = importlib.reload(delivery_workflow)
         delivery_runtime = importlib.reload(delivery_runtime)
     except Exception as exc:
         _dependency_error = exc
@@ -302,6 +305,7 @@ st.caption(
     "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
     "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
     "派送二成本拆分为成本FTL和成本LTL；LTL仅统计成本大于0且能明确匹配到FBA或FBX平台仓点的数据，只输出三个总量指标。"
+    "运输类型先按仓库和车次判断：同车次同时含FTL和LTL时整车统一按FTL；同车次只有LTL但总出库体积大于60CBM时也按FTL，60CBM仍按LTL。重判后的车次在后续发车、时效和成本中均使用最终FTL口径。"
     "6B支持多文件上传；结构完全相同的匹配文件默认纵向合并。"
     "邮编异常审核表请填写“补充标准邮编”，可选填写“补充目的州”。"
 )

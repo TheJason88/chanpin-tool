@@ -202,6 +202,72 @@ class MultiUnloadAverageTests(unittest.TestCase):
 
         self.assertEqual(regular["批次号集合"].tolist(), ["B"])
 
+    def test_trip_level_transport_rules_reclassify_mixed_and_over_60_ltl_into_ftl_cost(self):
+        def detail_row(row_no, trip, batch, transport, volume, cost, loading="散板", vehicle="不适用"):
+            return {
+                "原始行号": row_no,
+                "仓库": "LA",
+                "标准运输类型": transport,
+                "车次号": trip,
+                "批次号": batch,
+                "出库时间": "2026-07-20",
+                "签收时间": "2026-07-22",
+                "出库体积": volume,
+                "出库卡板数": 1,
+                "派送成本": cost,
+                "FBA/FBX": "FBA",
+                "FBA仓点代码": "ONT8",
+                "标准邮编": "92551",
+                "邮编前三位": "925",
+                "目的州": "CA",
+                "车型标准值": vehicle,
+                "装车类型标准值": loading,
+            }
+
+        detail = pd.DataFrame([
+            detail_row(2, "MIX-1", "MIX-FTL", "FTL", 20, 100, loading="卡板", vehicle="53尺大车"),
+            detail_row(3, "MIX-1", "MIX-LTL", "LTL", 10, 200),
+            detail_row(4, "OVER-1", "OVER-A", "LTL", 31, 300),
+            detail_row(5, "OVER-1", "OVER-B", "LTL", 30, 310),
+            detail_row(6, "EDGE-60", "EDGE-A", "LTL", 30, 150),
+            detail_row(7, "EDGE-60", "EDGE-B", "LTL", 30, 150),
+        ])
+
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(detail)
+
+        mixed = cleaned.loc[cleaned["车次号"] == "MIX-1"].iloc[0]
+        self.assertEqual(mixed["标准运输类型"], "FTL")
+        self.assertEqual(mixed["原始运输类型集合"], "FTL,LTL")
+        self.assertIn("同时含FTL和LTL", mixed["运输类型重判原因"])
+        self.assertEqual(mixed["出库体积"], 30)
+        self.assertEqual(set(mixed["批次号集合"].split(",")), {"MIX-FTL", "MIX-LTL"})
+
+        over = cleaned.loc[cleaned["车次号"] == "OVER-1"].iloc[0]
+        self.assertEqual(over["标准运输类型"], "FTL")
+        self.assertIn(">60CBM", over["运输类型重判原因"])
+        self.assertEqual(over["出库体积"], 61)
+        self.assertEqual(over["派送方式"], "53尺大车-未知装车类型")
+
+        edge = cleaned.loc[cleaned["车次号"] == "EDGE-60"]
+        self.assertEqual(len(edge), 2)
+        self.assertEqual(edge["标准运输类型"].unique().tolist(), ["LTL"])
+        self.assertTrue(edge["运输类型重判原因"].fillna("").eq("").all())
+
+        delivery_runtime.bootstrap(delivery_workflow)
+        metrics = delivery_workflow.process_stage2_analysis(
+            cleaned,
+            pd.DataFrame(columns=["批次号", "标准邮编"]),
+            period_type="按月统计",
+        )
+        cost_ftl = metrics["成本FTL"]
+        cost_ltl = metrics["成本LTL"]
+
+        self.assertEqual(cost_ftl["总出库体积"].sum(), 91)
+        self.assertEqual(cost_ftl["总派送成本"].sum(), 910)
+        self.assertEqual(set(cost_ftl["车型装车分组"]), {"大车卡板", "大车未知装车"})
+        self.assertEqual(cost_ltl["总出库体积"].sum(), 60)
+        self.assertEqual(cost_ltl["总派送成本"].sum(), 300)
+
     def test_ltl_cost_report_groups_fba_and_fbx_platform_by_station(self):
         rows = pd.DataFrame([
             {

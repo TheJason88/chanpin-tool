@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-07-23-ltl-cost-v1"
+RUNTIME_SCHEMA_VERSION = "2026-07-23-trip-transport-v2"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
@@ -477,7 +477,7 @@ def _filter_positive_cost_rows(df):
 
 
 def _filter_regular_single_batch_trips_for_cost(matched):
-    """普通派送成本只看非干线/非调拨的单批次单车次，且派送成本大于0。"""
+    """普通派送成本通常只看单批次；按整车规则重判FTL的多批次车次也按FTL纳入。"""
     if matched is None or matched.empty:
         return matched
     out = matched.copy()
@@ -488,8 +488,12 @@ def _filter_regular_single_batch_trips_for_cost(matched):
     if regular.empty:
         return regular
     batch_counts = regular.apply(lambda row: len(_unique_batch_keys_from_row(row)), axis=1)
-    single_batch = regular[batch_counts == 1].copy()
-    return _filter_positive_cost_rows(single_batch)
+    if "运输类型重判原因" in regular.columns:
+        reclassified_ftl = regular["运输类型重判原因"].astype(str).str.contains("重判为FTL", na=False)
+    else:
+        reclassified_ftl = pd.Series(False, index=regular.index)
+    eligible = regular[(batch_counts == 1) | reclassified_ftl].copy()
+    return _filter_positive_cost_rows(eligible)
 
 
 def _combine_series_text(series):

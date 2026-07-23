@@ -542,7 +542,7 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
         return pd.DataFrame()
     for _, row in df.iterrows():
         vehicle_group = vehicle_group_override or _cost_vehicle_group(row)
-        if vehicle_group not in ["小车", "大车卡板", "大车地板", "LTL"]:
+        if vehicle_group not in ["小车", "大车卡板", "大车地板", "大车未知装车", "LTL"]:
             continue
         volume = pd.to_numeric(row.get("出库体积", 0), errors="coerce")
         cost = pd.to_numeric(row.get("派送成本", 0), errors="coerce")

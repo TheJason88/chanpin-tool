@@ -319,12 +319,17 @@ def build_cleaned_batches_from_detail(valid_detail):
     for col in ["标准运输类型", "车次号", "批次号", "仓库", "出库类型", "业务场景", "系统产品类型", "FBA/FBX", "平台名称", "FBX代码", "标准邮编", "邮编前三位", "目的州", "FBA仓点代码", "装车类型标准值", "车型标准值", "调入仓库", "邮编来源", "备注"]:
         if col not in df.columns:
             df[col] = ""
+    df = processors.apply_trip_transport_type_rules(df)
     rows = []
     ftl_df = df[df["标准运输类型"] == "FTL"].copy()
     ltl_df = df[df["标准运输类型"] != "FTL"].copy()
     if not ftl_df.empty:
         ftl_df["车次号"] = ftl_df["车次号"].astype(str).replace({"nan": ""})
-        ftl_df["车次聚合键"] = np.where(ftl_df["车次号"].apply(processors.is_blank), "FTL_NO_TRIP_" + ftl_df["原始行号"].astype(str), ftl_df["车次号"])
+        ftl_df["车次聚合键"] = np.where(
+            ftl_df["车次号"].apply(processors.is_blank),
+            "FTL_NO_TRIP_" + ftl_df["原始行号"].astype(str),
+            ftl_df["仓库"].astype(str).str.upper().str.strip() + "||" + ftl_df["车次号"],
+        )
         for trip, group in ftl_df.groupby("车次聚合键", dropna=False):
             vehicle = resolve_group_vehicle(group["车型标准值"])
             loading = resolve_group_loading(group["装车类型标准值"])
@@ -334,7 +339,8 @@ def build_cleaned_batches_from_detail(valid_detail):
             fba_volume = group.loc[group["FBA/FBX"] == "FBA", "出库体积"].sum()
             fbx_volume = group.loc[group["FBA/FBX"] == "FBX", "出库体积"].sum()
             rows.append({
-                "分析批次ID": f"FTL_{trip}", "仓库": first_nonblank(group["仓库"]), "标准运输类型": "FTL", "派送方式": build_method("FTL", vehicle, loading),
+                "分析批次ID": f"FTL_{trip}", "仓库": first_nonblank(group["仓库"]), "标准运输类型": "FTL",
+                "原始运输类型集合": combine_unique(group["原始运输类型集合"]), "运输类型重判原因": first_nonblank(group["运输类型重判原因"]), "派送方式": build_method("FTL", vehicle, loading),
                 "车型标准值": vehicle, "装车类型标准值": loading, "车次号": first_nonblank(group["车次号"]), "批次号集合": combine_unique(group["批次号"]),
                 "出库类型": first_nonblank(group["出库类型"]), "业务场景": first_nonblank(group["业务场景"]), "调入仓库": first_nonblank(group["调入仓库"]),
                 "批次出库时间": start_time, "批次签收时间": end_time, "派送时效": duration, "出库体积": group["出库体积"].sum(), "出库卡板数": group["出库卡板数"].sum(), "派送成本": group["派送成本"].sum(),
@@ -347,7 +353,8 @@ def build_cleaned_batches_from_detail(valid_detail):
         for _, r in ltl_df.iterrows():
             product_group = "FBA" if r.get("FBA/FBX") == "FBA" else ("FBX" if r.get("FBA/FBX") == "FBX" else "未知")
             rows.append({
-                "分析批次ID": f"LTL_{r.get('原始行号', '')}", "仓库": r.get("仓库", ""), "标准运输类型": "LTL", "派送方式": "散板出库", "车型标准值": "不适用", "装车类型标准值": "散板", "车次号": "", "批次号集合": r.get("批次号", ""),
+                "分析批次ID": f"LTL_{r.get('原始行号', '')}", "仓库": r.get("仓库", ""), "标准运输类型": "LTL",
+                "原始运输类型集合": r.get("原始运输类型集合", r.get("标准运输类型", "LTL")), "运输类型重判原因": r.get("运输类型重判原因", ""), "派送方式": "散板出库", "车型标准值": "不适用", "装车类型标准值": "散板", "车次号": r.get("车次号", ""), "批次号集合": r.get("批次号", ""),
                 "出库类型": r.get("出库类型", ""), "业务场景": r.get("业务场景", ""), "调入仓库": r.get("调入仓库", ""), "批次出库时间": r.get("出库时间", pd.NaT), "批次签收时间": r.get("签收时间", pd.NaT), "派送时效": r.get("派送时效", np.nan),
                 "出库体积": r.get("出库体积", 0), "出库卡板数": r.get("出库卡板数", 0), "派送成本": r.get("派送成本", 0), "FBA出库体积": r.get("出库体积", 0) if product_group == "FBA" else 0, "FBX出库体积": r.get("出库体积", 0) if product_group == "FBX" else 0,
                 "系统产品类型": r.get("系统产品类型", ""), "主产品类型": product_group, "平台名称": r.get("平台名称", ""), "FBX代码集合": r.get("FBX代码", ""), "平台仓代码集合": r.get("FBX代码", ""), "平台仓配对集合": f"{r.get('平台名称', '')}||{r.get('FBX代码', '')}" if product_group == "FBX" and not processors.is_blank(r.get("FBX代码", "")) else "", "FBA仓点代码集合": r.get("FBA仓点代码", ""), "标准邮编集合": r.get("标准邮编", ""), "邮编前三位集合": r.get("邮编前三位", ""), "目的州": r.get("目的州", ""), "邮编来源": r.get("邮编来源", ""), "是否混合目的地": False, "是否混装": False,
