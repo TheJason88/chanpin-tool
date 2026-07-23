@@ -1,6 +1,5 @@
 import re
 
-import numpy as np
 import pandas as pd
 
 import processors
@@ -407,59 +406,8 @@ def read_stage1_or_stage2_with_audit_updates(excel_file):
     return df
 
 
-def process_pickup_timing_by_pickup_date(df, warehouse, product_type, period_type, start_date=None, end_date=None):
-    """
-    提柜分析的统计维度改为“提柜时间”：
-    - 日期筛选、周/月归属、柜号去重排序都按提柜时间；
-    - 提柜时效仍沿用原口径：LA/NJ/SAV 为 Available时间→实际抵仓时间，其他仓为提柜时间→实际抵仓时间。
-    - 开始/结束节点都存在但时效刚好等于0天时，按0.5天计入平均和P80；缺失或小于0仍按异常留空。
-    """
-    df = processors.prepare_base_df(df)
-    df = processors.filter_warehouse(df, warehouse)
-    df["客户类型"] = df.apply(processors.classify_customer_type_for_time_ops, axis=1)
-
-    processors.require_columns(df, ["柜号", "提柜时间", "实际抵仓时间"], "提柜分析")
-    processors.check_product_channel_available(df, "提柜分析")
-    df = processors.filter_date_range(df, "提柜时间", start_date, end_date)
-    df = processors.filter_valid_container_rows(df, "提柜分析")
-
-    df["提柜时间"] = pd.to_datetime(df["提柜时间"], errors="coerce")
-    df["实际抵仓时间"] = pd.to_datetime(df["实际抵仓时间"], errors="coerce")
-    if "Available时间" in df.columns:
-        df["Available时间"] = pd.to_datetime(df["Available时间"], errors="coerce")
-    else:
-        df["Available时间"] = pd.NaT
-
-    df = processors.deduplicate_by_container_no(df, sort_col="提柜时间")
-    df = processors.add_period_column(df, period_type, "提柜时间")
-    df["T渠道类型"] = df["产品渠道"].apply(processors.classify_t_channel)
-    df["开始时间"] = np.where(df["仓库"].isin(["LA", "NJ", "SAV"]), df["Available时间"], df["提柜时间"])
-    df["开始时间"] = pd.to_datetime(df["开始时间"], errors="coerce")
-    df["结束时间"] = df["实际抵仓时间"]
-    df["提柜时效"] = (df["结束时间"] - df["开始时间"]).dt.total_seconds() / 86400
-    zero_duration_mask = df["开始时间"].notna() & df["结束时间"].notna() & df["提柜时效"].eq(0)
-    df.loc[zero_duration_mask, "提柜时效"] = 0.5
-    df = processors.mark_duration_abnormal(df, "提柜时效", "开始时间", "结束时间", min_days=0.01, max_days=20)
-
-    detail_df = df.copy()
-    detail_df.loc[~detail_df["是否有效"], "提柜时效"] = np.nan
-    result_df = processors.build_time_ops_one_row_summary(detail_df, "提柜时效", "提柜")
-    result_df = processors.round_output_numbers(result_df, processors.RESULT_DECIMALS)
-    return detail_df, result_df
-
-
-def apply_pickup_action_date_patch():
-    current = getattr(processors, "process_pickup_timing", None)
-    if current is None or getattr(current, "_uses_pickup_time_for_action_count", False):
-        return
-    processors._original_process_pickup_timing = current
-    process_pickup_timing_by_pickup_date._uses_pickup_time_for_action_count = True
-    processors.process_pickup_timing = process_pickup_timing_by_pickup_date
-
-
 def apply_to_workflow(delivery_workflow_module):
     delivery_workflow_module.read_stage1_cleaned_batches = read_stage1_or_stage2_with_audit_updates
     apply_linehaul_market_rules()
     apply_stage2_linehaul_sheet_patch()
-    apply_pickup_action_date_patch()
     return delivery_workflow_module
