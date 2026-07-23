@@ -1,4 +1,5 @@
 from datetime import date
+import importlib
 
 import pandas as pd
 import streamlit as st
@@ -20,6 +21,16 @@ try:
     import delivery_runtime
 except Exception as exc:
     _dependency_error = exc
+
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-07-23-ltl-cost-v1"
+if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
+    try:
+        # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
+        # 仅当运行时版本不一致时重新加载，保证新表结构与新统计规则同步生效。
+        delivery_match_adapter = importlib.reload(delivery_match_adapter)
+        delivery_runtime = importlib.reload(delivery_runtime)
+    except Exception as exc:
+        _dependency_error = exc
 
 if _dependency_error is not None:
     st.error("工具启动失败：基础模块导入失败。页面已进入保护模式，下面是具体错误。")
