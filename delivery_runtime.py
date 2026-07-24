@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-07-23-trip-loading-v3"
+RUNTIME_SCHEMA_VERSION = "2026-07-23-amazon-freight-v4"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
@@ -20,7 +20,8 @@ TRANSFER_KEYWORDS = ["调拨", "仓间", "调入"]
 # 原始代码已有：取消、作废、废单、无效、删除、关闭。这里补足历史备注删除关键词和新增关键词。
 ADDITIONAL_INVALID_BATCH_KEYWORDS = ["废单", "快递", "公共单", "清除", "自提"]
 
-# LTL最高优先级识别词：哪怕运输类型显示FTL，只要备注命中这些词，功能一先按LTL处理。
+# 明细阶段的LTL优先识别词；车次合并后的最终运输类型仍由
+# apply_trip_transport_type_rules决定，其中AMAZON FREIGHT可最高优先级重判为FTL。
 LTL_PRIORITY_KEYWORDS = ["LTL", "散货", "散板"]
 LTL_REMARK_COLUMNS = ["备注", "备注信息", "MEMO", "跟进记录", "内部备注", "派送区域"]
 START_TIME_CANDIDATES = ["批次出库时间", "出库时间", "实际出库时间"]

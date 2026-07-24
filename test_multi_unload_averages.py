@@ -203,12 +203,23 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(regular["批次号集合"].tolist(), ["B"])
 
     def test_trip_level_transport_rules_reclassify_mixed_and_over_60_ltl_into_ftl_cost(self):
-        def detail_row(row_no, trip, batch, transport, volume, cost, loading="卡板", vehicle="53尺大车"):
+        def detail_row(
+            row_no,
+            trip,
+            batch,
+            transport,
+            volume,
+            cost,
+            loading="卡板",
+            vehicle="53尺大车",
+            delivery_truck="",
+        ):
             return {
                 "原始行号": row_no,
                 "仓库": "LA",
                 "标准运输类型": transport,
                 "车次号": trip,
+                "派送卡车": delivery_truck,
                 "批次号": batch,
                 "出库时间": "2026-07-20",
                 "签收时间": "2026-07-22",
@@ -233,6 +244,8 @@ class MultiUnloadAverageTests(unittest.TestCase):
             detail_row(5, "OVER-1", "OVER-B", "LTL", 30, 310, loading="地板", vehicle="53尺大车"),
             detail_row(6, "EDGE-60", "EDGE-A", "LTL", 30, 150),
             detail_row(7, "EDGE-60", "EDGE-B", "LTL", 30, 150, loading="地板", vehicle="53尺大车"),
+            detail_row(8, "AMZ-1", "AMZ-A", "LTL", 8, 80, delivery_truck=" Amazon   Freight "),
+            detail_row(9, "AMZ-1", "AMZ-B", "LTL", 7, 70),
         ])
 
         cleaned = delivery_workflow.build_cleaned_batches_from_detail(detail)
@@ -257,6 +270,13 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(edge["标准运输类型"].unique().tolist(), ["LTL"])
         self.assertTrue(edge["运输类型重判原因"].fillna("").eq("").all())
 
+        amazon_freight = cleaned.loc[cleaned["车次号"] == "AMZ-1"].iloc[0]
+        self.assertEqual(amazon_freight["标准运输类型"], "FTL")
+        self.assertEqual(amazon_freight["出库体积"], 15)
+        self.assertEqual(set(amazon_freight["批次号集合"].split(",")), {"AMZ-A", "AMZ-B"})
+        self.assertIn("AMAZON FREIGHT", amazon_freight["运输类型重判原因"])
+        self.assertIn("最高优先级", amazon_freight["运输类型重判原因"])
+
         delivery_runtime.bootstrap(delivery_workflow)
         metrics = delivery_workflow.process_stage2_analysis(
             cleaned,
@@ -267,12 +287,38 @@ class MultiUnloadAverageTests(unittest.TestCase):
         cost_ltl = metrics["成本LTL"]
         station_cost_ftl = cost_ftl.loc[cost_ftl["指标名称"] == "FBA及FBX平台仓成本"]
 
-        self.assertEqual(station_cost_ftl["总出库体积"].sum(), 91)
-        self.assertEqual(station_cost_ftl["总派送成本"].sum(), 910)
+        self.assertEqual(station_cost_ftl["总出库体积"].sum(), 106)
+        self.assertEqual(station_cost_ftl["总派送成本"].sum(), 1060)
         self.assertEqual(set(station_cost_ftl["车型装车分组"]), {"大车卡板", "大车地板"})
         self.assertEqual(cost_ltl["总出库体积"].sum(), 60)
         self.assertEqual(cost_ltl["总派送成本"].sum(), 300)
         self.assertEqual(cost_ltl["车型装车分组"].unique().tolist(), ["LTL"])
+
+    def test_amazon_freight_carrier_rows_are_ftl_without_false_trip_merge(self):
+        raw = pd.DataFrame([
+            {
+                "仓库": "LA", "出库时间": "2026-07-20", "签收时间": "2026-07-22",
+                "目的地": "Amazon-ONT8", "派送方式": "卡车派送", "运输类型": "LTL",
+                "派送卡车": "AMAZON FREIGHT", "批次号": "AF-1", "出库体积": 8,
+                "出库卡板数": 2, "派送成本": 80, "车型": "53尺大车", "装车类型": "卡板",
+            },
+            {
+                "仓库": "LA", "出库时间": "2026-07-20", "签收时间": "2026-07-22",
+                "目的地": "Amazon-ONT8", "派送方式": "卡车派送", "运输类型": "LTL",
+                "派送卡车": "amazon freight", "批次号": "AF-2", "出库体积": 7,
+                "出库卡板数": 1, "派送成本": 70, "车型": "53尺大车", "装车类型": "卡板",
+            },
+        ])
+
+        detail, _, _ = processors.process_delivery_stage1_from_df(raw, warehouse="LA")
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(detail)
+
+        self.assertEqual(detail["派送卡车"].str.upper().unique().tolist(), ["AMAZON FREIGHT"])
+        self.assertEqual(len(cleaned), 2)
+        self.assertTrue(cleaned["标准运输类型"].eq("FTL").all())
+        self.assertTrue(cleaned["车次号"].fillna("").eq("").all())
+        self.assertEqual(set(cleaned["批次号集合"]), {"AF-1", "AF-2"})
+        self.assertTrue(cleaned["运输类型重判原因"].str.contains("AMAZON FREIGHT").all())
 
     def test_ltl_cost_report_groups_fba_and_fbx_platform_by_station(self):
         rows = pd.DataFrame([

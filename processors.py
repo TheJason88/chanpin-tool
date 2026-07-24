@@ -1039,8 +1039,19 @@ def process_delivery_timing(df, warehouse, product_type, period_type, start_date
 # =========================
 
 def process_delivery_stage1_from_df(df, warehouse, period_type="按周统计", start_date=None, end_date=None, source_name=""):
+    # “派送卡车”既可能被历史别名规则当作车次号，也承载承运方式信息。
+    # 在标准化列名之前先保留原值，供 AMAZON FREIGHT 的最终运输类型规则审计使用。
+    raw_delivery_truck = None
+    cleaned_source_columns = {clean_col_name(col): col for col in df.columns}
+    for alias in FIELD_ALIASES["派送卡车"]:
+        source_col = cleaned_source_columns.get(clean_col_name(alias))
+        if source_col is not None:
+            raw_delivery_truck = df[source_col].copy()
+            break
     df = normalize_columns(df)
     df = df.copy()
+    if raw_delivery_truck is not None and "派送卡车" not in df.columns:
+        df["派送卡车"] = raw_delivery_truck.reindex(df.index)
     if "原始行号" not in df.columns:
         df.insert(0, "原始行号", range(2, len(df) + 2))
     if source_name:
@@ -1068,7 +1079,7 @@ def process_delivery_stage1_from_df(df, warehouse, period_type="按周统计", s
             df[col] = 0
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    for col in ["派送方式", "出库类型", "运输类型", "车型", "装车类型", "批次号", "车次号", "调入仓库", "备注", "转仓地址", "批次状态"]:
+    for col in ["派送方式", "派送卡车", "出库类型", "运输类型", "车型", "装车类型", "批次号", "车次号", "调入仓库", "备注", "转仓地址", "批次状态"]:
         if col not in df.columns:
             df[col] = ""
 
@@ -1231,11 +1242,14 @@ def combine_unique(series):
 
 
 TRIP_LTL_TO_FTL_VOLUME_THRESHOLD = 60.0
+AMAZON_FREIGHT_MARKER = "AMAZON FREIGHT"
 
 
 def apply_trip_transport_type_rules(df, volume_threshold=TRIP_LTL_TO_FTL_VOLUME_THRESHOLD):
     """先按仓库+车次审视整车，再决定批次最终运输类型。
 
+    派送卡车显示AMAZON FREIGHT时最高优先级直接按FTL；同车次任一批次
+    命中时整车统一按FTL。之后才判断FTL/LTL混合以及纯LTL大于60CBM。
     同车次同时出现FTL和LTL时整车统一按FTL；同车次只有LTL且总出库
     体积严格大于60CBM时也按FTL。60CBM本身仍保持LTL，空车次互不合并。
     """
@@ -1246,7 +1260,7 @@ def apply_trip_transport_type_rules(df, volume_threshold=TRIP_LTL_TO_FTL_VOLUME_
     if "标准运输类型" not in out.columns:
         source = out["运输类型"] if "运输类型" in out.columns else pd.Series("", index=out.index)
         out["标准运输类型"] = source.apply(normalize_transport_type)
-    for col in ["仓库", "车次号"]:
+    for col in ["仓库", "车次号", "派送卡车"]:
         if col not in out.columns:
             out[col] = ""
     if "出库体积" not in out.columns:
@@ -1265,7 +1279,22 @@ def apply_trip_transport_type_rules(df, volume_threshold=TRIP_LTL_TO_FTL_VOLUME_
 
     trip_text = out["车次号"].apply(lambda value: "" if is_blank(value) else str(value).strip())
     warehouse_text = out["仓库"].apply(lambda value: "" if is_blank(value) else str(value).strip().upper())
-    real_trip_mask = trip_text.ne("")
+    amazon_freight_mask = pd.Series(False, index=out.index)
+    for col in ["派送卡车", "车次号"]:
+        amazon_freight_mask |= (
+            out[col]
+            .fillna("")
+            .astype(str)
+            .str.upper()
+            .str.replace(r"\s+", " ", regex=True)
+            .str.contains(AMAZON_FREIGHT_MARKER, regex=False)
+        )
+    # 当“派送卡车”本身被历史别名映射成车次号且内容只是承运商名称时，
+    # 不把所有 AMAZON FREIGHT 行误合并成同一车次；仍逐行直接判FTL。
+    trip_is_amazon_freight_label = (
+        trip_text.str.upper().str.replace(r"\s+", " ", regex=True).str.contains(AMAZON_FREIGHT_MARKER, regex=False)
+    )
+    real_trip_mask = trip_text.ne("") & ~trip_is_amazon_freight_label
     out["_运输类型车次键"] = warehouse_text + "||" + trip_text
 
     for _, indexes in out.loc[real_trip_mask].groupby("_运输类型车次键", dropna=False).groups.items():
@@ -1278,7 +1307,9 @@ def apply_trip_transport_type_rules(df, volume_threshold=TRIP_LTL_TO_FTL_VOLUME_
         total_volume = pd.to_numeric(group["出库体积"], errors="coerce").fillna(0).sum()
 
         reason = ""
-        if {"FTL", "LTL"}.issubset(original_types):
+        if amazon_freight_mask.loc[indexes].any():
+            reason = "同车次派送卡车显示AMAZON FREIGHT，整车最高优先级重判为FTL"
+        elif {"FTL", "LTL"}.issubset(original_types):
             reason = "同车次同时含FTL和LTL，整车统一重判为FTL"
         elif original_types == {"LTL"} and float(total_volume) > float(volume_threshold):
             reason = f"同车次纯LTL总出库体积>{float(volume_threshold):g}CBM，整车重判为FTL"
@@ -1289,6 +1320,17 @@ def apply_trip_transport_type_rules(df, volume_threshold=TRIP_LTL_TO_FTL_VOLUME_
         if reason:
             out.loc[indexes, "标准运输类型"] = "FTL"
             out.loc[indexes, "运输类型重判原因"] = reason
+
+    standalone_amazon_freight = amazon_freight_mask & ~real_trip_mask
+    if standalone_amazon_freight.any():
+        out.loc[standalone_amazon_freight, "标准运输类型"] = "FTL"
+        out.loc[standalone_amazon_freight, "运输类型重判原因"] = (
+            "派送卡车显示AMAZON FREIGHT，最高优先级直接重判为FTL"
+        )
+    if trip_is_amazon_freight_label.any():
+        # 这里的“车次号”实际来自派送卡车的承运商名称，不是可聚合的真实车次号。
+        # 清空后由下游使用原始行号生成独立键，避免把不同 AMAZON FREIGHT 车辆合成一车。
+        out.loc[trip_is_amazon_freight_label, "车次号"] = ""
 
     return out.drop(columns=["_运输类型车次键"])
 
