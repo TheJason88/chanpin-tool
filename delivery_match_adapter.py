@@ -27,6 +27,7 @@ DECIMAL_COLUMNS = [
     "总出库体积", "总派送成本", "平均整车价", "每方平均价", "平均每车出库体积",
     "P80每车出库体积", "平均每车出库卡板数", "P80每车出库卡板数", "P80整车价",
     "平均派送时效", "P80派送时效", "每方价格参考", "目的地总出库体积",
+    "细分货量方数", "整车价格", "每方成本",
 ]
 
 # 仓间调拨目标仓地址：用于功能二补邮编、识别干线，避免调拨行长期留在邮编异常审核。
@@ -762,7 +763,8 @@ def build_cost_price_reference_reports(cost_ftl, cost_ltl):
     type_preferred_columns = [
         "排名", "仓库", "对象类型", "平台", "仓点代码", "统计周期",
         "统计周期范围", "目的地总出库体积", "成本计算类型",
-        "总出库体积", "总出库卡板数", "总派送成本", "每方价格参考",
+        "细分货量方数", "整车价格", "每方成本",
+        "总出库体积", "总出库卡板数", "总派送成本",
         "指标名称", "车次数", "平均整车价", "P80整车价", "每方平均价",
         "平均每车出库体积", "P80每车出库体积",
         "平均每车出库卡板数", "P80每车出库卡板数",
@@ -817,11 +819,18 @@ def build_cost_price_reference_reports(cost_ftl, cost_ltl):
     station["排名"] = station.groupby("仓库").cumcount() + 1
 
     cost_type = source.copy()
-    cost_type["每方价格参考"] = cost_type.apply(
+    cost_type["细分货量方数"] = cost_type["总出库体积"]
+    cost_type["每方成本"] = cost_type.apply(
         lambda row: processors.safe_divide(row["总派送成本"], row["总出库体积"]),
         axis=1,
     )
     cost_type = cost_type.rename(columns={"车型装车分组": "成本计算类型"})
+    if "平均整车价" not in cost_type.columns:
+        cost_type["平均整车价"] = pd.NA
+    cost_type["整车价格"] = cost_type["平均整车价"].where(
+        cost_type["成本计算类型"].isin(["大车地板", "大车卡板", "小车"]),
+        pd.NA,
+    )
     destination_meta = station[
         station_keys + ["排名", "统计周期范围", "总出库体积"]
     ].rename(columns={"总出库体积": "目的地总出库体积"})
