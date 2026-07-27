@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-07-27-type-price-columns-v6"
+RUNTIME_SCHEMA_VERSION = "2026-07-27-volume-weighted-destination-trips-v7"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
@@ -477,8 +477,8 @@ def _filter_positive_cost_rows(df):
     return out[out["派送成本"] > 0].copy()
 
 
-def _filter_regular_single_batch_trips_for_cost(matched):
-    """普通派送成本通常只看单批次；按整车规则重判FTL的多批次车次也按FTL纳入。"""
+def _filter_regular_trips_for_cost(matched):
+    """普通派送成本纳入成本大于0的整车记录；一车多批次由仓点分摊层处理。"""
     if matched is None or matched.empty:
         return matched
     out = matched.copy()
@@ -488,13 +488,11 @@ def _filter_regular_single_batch_trips_for_cost(matched):
         regular = regular[regular["专线线路"].astype(str).isin(["", "未知线路", "非LA干线"])].copy()
     if regular.empty:
         return regular
-    batch_counts = regular.apply(lambda row: len(_unique_batch_keys_from_row(row)), axis=1)
-    if "运输类型重判原因" in regular.columns:
-        reclassified_ftl = regular["运输类型重判原因"].astype(str).str.contains("重判为FTL", na=False)
-    else:
-        reclassified_ftl = pd.Series(False, index=regular.index)
-    eligible = regular[(batch_counts == 1) | reclassified_ftl].copy()
-    return _filter_positive_cost_rows(eligible)
+    return _filter_positive_cost_rows(regular)
+
+
+# 兼容旧测试或外部调用；当前已不再限制单批次。
+_filter_regular_single_batch_trips_for_cost = _filter_regular_trips_for_cost
 
 
 def _combine_series_text(series):
@@ -596,7 +594,7 @@ def _patch_cost_report_single_batch_only():
     delivery_match_adapter._original_build_station_cost_report = original_func
 
     def build_station_cost_report_with_transfer(matched):
-        regular_cost = original_func(_filter_regular_single_batch_trips_for_cost(matched))
+        regular_cost = original_func(_filter_regular_trips_for_cost(matched))
         transfer_cost = _build_transfer_cost_report(matched)
         frames = [df for df in [regular_cost, transfer_cost] if df is not None and not df.empty]
         if not frames:

@@ -56,7 +56,7 @@ TRANSFER_WAREHOUSE_INFO = {
     },
 }
 
-INTEGER_OUTPUT_COLUMNS = ["排名", "车次数", "发车数", "派送数", "出库卡板数"]
+INTEGER_OUTPUT_COLUMNS = ["排名", "发车数", "派送数", "出库卡板数"]
 DECIMAL_OUTPUT_COLUMNS = [
     "数值", "占比", "出库体积", "FBA出库体积", "FBX出库体积", "派送成本", "派送时效",
     "总出库体积", "总出库卡板数", "总派送成本", "平均整车价", "P80整车价", "每方平均价",
@@ -402,6 +402,12 @@ def clean_for_excel_output(df, sheet_type=""):
     for col in INTEGER_OUTPUT_COLUMNS:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce").round(0).astype("Int64")
+    if "车次数" in out.columns:
+        values = pd.to_numeric(out["车次数"], errors="coerce")
+        if sheet_type in ["成本", "成本FTL", "分类型价格参考"]:
+            out["车次数"] = values.round(2)
+        else:
+            out["车次数"] = values.round(0).astype("Int64")
     if sheet_type == "发车量" and "数值" in out.columns:
         out["数值"] = pd.to_numeric(out["数值"], errors="coerce").round(0).astype("Int64")
     for col in DECIMAL_OUTPUT_COLUMNS:

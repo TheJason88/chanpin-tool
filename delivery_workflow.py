@@ -1,3 +1,4 @@
+import json
 import re
 
 import numpy as np
@@ -93,6 +94,52 @@ def combine_platform_code_pairs(group):
         if pair not in pairs:
             pairs.append(pair)
     return ";".join(pairs)
+
+
+def build_destination_allocation_details(group):
+    """保留合并车次内各目的仓的实际方数和卡板数，供功能二按比例分摊。"""
+    allocations = {}
+    for _, row in group.iterrows():
+        volume = pd.to_numeric(row.get("出库体积", 0), errors="coerce")
+        pallets = pd.to_numeric(row.get("出库卡板数", 0), errors="coerce")
+        volume = 0.0 if pd.isna(volume) else float(volume)
+        pallets = 0.0 if pd.isna(pallets) else float(pallets)
+        product_type = str(row.get("FBA/FBX", "")).strip().upper()
+
+        objects = []
+        if product_type == "FBA":
+            codes = split_values(row.get("FBA仓点代码", ""))
+            objects = [("FBA", "FBA", code) for code in codes]
+        elif product_type == "FBX":
+            codes = split_values(row.get("FBX代码", ""))
+            platforms = split_values(row.get("平台名称", ""))
+            platforms = [p for p in platforms if p != "非平台/未知"]
+            if len(platforms) == len(codes):
+                objects = [("FBX平台仓", platform, code) for platform, code in zip(platforms, codes)]
+            elif codes:
+                platform = platforms[0] if len(platforms) == 1 else ""
+                objects = [("FBX平台仓", platform, code) for code in codes]
+
+        if not objects:
+            continue
+        object_count = len(objects)
+        for object_type, platform, code in objects:
+            key = (object_type, platform, code)
+            current = allocations.setdefault(
+                key,
+                {
+                    "对象类型": object_type,
+                    "平台": platform,
+                    "仓点代码": code,
+                    "出库体积": 0.0,
+                    "出库卡板数": 0.0,
+                },
+            )
+            current["出库体积"] += volume / object_count
+            current["出库卡板数"] += pallets / object_count
+
+    details = list(allocations.values())
+    return json.dumps(details, ensure_ascii=False, separators=(",", ":")) if details else ""
 
 
 def normalize_zip_for_line(value):
@@ -337,6 +384,8 @@ def build_cleaned_batches_from_detail(valid_detail):
             loading = resolve_group_loading(processors.original_or_standard_group_values(
                 group, "装车类型", "装车类型标准值", lambda value: processors.normalize_loading_type(value, "FTL")[0]
             ))
+            if ("53" in vehicle or "大车" in vehicle) and loading not in ["卡板", "地板"]:
+                loading = "卡板"
             start_time = group["出库时间"].min()
             end_time = group["签收时间"].max()
             duration = (end_time - start_time).total_seconds() / 86400 if pd.notna(start_time) and pd.notna(end_time) else np.nan
@@ -350,6 +399,7 @@ def build_cleaned_batches_from_detail(valid_detail):
                 "批次出库时间": start_time, "批次签收时间": end_time, "派送时效": duration, "出库体积": group["出库体积"].sum(), "出库卡板数": group["出库卡板数"].sum(), "派送成本": group["派送成本"].sum(),
                 "FBA出库体积": fba_volume, "FBX出库体积": fbx_volume, "系统产品类型": product_summary_type(fba_volume, fbx_volume, group["系统产品类型"].astype(str).tolist()), "主产品类型": "FBA" if fba_volume >= fbx_volume and fba_volume > 0 else ("FBX" if fbx_volume > 0 else "未知"),
                 "平台名称": combine_unique(group["平台名称"]), "FBX代码集合": combine_unique(group["FBX代码"]), "平台仓代码集合": combine_unique(group["FBX代码"]), "平台仓配对集合": combine_platform_code_pairs(group), "FBA仓点代码集合": combine_unique(group["FBA仓点代码"]), "标准邮编集合": combine_unique(group["标准邮编"]), "邮编前三位集合": combine_unique(group["邮编前三位"]), "目的州": combine_unique(group["目的州"]), "邮编来源": combine_unique(group["邮编来源"]),
+                "目的仓点分配明细": build_destination_allocation_details(group),
                 "是否混合目的地": (fba_volume > 0 and fbx_volume > 0), "是否混装": len(set([x for x in group["装车类型标准值"].astype(str) if not processors.is_blank(x)])) > 1,
                 "备注": combine_unique(group["备注"]),
             })
@@ -362,6 +412,7 @@ def build_cleaned_batches_from_detail(valid_detail):
                 "出库类型": r.get("出库类型", ""), "业务场景": r.get("业务场景", ""), "调入仓库": r.get("调入仓库", ""), "批次出库时间": r.get("出库时间", pd.NaT), "批次签收时间": r.get("签收时间", pd.NaT), "派送时效": r.get("派送时效", np.nan),
                 "出库体积": r.get("出库体积", 0), "出库卡板数": r.get("出库卡板数", 0), "派送成本": r.get("派送成本", 0), "FBA出库体积": r.get("出库体积", 0) if product_group == "FBA" else 0, "FBX出库体积": r.get("出库体积", 0) if product_group == "FBX" else 0,
                 "系统产品类型": r.get("系统产品类型", ""), "主产品类型": product_group, "平台名称": r.get("平台名称", ""), "FBX代码集合": r.get("FBX代码", ""), "平台仓代码集合": r.get("FBX代码", ""), "平台仓配对集合": f"{r.get('平台名称', '')}||{r.get('FBX代码', '')}" if product_group == "FBX" and not processors.is_blank(r.get("FBX代码", "")) else "", "FBA仓点代码集合": r.get("FBA仓点代码", ""), "标准邮编集合": r.get("标准邮编", ""), "邮编前三位集合": r.get("邮编前三位", ""), "目的州": r.get("目的州", ""), "邮编来源": r.get("邮编来源", ""), "是否混合目的地": False, "是否混装": False,
+                "目的仓点分配明细": build_destination_allocation_details(pd.DataFrame([r])),
                 "备注": r.get("备注", ""),
             })
     result = pd.DataFrame(rows)
