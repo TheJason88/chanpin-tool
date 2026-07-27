@@ -283,16 +283,27 @@ class MultiUnloadAverageTests(unittest.TestCase):
             pd.DataFrame(columns=["批次号", "标准邮编"]),
             period_type="按月统计",
         )
-        cost_ftl = metrics["成本FTL"]
-        cost_ltl = metrics["成本LTL"]
-        station_cost_ftl = cost_ftl.loc[cost_ftl["指标名称"] == "FBA及FBX平台仓成本"]
+        price_reference = metrics["每方价格参考"]
+        type_price_reference = metrics["分类型价格参考"]
 
-        self.assertEqual(station_cost_ftl["总出库体积"].sum(), 106)
-        self.assertEqual(station_cost_ftl["总派送成本"].sum(), 1060)
-        self.assertEqual(set(station_cost_ftl["车型装车分组"]), {"大车卡板", "大车地板"})
-        self.assertEqual(cost_ltl["总出库体积"].sum(), 60)
-        self.assertEqual(cost_ltl["总派送成本"].sum(), 300)
-        self.assertEqual(cost_ltl["车型装车分组"].unique().tolist(), ["LTL"])
+        self.assertEqual(price_reference["仓点代码"].tolist(), ["ONT8"])
+        self.assertEqual(price_reference.iloc[0]["总出库体积"], 166)
+        self.assertEqual(price_reference.iloc[0]["总派送成本"], 1360)
+        self.assertEqual(price_reference.iloc[0]["每方价格参考"], round(1360 / 166, 2))
+        self.assertEqual(
+            type_price_reference["成本计算类型"].tolist(),
+            ["大车地板", "大车卡板", "LTL"],
+        )
+        ltl = type_price_reference.loc[type_price_reference["成本计算类型"] == "LTL"].iloc[0]
+        self.assertEqual(ltl["总出库体积"], 60)
+        self.assertEqual(ltl["总派送成本"], 300)
+        self.assertEqual(ltl["目的地总出库体积"], 166)
+        floor = type_price_reference.loc[
+            type_price_reference["成本计算类型"] == "大车地板"
+        ].iloc[0]
+        self.assertEqual(floor["平均整车价"], 610)
+        self.assertEqual(floor["P80整车价"], 610)
+        self.assertEqual(floor["每方平均价"], 10)
 
     def test_amazon_freight_carrier_rows_are_ftl_without_false_trip_merge(self):
         raw = pd.DataFrame([
@@ -379,7 +390,65 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(fbx["总出库卡板数"], 1)
         self.assertEqual(fbx["总派送成本"], 90)
 
-    def test_stage2_workbook_splits_ftl_and_ltl_cost_sheets_end_to_end(self):
+    def test_cost_price_reference_uses_weighted_totals_and_destination_volume_order(self):
+        cost_ftl = pd.DataFrame([
+            {
+                "仓库": "LA", "统计周期": "2026-W30", "对象类型": "FBA", "平台": "",
+                "仓点代码": "ONT8", "车型装车分组": "大车地板",
+                "总出库体积": 10, "总出库卡板数": 2, "总派送成本": 100,
+                "平均整车价": 88, "P80整车价": 99, "每方平均价": 12.3,
+            },
+            {
+                "仓库": "LA", "统计周期": "2026-W31", "对象类型": "FBA", "平台": "",
+                "仓点代码": "ONT8", "车型装车分组": "小车",
+                "总出库体积": 30, "总出库卡板数": 6, "总派送成本": 600,
+            },
+            {
+                "仓库": "LA", "统计周期": "2026-W31", "对象类型": "FBA", "平台": "",
+                "仓点代码": "LAX9", "车型装车分组": "大车卡板",
+                "总出库体积": 60, "总出库卡板数": 12, "总派送成本": 600,
+            },
+        ])
+        cost_ltl = pd.DataFrame([
+            {
+                "仓库": "LA", "统计周期": "2026-W31", "对象类型": "FBA", "平台": "",
+                "仓点代码": "ONT8", "车型装车分组": "LTL",
+                "总出库体积": 10, "总出库卡板数": 1, "总派送成本": 300,
+            },
+        ])
+
+        price_reference, type_price_reference = (
+            delivery_match_adapter.build_cost_price_reference_reports(cost_ftl, cost_ltl)
+        )
+
+        self.assertEqual(price_reference["仓点代码"].tolist(), ["LAX9", "ONT8"])
+        self.assertEqual(price_reference["排名"].tolist(), [1, 2])
+        ont8 = price_reference.loc[price_reference["仓点代码"] == "ONT8"].iloc[0]
+        self.assertEqual(ont8["统计周期范围"], "2026-W30 / 2026-W31")
+        self.assertEqual(ont8["总出库体积"], 50)
+        self.assertEqual(ont8["总派送成本"], 1000)
+        self.assertEqual(ont8["每方价格参考"], 20)
+
+        ont8_types = type_price_reference.loc[
+            type_price_reference["仓点代码"] == "ONT8"
+        ]
+        self.assertEqual(
+            ont8_types["成本计算类型"].tolist(),
+            ["大车地板", "小车", "LTL"],
+        )
+        self.assertTrue(ont8_types["目的地总出库体积"].eq(50).all())
+        self.assertEqual(ont8_types["每方价格参考"].tolist(), [10, 20, 30])
+        floor = ont8_types.loc[ont8_types["成本计算类型"] == "大车地板"].iloc[0]
+        self.assertEqual(floor["平均整车价"], 88)
+        self.assertEqual(floor["P80整车价"], 99)
+        self.assertEqual(floor["每方平均价"], 12.3)
+        self.assertEqual(floor["每方价格参考"], 10)
+        self.assertEqual(
+            type_price_reference["仓点代码"].tolist(),
+            ["LAX9", "ONT8", "ONT8", "ONT8"],
+        )
+
+    def test_stage2_workbook_combines_cost_price_reference_sheets_end_to_end(self):
         source = pd.DataFrame([
             {
                 "仓库": "LA", "出库时间": "2026-07-20", "签收时间": "2026-07-22",
@@ -409,20 +478,40 @@ class MultiUnloadAverageTests(unittest.TestCase):
             period_type="按月统计",
         )
 
-        self.assertIn("成本FTL", metrics)
-        self.assertIn("成本LTL", metrics)
-        ltl = metrics["成本LTL"]
-        self.assertEqual(set(ltl["仓点代码"]), {"ONT8", "16号仓"})
-        self.assertEqual(ltl["总出库体积"].sum(), 14)
-        self.assertEqual(ltl["总出库卡板数"].sum(), 3)
-        self.assertEqual(ltl["总派送成本"].sum(), 210)
-        self.assertNotIn("平均整车价", ltl.columns)
-        self.assertNotIn("P80整车价", ltl.columns)
+        self.assertIn("每方价格参考", metrics)
+        self.assertIn("分类型价格参考", metrics)
+        self.assertNotIn("成本FTL", metrics)
+        self.assertNotIn("成本LTL", metrics)
+
+        price_reference = metrics["每方价格参考"]
+        self.assertEqual(price_reference["仓点代码"].tolist(), ["ONT8", "16号仓"])
+        self.assertEqual(price_reference["排名"].tolist(), [1, 2])
+        ont8 = price_reference.loc[price_reference["仓点代码"] == "ONT8"].iloc[0]
+        self.assertEqual(ont8["总出库体积"], 38)
+        self.assertEqual(ont8["总出库卡板数"], 12)
+        self.assertEqual(ont8["总派送成本"], 420)
+        self.assertEqual(ont8["每方价格参考"], round(420 / 38, 2))
+
+        type_price_reference = metrics["分类型价格参考"]
+        self.assertEqual(
+            type_price_reference[["仓点代码", "成本计算类型"]].values.tolist(),
+            [["ONT8", "大车卡板"], ["ONT8", "LTL"], ["16号仓", "LTL"]],
+        )
+        self.assertEqual(type_price_reference["总出库体积"].sum(), 44)
+        self.assertEqual(type_price_reference["总出库卡板数"].sum(), 13)
+        self.assertEqual(type_price_reference["总派送成本"].sum(), 510)
+        ftl_row = type_price_reference.loc[
+            type_price_reference["成本计算类型"] == "大车卡板"
+        ].iloc[0]
+        self.assertIn("平均整车价", type_price_reference.columns)
+        self.assertEqual(ftl_row["平均整车价"], 300)
 
         workbook = tool_common.write_sheets_to_excel(metrics)
         xls = pd.ExcelFile(workbook)
-        self.assertIn("成本FTL", xls.sheet_names)
-        self.assertIn("成本LTL", xls.sheet_names)
+        self.assertIn("每方价格参考", xls.sheet_names)
+        self.assertIn("分类型价格参考", xls.sheet_names)
+        self.assertNotIn("成本FTL", xls.sheet_names)
+        self.assertNotIn("成本LTL", xls.sheet_names)
 
     def test_added_fba_references_fill_zip_state_and_station_code(self):
         cases = [

@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-07-23-amazon-freight-v4"
+RUNTIME_SCHEMA_VERSION = "2026-07-27-cost-price-reference-v5"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
@@ -627,6 +627,10 @@ def _patch_stage2_transfer_sheet():
 
         cost_ftl = delivery_match_adapter.build_station_cost_report(matched)
         cost_ltl = delivery_match_adapter.build_ltl_station_cost_report(matched)
+        price_reference, type_price_reference = delivery_match_adapter.build_cost_price_reference_reports(
+            cost_ftl,
+            cost_ltl,
+        )
         transfer_report = _build_transfer_report(matched)
         if "目的地邮编待补充" in matched.columns:
             zip_audit = matched[tool_common.normalize_boolean_series(matched["目的地邮编待补充"])].copy()
@@ -640,8 +644,8 @@ def _patch_stage2_transfer_sheet():
             "发车量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(dispatch, "发车量"), "发车量"),
             "派送时效": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(timing, "派送时效"), "派送时效"),
             "调拨数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(transfer_report, "调拨数据"), "调拨数据"),
-            "成本FTL": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(cost_ftl, "成本"), "成本"),
-            "成本LTL": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(cost_ltl, "成本"), "成本"),
+            "每方价格参考": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(price_reference, "成本"), "成本"),
+            "分类型价格参考": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(type_price_reference, "成本"), "成本"),
             "派送二_匹配后合并数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(matched, "明细"), "明细"),
             "邮编异常审核": delivery_match_adapter._finalize_zip_audit_sheet(zip_audit),
             "区域识别规则": delivery_workflow_module.REGION_RULES_DF,
