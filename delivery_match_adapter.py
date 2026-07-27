@@ -1,3 +1,4 @@
+import json
 import re
 
 import pandas as pd
@@ -21,7 +22,7 @@ INVALID_LABEL_KEYWORDS = ["盈仓", "未知", "非平台", "其他"]
 ZIP_FILL_COL = "补充标准邮编"
 STATE_FILL_COL = "补充目的州"
 AUDIT_FILL_COLS = [ZIP_FILL_COL, STATE_FILL_COL]
-INTEGER_COLUMNS = ["排名", "车次数", "发车数", "派送数", "出库卡板数"]
+INTEGER_COLUMNS = ["排名", "发车数", "派送数", "出库卡板数"]
 DECIMAL_COLUMNS = [
     "数值", "占比", "出库体积", "FBA出库体积", "FBX出库体积", "派送成本", "派送时效",
     "总出库体积", "总派送成本", "平均整车价", "每方平均价", "平均每车出库体积",
@@ -179,9 +180,12 @@ def _format_numbers(df, sheet_type=""):
                 continue
             out[col] = pd.to_numeric(out[col], errors="coerce").round(2)
 
-    # 如果车次数因为历史分摊逻辑出现小数，统一改成整数计数口径。
     if "车次数" in out.columns:
-        out["车次数"] = pd.to_numeric(out["车次数"], errors="coerce").round(0).astype("Int64")
+        values = pd.to_numeric(out["车次数"], errors="coerce")
+        if sheet_type == "成本":
+            out["车次数"] = values.round(2)
+        else:
+            out["车次数"] = values.round(0).astype("Int64")
     return out
 
 
@@ -533,8 +537,67 @@ def _cost_vehicle_group(row):
             return "大车卡板"
         if "地板" in loading:
             return "大车地板"
-        return "大车未知装车"
+        return "大车卡板"
     return "未知车型"
+
+
+def _parse_destination_allocation_details(row, object_type):
+    text = row.get("目的仓点分配明细", "")
+    if _is_blank(text):
+        return []
+    try:
+        values = json.loads(str(text))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    expected_type = object_type if object_type == "FBA" else "FBX平台仓"
+    allocations = []
+    for value in values if isinstance(values, list) else []:
+        if not isinstance(value, dict) or value.get("对象类型") != expected_type:
+            continue
+        code = str(value.get("仓点代码", "")).strip()
+        platform = str(value.get("平台", "")).strip()
+        volume = pd.to_numeric(value.get("出库体积", 0), errors="coerce")
+        pallets = pd.to_numeric(value.get("出库卡板数", 0), errors="coerce")
+        if not code or pd.isna(volume) or float(volume) <= 0:
+            continue
+        if expected_type == "FBX平台仓" and (
+            not _valid_platform_label(code)
+            or (platform and not _valid_platform_label(platform))
+        ):
+            continue
+        allocations.append({
+            "平台": "FBA" if expected_type == "FBA" else platform,
+            "仓点代码": code,
+            "出库体积": float(volume),
+            "出库卡板数": 0.0 if pd.isna(pallets) else float(pallets),
+        })
+    return allocations
+
+
+def _fallback_destination_objects(row, object_type):
+    objects = []
+    if object_type == "FBA":
+        for code in _split_values(row.get("FBA仓点代码集合", "")):
+            if code:
+                objects.append(("FBA", code))
+    else:
+        pairs = [p for p in str(row.get("平台仓配对集合", "")).split(";") if p.strip() and "||" in p]
+        if pairs:
+            for pair in pairs:
+                platform, code = pair.split("||", 1)
+                if _valid_platform_label(platform) and _valid_platform_label(code):
+                    objects.append((platform, code))
+        else:
+            code_values = row.get("FBX代码集合", row.get("平台仓代码集合", ""))
+            codes = [c for c in _split_values(code_values) if _valid_platform_label(c)]
+            platforms = [p for p in _split_values(row.get("平台名称", "")) if _valid_platform_label(p)]
+            if len(platforms) == len(codes) and codes:
+                objects.extend(list(zip(platforms, codes)))
+            elif codes:
+                platform = platforms[0] if len(platforms) == 1 else ""
+                for code in codes:
+                    objects.append((platform, code))
+    return objects
 
 
 def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
@@ -553,40 +616,56 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
         pallets = 0 if pd.isna(pallets) else float(pallets)
         if volume <= 0 and cost <= 0:
             continue
-        objects = []
-        if object_type == "FBA":
-            for code in _split_values(row.get("FBA仓点代码集合", "")):
-                if code:
-                    objects.append(("FBA", code))
+
+        allocations = _parse_destination_allocation_details(row, object_type)
+        expanded_objects = []
+        if allocations:
+            allocated_volume = sum(item["出库体积"] for item in allocations)
+            denominator = max(volume, allocated_volume)
+            if denominator <= 0:
+                continue
+            for item in allocations:
+                trip_share = item["出库体积"] / denominator
+                expanded_objects.append({
+                    "平台": item["平台"],
+                    "仓点代码": item["仓点代码"],
+                    "出库体积": item["出库体积"],
+                    "出库卡板数": item["出库卡板数"],
+                    "派送成本": cost * trip_share,
+                    "车次数": trip_share,
+                    "仓点分摊口径": "批次实际体积比例",
+                })
         else:
-            pairs = [p for p in str(row.get("平台仓配对集合", "")).split(";") if p.strip() and "||" in p]
-            if pairs:
-                for pair in pairs:
-                    platform, code = pair.split("||", 1)
-                    if _valid_platform_label(platform) and _valid_platform_label(code):
-                        objects.append((platform, code))
-            else:
-                code_values = row.get("FBX代码集合", row.get("平台仓代码集合", ""))
-                codes = [c for c in _split_values(code_values) if _valid_platform_label(c)]
-                platforms = [p for p in _split_values(row.get("平台名称", "")) if _valid_platform_label(p)]
-                if len(platforms) == len(codes) and codes:
-                    objects.extend(list(zip(platforms, codes)))
-                elif codes:
-                    platform = platforms[0] if len(platforms) == 1 else ""
-                    for code in codes:
-                        objects.append((platform, code))
-        if not objects:
-            continue
-        share_volume = volume / len(objects)
-        share_cost = cost / len(objects)
-        share_pallets = pallets / len(objects)
-        for platform, code in objects:
+            objects = _fallback_destination_objects(row, object_type)
+            if not objects:
+                continue
+            object_count = len(objects)
+            for platform, code in objects:
+                expanded_objects.append({
+                    "平台": platform,
+                    "仓点代码": code,
+                    "出库体积": volume / object_count,
+                    "出库卡板数": pallets / object_count,
+                    "派送成本": cost / object_count,
+                    "车次数": 1 / object_count,
+                    "仓点分摊口径": "仓点等分回退（缺少批次体积分配）",
+                })
+
+        for item in expanded_objects:
             rows.append({
                 "仓库": row.get("仓库", ""), "统计周期": row.get("统计周期", ""),
                 "对象类型": object_type if object_type == "FBA" else "FBX平台仓",
-                "平台": platform if object_type != "FBA" else "FBA", "仓点代码": code,
-                "车型装车分组": vehicle_group, "车次数": 1,
-                "出库体积": share_volume, "出库卡板数": share_pallets, "派送成本": share_cost,
+                "平台": item["平台"] if object_type != "FBA" else "FBA",
+                "仓点代码": item["仓点代码"],
+                "车型装车分组": vehicle_group,
+                "车次数": item["车次数"],
+                "出库体积": item["出库体积"],
+                "出库卡板数": item["出库卡板数"],
+                "派送成本": item["派送成本"],
+                "整车出库体积": volume,
+                "整车出库卡板数": pallets,
+                "整车派送成本": cost,
+                "仓点分摊口径": item["仓点分摊口径"],
             })
     return pd.DataFrame(rows)
 
@@ -655,11 +734,21 @@ def build_station_cost_report(matched):
             total_cost = group["派送成本"].sum()
             if total_volume <= 0 and total_cost <= 0:
                 continue
-            average_group = processors.regular_delivery_average_sample_rows(group)
+            average_source = group.copy()
+            average_source["出库体积"] = average_source["整车出库体积"]
+            average_source["出库卡板数"] = average_source["整车出库卡板数"]
+            average_source["派送成本"] = average_source["整车派送成本"]
+            average_group = processors.regular_delivery_average_sample_rows(average_source)
+            allocation_methods = " / ".join(
+                dict.fromkeys(
+                    text for text in group["仓点分摊口径"].fillna("").astype(str)
+                    if text.strip()
+                )
+            )
             row = dict(zip(group_cols, keys))
             row.update({
                 "指标名称": "FBA及FBX平台仓成本",
-                "车次数": int(group["车次数"].sum()),
+                "车次数": group["车次数"].sum(),
                 "总出库体积": total_volume,
                 "总出库卡板数": total_pallets,
                 "总派送成本": total_cost,
@@ -670,6 +759,7 @@ def build_station_cost_report(matched):
                 "P80每车出库体积": processors.safe_p80(average_group["出库体积"]),
                 "平均每车出库卡板数": average_group["出库卡板数"].mean() if not average_group.empty else pd.NA,
                 "P80每车出库卡板数": processors.safe_p80(average_group["出库卡板数"]),
+                "仓点分摊口径": allocation_methods,
             })
             rows.append(row)
     return pd.DataFrame(rows)
@@ -763,9 +853,9 @@ def build_cost_price_reference_reports(cost_ftl, cost_ltl):
     type_preferred_columns = [
         "排名", "仓库", "对象类型", "平台", "仓点代码", "统计周期",
         "统计周期范围", "目的地总出库体积", "成本计算类型",
-        "细分货量方数", "整车价格", "每方成本",
+        "车次数", "细分货量方数", "整车价格", "每方成本", "仓点分摊口径",
         "总出库体积", "总出库卡板数", "总派送成本",
-        "指标名称", "车次数", "平均整车价", "P80整车价", "每方平均价",
+        "指标名称", "平均整车价", "P80整车价", "每方平均价",
         "平均每车出库体积", "P80每车出库体积",
         "平均每车出库卡板数", "P80每车出库卡板数",
     ]
