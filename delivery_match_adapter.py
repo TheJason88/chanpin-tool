@@ -556,8 +556,10 @@ def _parse_destination_allocation_details(row, object_type):
             continue
         code = str(value.get("仓点代码", "")).strip()
         platform = str(value.get("平台", "")).strip()
+        batch_no = str(value.get("批次号", "")).strip()
         volume = pd.to_numeric(value.get("出库体积", 0), errors="coerce")
         pallets = pd.to_numeric(value.get("出库卡板数", 0), errors="coerce")
+        cost = pd.to_numeric(value.get("派送成本", 0), errors="coerce")
         if not code or pd.isna(volume) or float(volume) <= 0:
             continue
         if expected_type == "FBX平台仓" and (
@@ -568,8 +570,10 @@ def _parse_destination_allocation_details(row, object_type):
         allocations.append({
             "平台": "FBA" if expected_type == "FBA" else platform,
             "仓点代码": code,
+            "批次号": batch_no,
             "出库体积": float(volume),
             "出库卡板数": 0.0 if pd.isna(pallets) else float(pallets),
+            "派送成本": 0.0 if pd.isna(cost) else float(cost),
         })
     return allocations
 
@@ -604,7 +608,7 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
     rows = []
     if df.empty:
         return pd.DataFrame()
-    for _, row in df.iterrows():
+    for source_index, row in df.iterrows():
         vehicle_group = vehicle_group_override or _cost_vehicle_group(row)
         if vehicle_group not in ["小车", "大车卡板", "大车地板", "大车未知装车", "LTL"]:
             continue
@@ -616,6 +620,11 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
         pallets = 0 if pd.isna(pallets) else float(pallets)
         if volume <= 0 and cost <= 0:
             continue
+        trip_record_id = str(row.get("分析批次ID", "")).strip()
+        if _is_blank(trip_record_id):
+            warehouse = str(row.get("仓库", "")).strip()
+            trip_no = str(row.get("车次号", "")).strip()
+            trip_record_id = f"{warehouse}||{trip_no}" if trip_no else f"{warehouse}||SOURCE-{source_index}"
 
         allocations = _parse_destination_allocation_details(row, object_type)
         expanded_objects = []
@@ -629,11 +638,12 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
                 expanded_objects.append({
                     "平台": item["平台"],
                     "仓点代码": item["仓点代码"],
+                    "批次号": item["批次号"],
                     "出库体积": item["出库体积"],
                     "出库卡板数": item["出库卡板数"],
-                    "派送成本": cost * trip_share,
+                    "派送成本": item["派送成本"],
                     "车次数": trip_share,
-                    "仓点分摊口径": "批次实际体积比例",
+                    "仓点分摊口径": "批次成本原值+体积占比车次",
                 })
         else:
             objects = _fallback_destination_objects(row, object_type)
@@ -644,11 +654,12 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
                 expanded_objects.append({
                     "平台": platform,
                     "仓点代码": code,
+                    "批次号": str(row.get("批次号集合", "")).strip(),
                     "出库体积": volume / object_count,
                     "出库卡板数": pallets / object_count,
                     "派送成本": cost / object_count,
                     "车次数": 1 / object_count,
-                    "仓点分摊口径": "仓点等分回退（缺少批次体积分配）",
+                    "仓点分摊口径": "仓点等分回退（缺少批次成本/体积分配）",
                 })
 
         for item in expanded_objects:
@@ -657,6 +668,7 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
                 "对象类型": object_type if object_type == "FBA" else "FBX平台仓",
                 "平台": item["平台"] if object_type != "FBA" else "FBA",
                 "仓点代码": item["仓点代码"],
+                "批次号": item["批次号"],
                 "车型装车分组": vehicle_group,
                 "车次数": item["车次数"],
                 "出库体积": item["出库体积"],
@@ -665,6 +677,7 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
                 "整车出库体积": volume,
                 "整车出库卡板数": pallets,
                 "整车派送成本": cost,
+                "整车记录ID": trip_record_id,
                 "仓点分摊口径": item["仓点分摊口径"],
             })
     return pd.DataFrame(rows)
@@ -724,8 +737,8 @@ def build_station_cost_report(matched):
         _expand_cost_by_station(cost_source[cost_source["主产品类型"] == "FBX"], "FBX平台仓"),
     ], ignore_index=True)
     if not expanded.empty:
-        # 在明细聚合前统一平台/仓点大小写，避免导出层为了合并大小写重复项
-        # 再次按“总额/车次数”重算并覆盖已筛选样本的平均值与P80。
+        # 在明细聚合前统一平台/仓点大小写。成本指标保持批次粒度，
+        # 整车装载指标按完整车次去重，不能把两种粒度混成同一个平均样本。
         expanded = tool_common.normalize_case_insensitive_labels(expanded)
         group_cols = ["仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组"]
         for keys, group in expanded.groupby(group_cols, dropna=False):
@@ -734,11 +747,16 @@ def build_station_cost_report(matched):
             total_cost = group["派送成本"].sum()
             if total_volume <= 0 and total_cost <= 0:
                 continue
-            average_source = group.copy()
-            average_source["出库体积"] = average_source["整车出库体积"]
-            average_source["出库卡板数"] = average_source["整车出库卡板数"]
-            average_source["派送成本"] = average_source["整车派送成本"]
-            average_group = processors.regular_delivery_average_sample_rows(average_source)
+            cost_sample_source = group.copy()
+            cost_sample_source["批次出库体积"] = cost_sample_source["出库体积"]
+            cost_sample_source["批次派送成本"] = cost_sample_source["派送成本"]
+            cost_sample_source["出库体积"] = cost_sample_source["整车出库体积"]
+            cost_sample = processors.regular_delivery_average_sample_rows(cost_sample_source)
+
+            trip_sample_source = group.drop_duplicates("整车记录ID").copy()
+            trip_sample_source["出库体积"] = trip_sample_source["整车出库体积"]
+            trip_sample_source["出库卡板数"] = trip_sample_source["整车出库卡板数"]
+            trip_sample = processors.regular_delivery_average_sample_rows(trip_sample_source)
             allocation_methods = " / ".join(
                 dict.fromkeys(
                     text for text in group["仓点分摊口径"].fillna("").astype(str)
@@ -752,13 +770,13 @@ def build_station_cost_report(matched):
                 "总出库体积": total_volume,
                 "总出库卡板数": total_pallets,
                 "总派送成本": total_cost,
-                "平均整车价": average_group["派送成本"].mean() if not average_group.empty else pd.NA,
-                "P80整车价": processors.safe_p80(average_group["派送成本"]),
-                "每方平均价": processors.mean_detail_ratio(average_group, "派送成本", "出库体积"),
-                "平均每车出库体积": average_group["出库体积"].mean() if not average_group.empty else pd.NA,
-                "P80每车出库体积": processors.safe_p80(average_group["出库体积"]),
-                "平均每车出库卡板数": average_group["出库卡板数"].mean() if not average_group.empty else pd.NA,
-                "P80每车出库卡板数": processors.safe_p80(average_group["出库卡板数"]),
+                "平均整车价": cost_sample["批次派送成本"].mean() if not cost_sample.empty else pd.NA,
+                "P80整车价": processors.safe_p80(cost_sample["批次派送成本"]),
+                "每方平均价": processors.mean_detail_ratio(cost_sample, "批次派送成本", "批次出库体积"),
+                "平均每车出库体积": trip_sample["出库体积"].mean() if not trip_sample.empty else pd.NA,
+                "P80每车出库体积": processors.safe_p80(trip_sample["出库体积"]),
+                "平均每车出库卡板数": trip_sample["出库卡板数"].mean() if not trip_sample.empty else pd.NA,
+                "P80每车出库卡板数": processors.safe_p80(trip_sample["出库卡板数"]),
                 "仓点分摊口径": allocation_methods,
             })
             rows.append(row)

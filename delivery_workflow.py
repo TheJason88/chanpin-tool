@@ -97,13 +97,20 @@ def combine_platform_code_pairs(group):
 
 
 def build_destination_allocation_details(group):
-    """保留合并车次内各目的仓的实际方数和卡板数，供功能二按比例分摊。"""
-    allocations = {}
+    """保留合并车次内每个批次的目的仓、货量和原始派送成本。
+
+    功能二只用批次体积占整车体积的比例计算车次数；批次派送成本必须原样保留，
+    不能再从整车汇总成本按体积二次分摊。
+    """
+    allocations = []
     for _, row in group.iterrows():
         volume = pd.to_numeric(row.get("出库体积", 0), errors="coerce")
         pallets = pd.to_numeric(row.get("出库卡板数", 0), errors="coerce")
+        cost = pd.to_numeric(row.get("派送成本", 0), errors="coerce")
         volume = 0.0 if pd.isna(volume) else float(volume)
         pallets = 0.0 if pd.isna(pallets) else float(pallets)
+        cost = 0.0 if pd.isna(cost) else float(cost)
+        batch_no = str(row.get("批次号", "")).strip()
         product_type = str(row.get("FBA/FBX", "")).strip().upper()
 
         objects = []
@@ -124,22 +131,17 @@ def build_destination_allocation_details(group):
             continue
         object_count = len(objects)
         for object_type, platform, code in objects:
-            key = (object_type, platform, code)
-            current = allocations.setdefault(
-                key,
-                {
-                    "对象类型": object_type,
-                    "平台": platform,
-                    "仓点代码": code,
-                    "出库体积": 0.0,
-                    "出库卡板数": 0.0,
-                },
-            )
-            current["出库体积"] += volume / object_count
-            current["出库卡板数"] += pallets / object_count
+            allocations.append({
+                "对象类型": object_type,
+                "平台": platform,
+                "仓点代码": code,
+                "批次号": batch_no,
+                "出库体积": volume / object_count,
+                "出库卡板数": pallets / object_count,
+                "派送成本": cost / object_count,
+            })
 
-    details = list(allocations.values())
-    return json.dumps(details, ensure_ascii=False, separators=(",", ":")) if details else ""
+    return json.dumps(allocations, ensure_ascii=False, separators=(",", ":")) if allocations else ""
 
 
 def normalize_zip_for_line(value):
