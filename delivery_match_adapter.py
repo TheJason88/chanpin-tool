@@ -26,7 +26,7 @@ DECIMAL_COLUMNS = [
     "数值", "占比", "出库体积", "FBA出库体积", "FBX出库体积", "派送成本", "派送时效",
     "总出库体积", "总派送成本", "平均整车价", "每方平均价", "平均每车出库体积",
     "P80每车出库体积", "平均每车出库卡板数", "P80每车出库卡板数", "P80整车价",
-    "平均派送时效", "P80派送时效",
+    "平均派送时效", "P80派送时效", "每方价格参考", "目的地总出库体积",
 ]
 
 # 仓间调拨目标仓地址：用于功能二补邮编、识别干线，避免调拨行长期留在邮编异常审核。
@@ -733,6 +733,114 @@ def build_ltl_station_cost_report(matched):
     return result[columns]
 
 
+PRICE_REFERENCE_TYPES = ["大车地板", "大车卡板", "小车", "LTL"]
+PRICE_REFERENCE_TYPE_ORDER = {label: index for index, label in enumerate(PRICE_REFERENCE_TYPES)}
+
+
+def _combine_period_labels(series):
+    values = []
+    for value in series:
+        if _is_blank(value):
+            continue
+        text = str(value).strip()
+        if text not in values:
+            values.append(text)
+    return " / ".join(sorted(values))
+
+
+def build_cost_price_reference_reports(cost_ftl, cost_ltl):
+    """把FTL/LTL成本合并为两个按目的仓点排序的价格参考表。
+
+    只有新增的“每方价格参考”使用总派送成本除以总出库体积。第二张表
+    保留原FTL/LTL成本行及其已有平均值、P80等字段，不重算或覆盖任何
+    原有成本指标。
+    """
+    station_columns = [
+        "排名", "仓库", "对象类型", "平台", "仓点代码", "统计周期范围",
+        "总出库体积", "总出库卡板数", "总派送成本", "每方价格参考",
+    ]
+    type_preferred_columns = [
+        "排名", "仓库", "对象类型", "平台", "仓点代码", "统计周期",
+        "统计周期范围", "目的地总出库体积", "成本计算类型",
+        "总出库体积", "总出库卡板数", "总派送成本", "每方价格参考",
+        "指标名称", "车次数", "平均整车价", "P80整车价", "每方平均价",
+        "平均每车出库体积", "P80每车出库体积",
+        "平均每车出库卡板数", "P80每车出库卡板数",
+    ]
+
+    frames = []
+    for source in [cost_ftl, cost_ltl]:
+        if source is None or source.empty:
+            continue
+        part = source.copy()
+        for col in [
+            "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组",
+            "总出库体积", "总出库卡板数", "总派送成本",
+        ]:
+            if col not in part.columns:
+                part[col] = 0 if col.startswith("总") else ""
+        part = part[
+            part["对象类型"].isin(["FBA", "FBX平台仓"])
+            & part["车型装车分组"].isin(PRICE_REFERENCE_TYPES)
+        ].copy()
+        for col in ["总出库体积", "总出库卡板数", "总派送成本"]:
+            part[col] = pd.to_numeric(part[col], errors="coerce").fillna(0)
+        part = part[part["总出库体积"].gt(0)].copy()
+        if not part.empty:
+            frames.append(part)
+
+    if not frames:
+        return (
+            pd.DataFrame(columns=station_columns),
+            pd.DataFrame(columns=type_preferred_columns),
+        )
+
+    source = pd.concat(frames, ignore_index=True, sort=False)
+    source = tool_common.normalize_case_insensitive_labels(source)
+    station_keys = ["仓库", "对象类型", "平台", "仓点代码"]
+
+    station = source.groupby(station_keys, dropna=False, as_index=False).agg(
+        统计周期范围=("统计周期", _combine_period_labels),
+        总出库体积=("总出库体积", "sum"),
+        总出库卡板数=("总出库卡板数", "sum"),
+        总派送成本=("总派送成本", "sum"),
+    )
+    station["每方价格参考"] = station.apply(
+        lambda row: processors.safe_divide(row["总派送成本"], row["总出库体积"]),
+        axis=1,
+    )
+    station = station.sort_values(
+        ["仓库", "总出库体积", "对象类型", "平台", "仓点代码"],
+        ascending=[True, False, True, True, True],
+        kind="stable",
+    ).reset_index(drop=True)
+    station["排名"] = station.groupby("仓库").cumcount() + 1
+
+    cost_type = source.copy()
+    cost_type["每方价格参考"] = cost_type.apply(
+        lambda row: processors.safe_divide(row["总派送成本"], row["总出库体积"]),
+        axis=1,
+    )
+    cost_type = cost_type.rename(columns={"车型装车分组": "成本计算类型"})
+    destination_meta = station[
+        station_keys + ["排名", "统计周期范围", "总出库体积"]
+    ].rename(columns={"总出库体积": "目的地总出库体积"})
+    cost_type = cost_type.merge(destination_meta, on=station_keys, how="left")
+    cost_type["_类型顺序"] = cost_type["成本计算类型"].map(PRICE_REFERENCE_TYPE_ORDER)
+    cost_type = cost_type.sort_values(
+        ["仓库", "排名", "_类型顺序", "统计周期"],
+        ascending=[True, True, True, True],
+        kind="stable",
+    ).drop(columns=["_类型顺序"]).reset_index(drop=True)
+
+    type_columns = [
+        col for col in type_preferred_columns if col in cost_type.columns
+    ] + [
+        col for col in cost_type.columns if col not in type_preferred_columns
+    ]
+    return station[station_columns], cost_type[type_columns]
+
+
 def _safe_round(df, sheet_type):
     # 先按原有逻辑保留两位小数，再把计数列改回整数。
     rounded = processors.round_output_numbers(df, processors.RESULT_DECIMALS) if df is not None else df
@@ -751,6 +859,7 @@ def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_d
         timing = combined[combined["报告部分"].astype(str).str.startswith("3.")].copy()
     cost_ftl = build_station_cost_report(matched)
     cost_ltl = build_ltl_station_cost_report(matched)
+    price_reference, type_price_reference = build_cost_price_reference_reports(cost_ftl, cost_ltl)
     zip_audit = matched[matched["目的地邮编待补充"]].copy() if "目的地邮编待补充" in matched.columns else pd.DataFrame()
     return {
         "货量": _safe_round(_finalize_sheet(volume, "货量"), "货量"),
@@ -758,8 +867,8 @@ def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_d
         "FBX平台仓货量": _safe_round(_finalize_sheet(build_fbx_platform_warehouse_sheet(matched), "FBX平台仓货量"), "FBX平台仓货量"),
         "发车量": _safe_round(_finalize_sheet(dispatch, "发车量"), "发车量"),
         "派送时效": _safe_round(_finalize_sheet(timing, "派送时效"), "派送时效"),
-        "成本FTL": _safe_round(_finalize_sheet(cost_ftl, "成本"), "成本"),
-        "成本LTL": _safe_round(_finalize_sheet(cost_ltl, "成本"), "成本"),
+        "每方价格参考": _safe_round(_finalize_sheet(price_reference, "成本"), "成本"),
+        "分类型价格参考": _safe_round(_finalize_sheet(type_price_reference, "成本"), "成本"),
         "派送二_匹配后合并数据": _safe_round(_finalize_sheet(matched, "明细"), "明细"),
         "邮编异常审核": _finalize_zip_audit_sheet(zip_audit),
         "区域识别规则": delivery_workflow_module.REGION_RULES_DF,
