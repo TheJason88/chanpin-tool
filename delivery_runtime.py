@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-07-27-volume-weighted-destination-trips-v7"
+RUNTIME_SCHEMA_VERSION = "2026-07-27-batch-cost-trip-load-v8"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
