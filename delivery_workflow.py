@@ -375,6 +375,25 @@ def _batch_cost_value(series):
     return float(values.iloc[0]), note
 
 
+def _batch_delivery_truck(series):
+    """返回批次唯一派送卡车；冲突供应商不做归属，但保留批次货量。"""
+    displays = []
+    normalized = {}
+    for value in series:
+        display = re.sub(r"\s+", " ", _clean_text(value)).strip()
+        if not display:
+            continue
+        key = display.casefold()
+        if key not in normalized:
+            normalized[key] = display
+            displays.append(display)
+    if not displays:
+        return "", ""
+    if len(displays) == 1:
+        return displays[0], ""
+    return "", f"同批次存在多个派送卡车：{','.join(displays)}；货量计入占比分母但不归属供应商"
+
+
 def _batch_destination(group):
     """返回批次唯一目的地；一个批次出现多个目的地时不做等分，直接转无效审核。"""
     transfer_target = first_nonblank(group.get("调入仓库", pd.Series(dtype=object)))
@@ -502,6 +521,7 @@ def build_cleaned_batches_from_detail(valid_detail):
         volume = float(group["出库体积"].sum())
         pallets = float(group["出库卡板数"].sum())
         cost, cost_audit = _batch_cost_value(group["派送成本"])
+        delivery_truck, supplier_audit = _batch_delivery_truck(group["派送卡车"])
         destination, destination_error = _batch_destination(group)
 
         product_values = [
@@ -564,6 +584,8 @@ def build_cleaned_batches_from_detail(valid_detail):
             "出库卡板数": pallets,
             "派送成本": cost,
             "批次成本审核": cost_audit,
+            "派送卡车": delivery_truck,
+            "供应商审核": supplier_audit,
             "FBA出库体积": volume if product_group == "FBA" else 0.0,
             "FBX出库体积": volume if product_group == "FBX" else 0.0,
             "系统产品类型": product_group or first_nonblank(group["系统产品类型"]),

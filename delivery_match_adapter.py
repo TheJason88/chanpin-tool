@@ -30,6 +30,8 @@ DECIMAL_COLUMNS = [
     "平均派送时效", "P80派送时效", "每方价格参考", "目的地总出库体积",
     "细分货量方数", "整车价格", "每方成本",
 ]
+DELIVERY_TRUCK_SHARE_COLUMN = "派送卡车使用比例（>10%）"
+DELIVERY_TRUCK_SHARE_THRESHOLD = 0.10
 
 # 仓间调拨目标仓地址：用于功能二补邮编、识别干线，避免调拨行长期留在邮编异常审核。
 TRANSFER_WAREHOUSE_INFO = {
@@ -515,7 +517,14 @@ def _expand_volume_by_codes(df, code_col, volume_col, warehouse_col="仓库", pe
                 for pair in pairs:
                     platform, code = pair.split("||", 1)
                     if _valid_platform_label(platform) and _valid_platform_label(code):
-                        rows.append({"仓库": row.get(warehouse_col, ""), "统计周期": row.get(period_col, ""), "平台": platform, "仓点代码": code, "出库体积": share_volume})
+                        rows.append({
+                            "仓库": row.get(warehouse_col, ""),
+                            "统计周期": row.get(period_col, ""),
+                            "平台": platform,
+                            "仓点代码": code,
+                            "出库体积": share_volume,
+                            "派送卡车": row.get("派送卡车", ""),
+                        })
                 continue
         codes = _split_values(row.get(code_col, "")) if code_col in row.index else []
         if exclude_invalid:
@@ -525,7 +534,58 @@ def _expand_volume_by_codes(df, code_col, volume_col, warehouse_col="仓库", pe
         share_volume = float(volume) / len(codes)
         platform_value = row.get(platform_col, "") if platform_col else ""
         for code in codes:
-            rows.append({"仓库": row.get(warehouse_col, ""), "统计周期": row.get(period_col, ""), "平台": platform_value, "仓点代码": code, "出库体积": share_volume})
+            rows.append({
+                "仓库": row.get(warehouse_col, ""),
+                "统计周期": row.get(period_col, ""),
+                "平台": platform_value,
+                "仓点代码": code,
+                "出库体积": share_volume,
+                "派送卡车": row.get("派送卡车", ""),
+            })
+    return pd.DataFrame(rows)
+
+
+def _normalize_delivery_truck(value):
+    if _is_blank(value):
+        return "", ""
+    display = re.sub(r"\s+", " ", str(value)).strip()
+    return display.casefold(), display
+
+
+def _delivery_truck_share_summary(group):
+    """按批次方数计算派送卡车占比；未知供应商方数只进入分母。"""
+    volumes = pd.to_numeric(group["出库体积"], errors="coerce").fillna(0).clip(lower=0)
+    denominator = float(volumes.sum())
+    if denominator <= 0:
+        return ""
+
+    suppliers = {}
+    for (_, row), volume in zip(group.iterrows(), volumes):
+        key, display = _normalize_delivery_truck(row.get("派送卡车", ""))
+        if not key or float(volume) <= 0:
+            continue
+        if key not in suppliers:
+            suppliers[key] = {"display": display, "volume": 0.0}
+        suppliers[key]["volume"] += float(volume)
+
+    visible = []
+    for key, item in suppliers.items():
+        share = item["volume"] / denominator
+        if share > DELIVERY_TRUCK_SHARE_THRESHOLD:
+            visible.append((share, key, item["display"]))
+    visible.sort(key=lambda item: (-item[0], item[1]))
+    return "；".join(f"{display} {share:.2%}" for share, _, display in visible)
+
+
+def _delivery_truck_share_table(expanded, group_cols):
+    rows = []
+    if expanded.empty:
+        return pd.DataFrame(columns=[*group_cols, DELIVERY_TRUCK_SHARE_COLUMN])
+    for keys, group in expanded.groupby(group_cols, dropna=False, sort=False):
+        key_values = keys if isinstance(keys, tuple) else (keys,)
+        row = dict(zip(group_cols, key_values))
+        row[DELIVERY_TRUCK_SHARE_COLUMN] = _delivery_truck_share_summary(group)
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -715,31 +775,37 @@ def build_fba_rank_sheet(matched):
     source = matched[matched.get("FBA出库体积", 0) > 0].copy() if not matched.empty else pd.DataFrame()
     expanded = _expand_volume_by_codes(source, "FBA仓点代码集合", "FBA出库体积", platform_col=None, exclude_invalid=False)
     if expanded.empty:
-        return pd.DataFrame(columns=["仓库", "统计周期", "排名", "FBA仓点", "出库体积", "占比"])
+        return pd.DataFrame(columns=["仓库", "统计周期", "排名", "FBA仓点", "出库体积", "占比", DELIVERY_TRUCK_SHARE_COLUMN])
+    group_cols = ["仓库", "统计周期", "仓点代码"]
+    supplier_shares = _delivery_truck_share_table(expanded, group_cols)
     agg = expanded.groupby(["仓库", "统计周期", "仓点代码"], dropna=False)["出库体积"].sum().reset_index()
     agg = agg[agg["出库体积"] > 0].sort_values(["仓库", "统计周期", "出库体积"], ascending=[True, True, False])
     total = agg.groupby(["仓库", "统计周期"])["出库体积"].transform("sum")
     agg["占比"] = agg["出库体积"] / total
     agg["排名"] = agg.groupby(["仓库", "统计周期"])["出库体积"].rank(method="first", ascending=False).astype(int)
-    return agg.rename(columns={"仓点代码": "FBA仓点"})[["仓库", "统计周期", "排名", "FBA仓点", "出库体积", "占比"]]
+    agg = agg.merge(supplier_shares, on=group_cols, how="left")
+    return agg.rename(columns={"仓点代码": "FBA仓点"})[["仓库", "统计周期", "排名", "FBA仓点", "出库体积", "占比", DELIVERY_TRUCK_SHARE_COLUMN]]
 
 
 def build_fbx_platform_warehouse_sheet(matched):
     if matched.empty:
-        return pd.DataFrame(columns=["仓库", "统计周期", "排名", "平台仓", "FBX代码", "出库体积", "占比"])
+        return pd.DataFrame(columns=["仓库", "统计周期", "排名", "平台仓", "FBX代码", "出库体积", "占比", DELIVERY_TRUCK_SHARE_COLUMN])
     source = _sync_fbx_code_columns(matched[(matched.get("FBX出库体积", 0) > 0)].copy())
     source = source[source["平台名称"].apply(_valid_platform_label)] if "平台名称" in source.columns else source.iloc[0:0]
     code_col = "FBX代码集合" if "FBX代码集合" in source.columns else "平台仓代码集合"
     expanded = _expand_volume_by_codes(source, code_col, "FBX出库体积", platform_col="平台名称", pair_col="平台仓配对集合", exclude_invalid=True)
     if expanded.empty:
-        return pd.DataFrame(columns=["仓库", "统计周期", "排名", "平台仓", "FBX代码", "出库体积", "占比"])
+        return pd.DataFrame(columns=["仓库", "统计周期", "排名", "平台仓", "FBX代码", "出库体积", "占比", DELIVERY_TRUCK_SHARE_COLUMN])
+    group_cols = ["仓库", "统计周期", "平台", "仓点代码"]
+    supplier_shares = _delivery_truck_share_table(expanded, group_cols)
     agg = expanded.groupby(["仓库", "统计周期", "平台", "仓点代码"], dropna=False)["出库体积"].sum().reset_index()
     agg = agg[(agg["出库体积"] > 0) & agg["平台"].apply(_valid_platform_label) & agg["仓点代码"].apply(_valid_platform_label)]
     agg = agg.sort_values(["仓库", "统计周期", "出库体积"], ascending=[True, True, False])
     total = agg.groupby(["仓库", "统计周期"])["出库体积"].transform("sum")
     agg["占比"] = agg["出库体积"] / total
     agg["排名"] = agg.groupby(["仓库", "统计周期"])["出库体积"].rank(method="first", ascending=False).astype(int)
-    return agg.rename(columns={"平台": "平台仓", "仓点代码": "FBX代码"})[["仓库", "统计周期", "排名", "平台仓", "FBX代码", "出库体积", "占比"]]
+    agg = agg.merge(supplier_shares, on=group_cols, how="left")
+    return agg.rename(columns={"平台": "平台仓", "仓点代码": "FBX代码"})[["仓库", "统计周期", "排名", "平台仓", "FBX代码", "出库体积", "占比", DELIVERY_TRUCK_SHARE_COLUMN]]
 
 
 def build_station_cost_report(matched):
