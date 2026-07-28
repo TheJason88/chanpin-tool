@@ -353,7 +353,120 @@ def main_product_for_dispatch(row):
     return "FBA" if fba >= fbx else "FBX"
 
 
+def _clean_text(value):
+    if processors.is_blank(value):
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "none", "null", "<na>"} else text
+
+
+def _first_numeric(series, default=0.0):
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    return float(values.iloc[0]) if not values.empty else float(default)
+
+
+def _batch_cost_value(series):
+    """一个批次只保留一个原始派送成本，并标识同批次成本冲突。"""
+    values = pd.to_numeric(series, errors="coerce").dropna().astype(float)
+    if values.empty:
+        return 0.0, ""
+    unique_values = list(dict.fromkeys(round(float(value), 6) for value in values))
+    note = "" if len(unique_values) <= 1 else f"同批次存在多个派送成本：{','.join(f'{x:g}' for x in unique_values)}；采用首个有效值"
+    return float(values.iloc[0]), note
+
+
+def _batch_destination(group):
+    """返回批次唯一目的地；一个批次出现多个目的地时不做等分，直接转无效审核。"""
+    transfer_target = first_nonblank(group.get("调入仓库", pd.Series(dtype=object)))
+    transfer_text = " ".join(
+        _clean_text(value)
+        for col in ["出库类型", "业务场景", "备注"]
+        for value in group.get(col, pd.Series(dtype=object))
+        if _clean_text(value)
+    )
+    if _clean_text(transfer_target) or any(keyword in transfer_text for keyword in ["调拨", "仓间", "调入"]):
+        target = _clean_text(transfer_target)
+        if target:
+            return {"对象类型": "其他", "平台": "联宇盈仓", "仓点代码": target}, ""
+
+    products = [
+        _clean_text(value).upper()
+        for value in group.get("FBA/FBX", pd.Series(dtype=object))
+        if _clean_text(value).upper() in {"FBA", "FBX"}
+    ]
+    product_values = list(dict.fromkeys(products))
+    if len(product_values) > 1:
+        return None, "同一批次同时出现FBA和FBX目的地"
+    product = product_values[0] if product_values else ""
+
+    if product == "FBA":
+        codes = []
+        for value in group.get("FBA仓点代码", pd.Series(dtype=object)):
+            codes.extend(split_values(value))
+        codes = list(dict.fromkeys(_clean_text(code).upper() for code in codes if _clean_text(code)))
+        if not codes:
+            raw_destination = first_nonblank(group.get("目的地", pd.Series(dtype=object)))
+            if _clean_text(raw_destination):
+                return {"对象类型": "FBA", "平台": "FBA", "仓点代码": _clean_text(raw_destination)}, ""
+            return None, "缺少FBA目的仓点"
+        if len(codes) != 1:
+            return None, f"同一批次出现多个FBA目的仓点：{','.join(codes)}"
+        return {"对象类型": "FBA", "平台": "FBA", "仓点代码": codes[0]}, ""
+
+    if product == "FBX":
+        codes = []
+        platforms = []
+        for value in group.get("FBX代码", pd.Series(dtype=object)):
+            codes.extend(split_values(value))
+        for value in group.get("平台名称", pd.Series(dtype=object)):
+            platforms.extend(split_values(value))
+        codes = list(dict.fromkeys(_clean_text(code) for code in codes if _clean_text(code)))
+        platforms = list(dict.fromkeys(
+            _clean_text(platform) for platform in platforms
+            if _clean_text(platform) and _clean_text(platform) != "非平台/未知"
+        ))
+        if not codes:
+            raw_destination = first_nonblank(group.get("目的地", pd.Series(dtype=object)))
+            if _clean_text(raw_destination):
+                return {"对象类型": "其他", "平台": platforms[0] if platforms else "", "仓点代码": _clean_text(raw_destination)}, ""
+            return None, "缺少FBX目的仓点"
+        if len(codes) != 1:
+            return None, f"同一批次出现多个FBX目的仓点：{','.join(codes)}"
+        if len(platforms) > 1:
+            return None, f"同一批次出现多个FBX平台：{','.join(platforms)}"
+        return {"对象类型": "FBX平台仓", "平台": platforms[0] if platforms else "", "仓点代码": codes[0]}, ""
+
+    # 调拨或普通商业地址没有FBA/FBX代码时，调入仓、明确目的地或有效邮编均可作为目的地证据。
+    evidence = []
+    for col in ["调入仓库", "目的地", "标准地址", "标准邮编", "目的州"]:
+        if col in group.columns:
+            evidence.extend(_clean_text(value) for value in group[col] if _clean_text(value))
+    if evidence:
+        return {"对象类型": "其他", "平台": "", "仓点代码": evidence[0]}, ""
+    return None, "缺少目的地"
+
+
+def _destination_allocation_json(destination, batch_no, volume, pallets, cost):
+    if not destination:
+        return ""
+    item = {
+        "对象类型": destination["对象类型"],
+        "平台": destination["平台"],
+        "仓点代码": destination["仓点代码"],
+        "批次号": batch_no,
+        "出库体积": float(volume),
+        "出库卡板数": float(pallets),
+        "派送成本": float(cost),
+    }
+    return json.dumps([item], ensure_ascii=False, separators=(",", ":"))
+
+
 def build_cleaned_batches_from_detail(valid_detail):
+    """把派送一整理成一行一个批次，并把车次只作为批次的共享上下文。
+
+    批次字段（目的地、方数、成本、出库/签收时间）绝不再被整车汇总值覆盖。
+    同一真实车次只负责统一最终运输类型、车型/装车方式、整车总量和批次车份额。
+    """
     df = valid_detail.copy()
     if df.empty:
         return pd.DataFrame()
@@ -365,69 +478,167 @@ def build_cleaned_batches_from_detail(valid_detail):
         if col not in df.columns:
             df[col] = pd.NaT
         df[col] = pd.to_datetime(df[col], errors="coerce")
-    for col in ["标准运输类型", "车次号", "派送卡车", "批次号", "仓库", "出库类型", "业务场景", "系统产品类型", "FBA/FBX", "平台名称", "FBX代码", "标准邮编", "邮编前三位", "目的州", "FBA仓点代码", "装车类型", "车型", "装车类型标准值", "车型标准值", "调入仓库", "邮编来源", "备注"]:
+    for col in ["标准运输类型", "车次号", "派送卡车", "批次号", "仓库", "出库类型", "业务场景", "系统产品类型", "FBA/FBX", "平台名称", "FBX代码", "标准邮编", "邮编前三位", "目的州", "FBA仓点代码", "装车类型", "车型", "装车类型标准值", "车型标准值", "调入仓库", "邮编来源", "备注", "目的地", "标准地址"]:
         if col not in df.columns:
             df[col] = ""
+    if "原始行号" not in df.columns:
+        df["原始行号"] = np.arange(2, len(df) + 2)
+
     df = processors.apply_trip_transport_type_rules(df)
     rows = []
-    ftl_df = df[df["标准运输类型"] == "FTL"].copy()
-    ltl_df = df[df["标准运输类型"] != "FTL"].copy()
-    if not ftl_df.empty:
-        ftl_df["车次号"] = ftl_df["车次号"].astype(str).replace({"nan": ""})
-        ftl_df["车次聚合键"] = np.where(
-            ftl_df["车次号"].apply(processors.is_blank),
-            "FTL_NO_TRIP_" + ftl_df["原始行号"].astype(str),
-            ftl_df["仓库"].astype(str).str.upper().str.strip() + "||" + ftl_df["车次号"],
+    df["_批次聚合键"] = df.apply(
+        lambda row: (
+            f"{_clean_text(row.get('仓库')).upper()}||{_clean_text(row.get('批次号'))}"
+            if _clean_text(row.get("批次号"))
+            else f"ROW||{_clean_text(row.get('仓库')).upper()}||{row.get('原始行号')}"
+        ),
+        axis=1,
+    )
+    for batch_key, group in df.groupby("_批次聚合键", dropna=False, sort=False):
+        batch_no = first_nonblank(group["批次号"])
+        warehouse = processors.standardize_warehouse(first_nonblank(group["仓库"]))
+        transport_type = str(first_nonblank(group["标准运输类型"])).upper().strip()
+        transport_type = transport_type if transport_type in {"FTL", "LTL"} else "LTL"
+        volume = float(group["出库体积"].sum())
+        pallets = float(group["出库卡板数"].sum())
+        cost, cost_audit = _batch_cost_value(group["派送成本"])
+        destination, destination_error = _batch_destination(group)
+
+        product_values = [
+            _clean_text(value).upper()
+            for value in group["FBA/FBX"]
+            if _clean_text(value).upper() in {"FBA", "FBX"}
+        ]
+        product_group = list(dict.fromkeys(product_values))[0] if len(set(product_values)) == 1 else ""
+
+        vehicle = resolve_group_vehicle(processors.original_or_standard_group_values(
+            group, "车型", "车型标准值", lambda value: processors.normalize_vehicle_type(value, "FTL")[0]
+        ))
+        loading = resolve_group_loading(processors.original_or_standard_group_values(
+            group, "装车类型", "装车类型标准值", lambda value: processors.normalize_loading_type(value, "FTL")[0]
+        ))
+        if transport_type == "LTL":
+            vehicle, loading = "不适用", "散板"
+        elif ("53" in vehicle or "大车" in vehicle) and loading not in {"卡板", "地板"}:
+            loading = "卡板"
+
+        start_time = group["出库时间"].min()
+        end_time = group["签收时间"].max()
+        duration = (
+            (end_time - start_time).total_seconds() / 86400
+            if pd.notna(start_time) and pd.notna(end_time)
+            else np.nan
         )
-        for trip, group in ftl_df.groupby("车次聚合键", dropna=False):
-            vehicle = resolve_group_vehicle(processors.original_or_standard_group_values(
-                group, "车型", "车型标准值", lambda value: processors.normalize_vehicle_type(value, "FTL")[0]
-            ))
-            loading = resolve_group_loading(processors.original_or_standard_group_values(
-                group, "装车类型", "装车类型标准值", lambda value: processors.normalize_loading_type(value, "FTL")[0]
-            ))
-            if ("53" in vehicle or "大车" in vehicle) and loading not in ["卡板", "地板"]:
-                loading = "卡板"
-            start_time = group["出库时间"].min()
-            end_time = group["签收时间"].max()
-            duration = (end_time - start_time).total_seconds() / 86400 if pd.notna(start_time) and pd.notna(end_time) else np.nan
-            fba_volume = group.loc[group["FBA/FBX"] == "FBA", "出库体积"].sum()
-            fbx_volume = group.loc[group["FBA/FBX"] == "FBX", "出库体积"].sum()
-            rows.append({
-                "分析批次ID": f"FTL_{trip}", "仓库": first_nonblank(group["仓库"]), "标准运输类型": "FTL",
-                "原始运输类型集合": combine_unique(group["原始运输类型集合"]), "运输类型重判原因": first_nonblank(group["运输类型重判原因"]), "派送方式": build_method("FTL", vehicle, loading),
-                "车型标准值": vehicle, "装车类型标准值": loading, "车次号": first_nonblank(group["车次号"]), "批次号集合": combine_unique(group["批次号"]),
-                "出库类型": first_nonblank(group["出库类型"]), "业务场景": first_nonblank(group["业务场景"]), "调入仓库": first_nonblank(group["调入仓库"]),
-                "批次出库时间": start_time, "批次签收时间": end_time, "派送时效": duration, "出库体积": group["出库体积"].sum(), "出库卡板数": group["出库卡板数"].sum(), "派送成本": group["派送成本"].sum(),
-                "FBA出库体积": fba_volume, "FBX出库体积": fbx_volume, "系统产品类型": product_summary_type(fba_volume, fbx_volume, group["系统产品类型"].astype(str).tolist()), "主产品类型": "FBA" if fba_volume >= fbx_volume and fba_volume > 0 else ("FBX" if fbx_volume > 0 else "未知"),
-                "平台名称": combine_unique(group["平台名称"]), "FBX代码集合": combine_unique(group["FBX代码"]), "平台仓代码集合": combine_unique(group["FBX代码"]), "平台仓配对集合": combine_platform_code_pairs(group), "FBA仓点代码集合": combine_unique(group["FBA仓点代码"]), "标准邮编集合": combine_unique(group["标准邮编"]), "邮编前三位集合": combine_unique(group["邮编前三位"]), "目的州": combine_unique(group["目的州"]), "邮编来源": combine_unique(group["邮编来源"]),
-                "目的仓点分配明细": build_destination_allocation_details(group),
-                "是否混合目的地": (fba_volume > 0 and fbx_volume > 0), "是否混装": len(set([x for x in group["装车类型标准值"].astype(str) if not processors.is_blank(x)])) > 1,
-                "备注": combine_unique(group["备注"]),
-            })
-    if not ltl_df.empty:
-        for _, r in ltl_df.iterrows():
-            product_group = "FBA" if r.get("FBA/FBX") == "FBA" else ("FBX" if r.get("FBA/FBX") == "FBX" else "未知")
-            rows.append({
-                "分析批次ID": f"LTL_{r.get('原始行号', '')}", "仓库": r.get("仓库", ""), "标准运输类型": "LTL",
-                "原始运输类型集合": r.get("原始运输类型集合", r.get("标准运输类型", "LTL")), "运输类型重判原因": r.get("运输类型重判原因", ""), "派送方式": "散板出库", "车型标准值": "不适用", "装车类型标准值": "散板", "车次号": r.get("车次号", ""), "批次号集合": r.get("批次号", ""),
-                "出库类型": r.get("出库类型", ""), "业务场景": r.get("业务场景", ""), "调入仓库": r.get("调入仓库", ""), "批次出库时间": r.get("出库时间", pd.NaT), "批次签收时间": r.get("签收时间", pd.NaT), "派送时效": r.get("派送时效", np.nan),
-                "出库体积": r.get("出库体积", 0), "出库卡板数": r.get("出库卡板数", 0), "派送成本": r.get("派送成本", 0), "FBA出库体积": r.get("出库体积", 0) if product_group == "FBA" else 0, "FBX出库体积": r.get("出库体积", 0) if product_group == "FBX" else 0,
-                "系统产品类型": r.get("系统产品类型", ""), "主产品类型": product_group, "平台名称": r.get("平台名称", ""), "FBX代码集合": r.get("FBX代码", ""), "平台仓代码集合": r.get("FBX代码", ""), "平台仓配对集合": f"{r.get('平台名称', '')}||{r.get('FBX代码', '')}" if product_group == "FBX" and not processors.is_blank(r.get("FBX代码", "")) else "", "FBA仓点代码集合": r.get("FBA仓点代码", ""), "标准邮编集合": r.get("标准邮编", ""), "邮编前三位集合": r.get("邮编前三位", ""), "目的州": r.get("目的州", ""), "邮编来源": r.get("邮编来源", ""), "是否混合目的地": False, "是否混装": False,
-                "目的仓点分配明细": build_destination_allocation_details(pd.DataFrame([r])),
-                "备注": r.get("备注", ""),
-            })
-    result = pd.DataFrame(rows)
+        invalid_reasons = []
+        if destination_error:
+            invalid_reasons.append(destination_error)
+        if volume <= 0:
+            invalid_reasons.append("缺少或无效出库体积")
+        trip_no = _clean_text(first_nonblank(group["车次号"]))
+        fba_code = destination["仓点代码"] if destination and destination["对象类型"] == "FBA" else ""
+        fbx_code = destination["仓点代码"] if destination and destination["对象类型"] == "FBX平台仓" else ""
+        platform = destination["平台"] if destination and destination["对象类型"] == "FBX平台仓" else ""
+        allocation_json = _destination_allocation_json(destination, batch_no, volume, pallets, cost)
+
+        rows.append({
+            "分析批次ID": f"BATCH_{batch_key}",
+            "仓库": warehouse,
+            "标准运输类型": transport_type,
+            "原始运输类型集合": combine_unique(group["原始运输类型集合"]),
+            "运输类型重判原因": first_nonblank(group["运输类型重判原因"]),
+            "派送方式": build_method(transport_type, vehicle, loading),
+            "车型标准值": vehicle,
+            "装车类型标准值": loading,
+            "车次号": trip_no,
+            "是否有真实车次号": bool(trip_no),
+            "批次号": batch_no,
+            "批次号集合": batch_no,
+            "原始行号集合": combine_unique(group["原始行号"]),
+            "出库类型": first_nonblank(group["出库类型"]),
+            "业务场景": first_nonblank(group["业务场景"]),
+            "调入仓库": first_nonblank(group["调入仓库"]),
+            "批次出库时间": start_time,
+            "批次签收时间": end_time,
+            "派送时效": duration,
+            "出库体积": volume,
+            "出库卡板数": pallets,
+            "派送成本": cost,
+            "批次成本审核": cost_audit,
+            "FBA出库体积": volume if product_group == "FBA" else 0.0,
+            "FBX出库体积": volume if product_group == "FBX" else 0.0,
+            "系统产品类型": product_group or first_nonblank(group["系统产品类型"]),
+            "主产品类型": product_group or "未知",
+            "平台名称": platform,
+            "FBX代码集合": fbx_code,
+            "平台仓代码集合": fbx_code,
+            "平台仓配对集合": f"{platform}||{fbx_code}" if platform and fbx_code else "",
+            "FBA仓点代码集合": fba_code,
+            "标准邮编集合": combine_unique(group["标准邮编"]),
+            "邮编前三位集合": combine_unique(group["邮编前三位"]),
+            "目的州": combine_unique(group["目的州"]),
+            "邮编来源": combine_unique(group["邮编来源"]),
+            "目的仓点分配明细": allocation_json,
+            "批次目的地类型": destination["对象类型"] if destination else "",
+            "批次目的仓点": destination["仓点代码"] if destination else "",
+            "是否混合目的地": False,
+            "是否混装": False,
+            "批次数据是否有效": not invalid_reasons,
+            "批次无效原因": "; ".join(invalid_reasons),
+            "备注": combine_unique(group["备注"]),
+        })
+
+    all_batches = pd.DataFrame(rows)
+    if all_batches.empty:
+        return all_batches
+    valid_mask = all_batches["批次数据是否有效"].astype(bool)
+    invalid_batches = all_batches.loc[~valid_mask].copy()
+    result = all_batches.loc[valid_mask].copy()
     if result.empty:
+        result.attrs["batch_invalid_records"] = invalid_batches.to_dict("records")
         return result
+
+    # 车次只提供共享上下文。份额分母只使用同车次有效批次，避免无效目的地/方数污染分配。
+    result["批次车份额"] = np.nan
+    result["整车出库体积"] = np.nan
+    result["整车出库卡板数"] = np.nan
+    result["整车批次数"] = pd.NA
+    result["车次份额合计"] = np.nan
+    real_ftl = result["标准运输类型"].eq("FTL") & result["是否有真实车次号"].astype(bool)
+    result["_车次聚合键"] = (
+        result["仓库"].astype(str).str.upper().str.strip()
+        + "||"
+        + result["车次号"].astype(str).str.strip()
+    )
+    for _, indexes in result.loc[real_ftl].groupby("_车次聚合键", dropna=False).groups.items():
+        group = result.loc[indexes]
+        total_volume = pd.to_numeric(group["出库体积"], errors="coerce").fillna(0).sum()
+        total_pallets = pd.to_numeric(group["出库卡板数"], errors="coerce").fillna(0).sum()
+        vehicle = resolve_group_vehicle(group["车型标准值"])
+        loading = resolve_group_loading(group["装车类型标准值"])
+        if ("53" in vehicle or "大车" in vehicle) and loading not in {"卡板", "地板"}:
+            loading = "卡板"
+        result.loc[indexes, "车型标准值"] = vehicle
+        result.loc[indexes, "装车类型标准值"] = loading
+        result.loc[indexes, "派送方式"] = build_method("FTL", vehicle, loading)
+        result.loc[indexes, "整车出库体积"] = float(total_volume)
+        result.loc[indexes, "整车出库卡板数"] = float(total_pallets)
+        result.loc[indexes, "整车批次数"] = int(len(group))
+        if total_volume > 0:
+            shares = pd.to_numeric(group["出库体积"], errors="coerce").fillna(0) / float(total_volume)
+            result.loc[indexes, "批次车份额"] = shares.values
+            result.loc[indexes, "车次份额合计"] = float(shares.sum())
+
     result["批次出库时间"] = pd.to_datetime(result["批次出库时间"], errors="coerce")
     result["批次签收时间"] = pd.to_datetime(result["批次签收时间"], errors="coerce")
     result["派送时效"] = pd.to_numeric(result["派送时效"], errors="coerce")
     result["是否有效时效"] = result["批次出库时间"].notna() & result["批次签收时间"].notna() & result["派送时效"].notna() & (result["派送时效"] > 0) & (result["派送时效"] <= 30)
     result.loc[~result["是否有效时效"], "派送时效"] = np.nan
     result["目的地邮编待补充"] = result["标准邮编集合"].apply(lambda x: len(split_values(x)) == 0)
+    result = result.drop(columns=["_车次聚合键"], errors="ignore")
     result = result[[col for col in result.columns if col != "备注"] + ["备注"]]
-    return sort_unmatched_zip_bottom(result)
+    result = sort_unmatched_zip_bottom(result)
+    result.attrs["batch_invalid_records"] = invalid_batches.to_dict("records")
+    return result
 
 
 def sort_unmatched_zip_bottom(df):
@@ -454,6 +665,11 @@ def process_stage1_raw_files_to_cleaned_batches(file_dfs, warehouse, period_type
     detail_df = delivery_reference.apply_delivery_reference_memory(detail_df)
     valid_detail, invalid_detail = remove_invalid_stage1_rows(detail_df)
     cleaned_batches = build_cleaned_batches_from_detail(valid_detail)
+    batch_invalid = pd.DataFrame(cleaned_batches.attrs.get("batch_invalid_records", []))
+    cleaned_batches.attrs = {}
+    if not batch_invalid.empty:
+        batch_invalid["无效批次剔除原因"] = batch_invalid["批次无效原因"]
+        invalid_detail = pd.concat([invalid_detail, batch_invalid], ignore_index=True, sort=False)
     zip_audit_df = cleaned_batches[cleaned_batches["目的地邮编待补充"]].copy() if not cleaned_batches.empty else pd.DataFrame()
     return cleaned_batches, invalid_detail, zip_audit_df, detail_df
 
@@ -471,6 +687,48 @@ def build_stage1_summary(cleaned_batches, invalid_detail, zip_audit_df):
         for key, value in cleaned_batches["系统产品类型"].value_counts(dropna=False).items():
             rows.append({"项目": f"系统产品类型-{key}", "数量": int(value)})
     return pd.DataFrame(rows)
+
+
+def build_trip_audit(cleaned_batches):
+    """一行一个真实车次，仅供核对整车构成和批次车份额，不反写批次目的地/时效。"""
+    columns = [
+        "仓库", "车次号", "最终运输类型", "车型标准值", "装车类型标准值",
+        "整车批次数", "整车出库体积", "整车出库卡板数", "批次车份额合计",
+        "目的仓点构成", "批次号集合", "车次份额校验", "运输类型重判原因",
+    ]
+    if cleaned_batches is None or cleaned_batches.empty:
+        return pd.DataFrame(columns=columns)
+    source = cleaned_batches.copy()
+    if "车次号" not in source.columns:
+        return pd.DataFrame(columns=columns)
+    source = source[source["车次号"].fillna("").astype(str).str.strip().ne("")].copy()
+    if source.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows = []
+    for (warehouse, trip_no), group in source.groupby(["仓库", "车次号"], dropna=False, sort=False):
+        final_types = list(dict.fromkeys(group["标准运输类型"].fillna("").astype(str)))
+        final_type = final_types[0] if len(final_types) == 1 else ",".join(final_types)
+        total_volume = float(pd.to_numeric(group["出库体积"], errors="coerce").fillna(0).sum())
+        total_pallets = float(pd.to_numeric(group["出库卡板数"], errors="coerce").fillna(0).sum())
+        share_total = pd.to_numeric(group.get("批次车份额", pd.Series(np.nan, index=group.index)), errors="coerce").sum(min_count=1)
+        share_valid = final_type != "FTL" or (pd.notna(share_total) and abs(float(share_total) - 1.0) <= 1e-9)
+        rows.append({
+            "仓库": warehouse,
+            "车次号": trip_no,
+            "最终运输类型": final_type,
+            "车型标准值": first_nonblank(group["车型标准值"]),
+            "装车类型标准值": first_nonblank(group["装车类型标准值"]),
+            "整车批次数": int(len(group)),
+            "整车出库体积": total_volume,
+            "整车出库卡板数": total_pallets,
+            "批次车份额合计": share_total,
+            "目的仓点构成": combine_unique(group.get("批次目的仓点", pd.Series(dtype=object))),
+            "批次号集合": combine_unique(group.get("批次号集合", pd.Series(dtype=object))),
+            "车次份额校验": "通过" if share_valid else "异常：FTL批次车份额合计不等于1",
+            "运输类型重判原因": combine_unique(group.get("运输类型重判原因", pd.Series(dtype=object))),
+        })
+    return pd.DataFrame(rows, columns=columns)
 
 
 def read_stage1_cleaned_batches(excel_file):
@@ -537,7 +795,9 @@ def add_analysis_period(df, period_type):
 
 
 def prepare_stage2_for_report(cleaned_batches, match_df, period_type):
-    matched = apply_manual_match_to_cleaned_batches(cleaned_batches, match_df)
+    cleaned_input = cleaned_batches.copy()
+    cleaned_input.attrs = {}
+    matched = apply_manual_match_to_cleaned_batches(cleaned_input, match_df)
     matched = apply_linehaul_rules_second_part(matched)
     matched = apply_region_rules_second_part(matched)
     matched = add_analysis_period(matched, period_type)
@@ -545,7 +805,28 @@ def prepare_stage2_for_report(cleaned_batches, match_df, period_type):
         if col not in matched.columns:
             matched[col] = 0
         matched[col] = pd.to_numeric(matched[col], errors="coerce").fillna(0)
-    matched["是否FTL发车"] = matched["标准运输类型"].eq("FTL")
+    real_trip = matched.get("是否有真实车次号", matched.get("车次号", pd.Series("", index=matched.index)))
+    if isinstance(real_trip, pd.Series):
+        real_trip = real_trip.apply(
+            lambda value: (
+                value
+                if isinstance(value, (bool, np.bool_))
+                else _clean_text(value).lower() in {"true", "1", "是", "yes", "y"}
+            )
+        )
+        if "是否有真实车次号" not in matched.columns:
+            real_trip = matched.get("车次号", pd.Series("", index=matched.index)).apply(lambda value: bool(_clean_text(value)))
+    matched["是否有真实车次号"] = real_trip.astype(bool)
+    if "批次车份额" in matched.columns:
+        share = pd.to_numeric(matched["批次车份额"], errors="coerce")
+    else:
+        # 兼容旧版派送一“一行一整车”文件；新文件始终携带精确批次车份额。
+        share = pd.Series(
+            np.where(matched["标准运输类型"].eq("FTL") & matched["是否有真实车次号"], 1.0, np.nan),
+            index=matched.index,
+        )
+        matched["批次车份额"] = share
+    matched["是否FTL发车"] = matched["标准运输类型"].eq("FTL") & matched["是否有真实车次号"] & share.gt(0)
     matched["主产品类型"] = matched.apply(main_product_for_dispatch, axis=1)
     remark_cols = [col for col in processors.MULTI_UNLOAD_REMARK_COLUMNS if col in matched.columns and col != "同车次备注集合"]
     if "同车次备注集合" in matched.columns:
@@ -574,8 +855,12 @@ def volume_structure_label(row):
 
 
 def linehaul_df(df):
-    if df.empty or "专线线路" not in df.columns:
+    if df.empty:
         return df.iloc[0:0].copy()
+    if "专线线路" not in df.columns:
+        out = df.iloc[0:0].copy()
+        out["专线线路"] = pd.Series(dtype=object)
+        return out
     return df[(df["仓库"] == "LA") & (~df["专线线路"].isin(["", "未知线路", "非LA干线"]))].copy()
 
 
@@ -588,6 +873,87 @@ def rank_top_bottom(df, group_col, value_col, top_n=10, bottom_n=10):
     top = agg.head(top_n).copy(); top["排行类型"] = f"前{top_n}"
     bottom = agg.tail(bottom_n).copy().sort_values(value_col, ascending=True); bottom["排行类型"] = f"后{bottom_n}"
     return pd.concat([top, bottom], ignore_index=True)
+
+
+def business_round_vehicle_count(value):
+    value = pd.to_numeric(value, errors="coerce")
+    if pd.isna(value) or float(value) <= 0:
+        return 0
+    return int(np.floor(float(value) + 0.5))
+
+
+def volume_weighted_average(df, value_col="派送时效", weight_col="出库体积"):
+    if df is None or df.empty:
+        return np.nan
+    values = pd.to_numeric(df[value_col], errors="coerce")
+    weights = pd.to_numeric(df[weight_col], errors="coerce")
+    valid = values.notna() & weights.gt(0)
+    if not valid.any():
+        return np.nan
+    return float((values[valid] * weights[valid]).sum() / weights[valid].sum())
+
+
+def volume_weighted_p80(df, value_col="派送时效", weight_col="出库体积"):
+    """按方数权重求离散P80：累计有效方数首次达到80%时对应的批次时效。"""
+    if df is None or df.empty:
+        return np.nan
+    sample = pd.DataFrame({
+        "value": pd.to_numeric(df[value_col], errors="coerce"),
+        "weight": pd.to_numeric(df[weight_col], errors="coerce"),
+    }).dropna()
+    sample = sample[sample["weight"] > 0].sort_values("value", kind="stable")
+    if sample.empty:
+        return np.nan
+    cutoff = float(sample["weight"].sum()) * 0.8
+    cumulative = sample["weight"].cumsum()
+    return float(sample.loc[cumulative.ge(cutoff), "value"].iloc[0])
+
+
+def timing_sample_rows(df):
+    """时效只看有真实车次的最终FTL批次；LTL、缺车次、无效时效及里/外备注均排除。"""
+    if df is None or df.empty:
+        return df.copy()
+    out = df.copy()
+    if "标准运输类型" in out.columns:
+        mask = out["标准运输类型"].astype(str).str.upper().eq("FTL")
+    else:
+        mask = out.get("是否FTL发车", pd.Series(False, index=out.index)).apply(
+            lambda value: value is True or str(value).strip().lower() in {"true", "1", "是", "yes"}
+        )
+    if "是否有真实车次号" in out.columns:
+        has_trip = out["是否有真实车次号"].apply(
+            lambda value: value is True or str(value).strip().lower() in {"true", "1", "是", "yes"}
+        )
+    else:
+        has_trip = out.get("车次号", pd.Series("", index=out.index)).apply(lambda value: bool(_clean_text(value)))
+    mask &= has_trip
+    duration = pd.to_numeric(out.get("派送时效", pd.Series(np.nan, index=out.index)), errors="coerce")
+    volume = pd.to_numeric(out.get("出库体积", pd.Series(np.nan, index=out.index)), errors="coerce")
+    mask &= duration.notna() & duration.gt(0) & volume.gt(0)
+    remark_cols = [col for col in processors.MULTI_UNLOAD_REMARK_COLUMNS if col in out.columns]
+    if remark_cols:
+        remarks = out[remark_cols].fillna("").astype(str).agg(" ".join, axis=1)
+        mask &= ~remarks.str.contains("里|外", regex=True, na=False)
+    return out.loc[mask].copy()
+
+
+def _append_weighted_timing_row(rows, metric_name, warehouse, period, dimension_type, dimension_value, group):
+    sample = timing_sample_rows(group)
+    row = report_row(
+        "3.派送时效",
+        metric_name,
+        warehouse,
+        period,
+        dimension_type,
+        dimension_value,
+        avg_time=volume_weighted_average(sample),
+        p80_time=volume_weighted_p80(sample),
+        note="按有效FTL批次方数加权；LTL、缺车次、无效时效及备注含‘里/外’批次不参与",
+    )
+    row["有效时效批次数"] = int(len(sample))
+    row["有效时效方数"] = float(pd.to_numeric(sample.get("出库体积", 0), errors="coerce").fillna(0).sum()) if not sample.empty else 0.0
+    row["无效时效批次数"] = int(len(group) - len(sample))
+    rows.append(row)
 
 
 def build_sheet1_volume_dispatch_time_report(df):
@@ -621,24 +987,61 @@ def build_sheet1_volume_dispatch_time_report(df):
             lh = linehaul_df(group)
             for line, lg in lh.groupby("专线线路", dropna=False):
                 rows.append(report_row("1.货量", "LA干线货量", warehouse, period, "干线线路", line, value=lg["出库体积"].sum(), unit="CBM", volume=lg["出库体积"].sum()))
-        ftl_group = group[group["是否FTL发车"]]
-        rows.append(report_row("2.发车量", "总发车数", warehouse, period, "发车口径", "FTL车次", value=len(ftl_group), unit="车", dispatch=len(ftl_group), note="LTL不计入发车数"))
-        add_ratio_rows(rows, "2.发车量", "地板发车比卡板发车", warehouse, period, "装车类型", {"地板": int((ftl_group["装车类型标准值"] == "地板").sum()), "卡板": int((ftl_group["装车类型标准值"] == "卡板").sum())}, "车")
-        add_ratio_rows(rows, "2.发车量", "FBA比FBX发车", warehouse, period, "产品类型", {"FBA": int((ftl_group["主产品类型"] == "FBA").sum()), "FBX": int((ftl_group["主产品类型"] == "FBX").sum())}, "车")
-        region_counts = ftl_group.groupby("派送区域", dropna=False)["分析批次ID"].count().to_dict()
-        for region, count in region_counts.items():
-            rows.append(report_row("2.发车量", "区域发车数", warehouse, period, "派送区域", region, value=count, unit="车", dispatch=count))
+        ftl_group = group[group["是否FTL发车"]].copy()
+        ftl_group["批次车份额"] = pd.to_numeric(ftl_group["批次车份额"], errors="coerce").fillna(0)
+        unique_trip_count = ftl_group["车次号"].dropna().astype(str).replace("", np.nan).dropna().nunique()
+        total_dispatch_row = report_row(
+            "2.发车量", "总发车数", warehouse, period, "发车口径", "FTL实际车次",
+            value=int(unique_trip_count), unit="车", dispatch=int(unique_trip_count),
+            note="总量按真实车次号去重；LTL及缺车次批次不计入发车数",
+        )
+        rows.append(total_dispatch_row)
+        loading_exact = ftl_group.groupby("装车类型标准值", dropna=False)["批次车份额"].sum().to_dict()
+        loading_display = {
+            "地板": business_round_vehicle_count(loading_exact.get("地板", 0)),
+            "卡板": business_round_vehicle_count(loading_exact.get("卡板", 0)),
+        }
+        add_ratio_rows(rows, "2.发车量", "地板发车比卡板发车", warehouse, period, "装车类型", loading_display, "车")
+        product_exact = ftl_group.groupby("主产品类型", dropna=False)["批次车份额"].sum().to_dict()
+        product_display = {
+            "FBA": business_round_vehicle_count(product_exact.get("FBA", 0)),
+            "FBX": business_round_vehicle_count(product_exact.get("FBX", 0)),
+        }
+        add_ratio_rows(rows, "2.发车量", "FBA比FBX发车", warehouse, period, "产品类型", product_display, "车")
+        for region, rg in ftl_group.groupby("派送区域", dropna=False):
+            exact_count = float(rg["批次车份额"].sum())
+            count = business_round_vehicle_count(exact_count)
+            row = report_row("2.发车量", "区域发车数", warehouse, period, "派送区域", region, value=count, unit="车", dispatch=count)
+            row["精确车份额"] = exact_count
+            row["备注"] = "批次车份额汇总后按四舍五入取整；不逐批次取整"
+            rows.append(row)
+        for station, sg in ftl_group.groupby("批次目的仓点", dropna=False):
+            if processors.is_blank(station):
+                continue
+            exact_count = float(sg["批次车份额"].sum())
+            count = business_round_vehicle_count(exact_count)
+            row = report_row("2.发车量", "目的仓点发车数", warehouse, period, "目的仓点", station, value=count, unit="车", dispatch=count)
+            row["精确车份额"] = exact_count
+            row["备注"] = "批次车份额汇总后按四舍五入取整；不逐批次取整"
+            rows.append(row)
         if warehouse == "LA":
             lh_ftl = linehaul_df(ftl_group)
             for line, lg in lh_ftl.groupby("专线线路", dropna=False):
-                rows.append(report_row("2.发车量", "LA干线发车数", warehouse, period, "干线线路", line, value=len(lg), unit="车", dispatch=len(lg)))
+                exact_count = float(lg["批次车份额"].sum())
+                count = business_round_vehicle_count(exact_count)
+                row = report_row("2.发车量", "LA干线发车数", warehouse, period, "干线线路", line, value=count, unit="车", dispatch=count)
+                row["精确车份额"] = exact_count
+                row["备注"] = "批次车份额汇总后按四舍五入取整；不逐批次取整"
+                rows.append(row)
         for region, rg in group.groupby("派送区域", dropna=False):
-            rows.append(report_row("3.派送时效", "分区域派送时效", warehouse, period, "派送区域", region, avg_time=rg["派送时效"].mean(), p80_time=processors.safe_p80(rg["派送时效"]), note="平均值与P80，仅有效时效参与计算"))
+            _append_weighted_timing_row(rows, "分区域派送时效", warehouse, period, "派送区域", region, rg)
+        for station, sg in group.groupby("批次目的仓点", dropna=False):
+            if not processors.is_blank(station):
+                _append_weighted_timing_row(rows, "目的仓点派送时效", warehouse, period, "目的仓点", station, sg)
         if warehouse == "LA":
             lh_time = linehaul_df(group)
             for line, lg in lh_time.groupby("专线线路", dropna=False):
-                average_lg = processors.average_sample_rows(lg)
-                rows.append(report_row("3.派送时效", "LA干线派送时效", warehouse, period, "干线线路", line, avg_time=average_lg["派送时效"].mean(), p80_time=processors.safe_p80(average_lg["派送时效"]), note="平均值与P80，仅有效时效且备注不含‘里/外’的明细参与计算"))
+                _append_weighted_timing_row(rows, "LA干线派送时效", warehouse, period, "干线线路", line, lg)
     return pd.DataFrame(rows)
 
 
@@ -697,7 +1100,8 @@ def process_stage2_analysis(cleaned_batches, match_df, period_type="按周统计
     return {
         "表一_货量发车时效": processors.round_output_numbers(sheet1, processors.RESULT_DECIMALS),
         "表二_成本": processors.round_output_numbers(sheet2, processors.RESULT_DECIMALS),
-        "派送二_匹配后合并数据": processors.round_output_numbers(matched, processors.RESULT_DECIMALS),
+        "派送二_匹配后批次数据": processors.round_output_numbers(matched, processors.RESULT_DECIMALS),
+        "派送二_车次汇总核对": processors.round_output_numbers(build_trip_audit(matched), processors.RESULT_DECIMALS),
         "邮编异常审核": matched[matched["目的地邮编待补充"]].copy() if "目的地邮编待补充" in matched.columns else pd.DataFrame(),
         "区域识别规则": REGION_RULES_DF,
         "干线识别规则": LINEHAUL_RULES,

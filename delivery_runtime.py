@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-07-27-batch-cost-trip-load-v8"
+RUNTIME_SCHEMA_VERSION = "2026-07-27-destination-period-sorting-v11"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
@@ -477,6 +477,20 @@ def _filter_positive_cost_rows(df):
     return out[out["派送成本"] > 0].copy()
 
 
+def _business_round_vehicle_count(value):
+    value = pd.to_numeric(value, errors="coerce")
+    if pd.isna(value) or float(value) <= 0:
+        return 0
+    return int(float(value) + 0.5)
+
+
+def _exact_vehicle_share_series(df):
+    if "批次车份额" in df.columns:
+        return pd.to_numeric(df["批次车份额"], errors="coerce").fillna(0)
+    # 兼容旧版一行一整车的派送一结果。
+    return pd.Series(1.0, index=df.index)
+
+
 def _filter_regular_trips_for_cost(matched):
     """普通派送成本纳入成本大于0的整车记录；一车多批次由仓点分摊层处理。"""
     if matched is None or matched.empty:
@@ -520,10 +534,18 @@ def _build_transfer_cost_report(matched):
 
     rows = []
     for (warehouse, period, target, target_name), group in transfer.groupby(["仓库", "统计周期", "调拨目标仓", "调拨目标仓名称"], dropna=False):
-        trip_count = len(group)
+        exact_trip_count = _exact_vehicle_share_series(group).sum()
+        trip_count = _business_round_vehicle_count(exact_trip_count)
         total_volume = group["出库体积"].sum()
         total_cost = group["派送成本"].sum()
-        average_group = processors.average_sample_rows(group)
+        average_source = group.copy()
+        if "整车出库体积" in average_source.columns:
+            average_source["批次出库体积"] = average_source["出库体积"]
+            average_source["出库体积"] = pd.to_numeric(average_source["整车出库体积"], errors="coerce")
+        average_group = processors.average_sample_rows(average_source)
+        average_share = _exact_vehicle_share_series(average_group).sum()
+        average_cost = pd.to_numeric(average_group["派送成本"], errors="coerce").fillna(0).sum()
+        trip_loads = average_group.drop_duplicates(["仓库", "车次号"]).copy()
         rows.append({
             "指标名称": "调拨成本",
             "仓库": warehouse,
@@ -535,10 +557,19 @@ def _build_transfer_cost_report(matched):
             "车次数": int(trip_count),
             "总出库体积": total_volume,
             "总派送成本": total_cost,
-            "平均整车价": average_group["派送成本"].mean() if not average_group.empty else pd.NA,
-            "每方平均价": processors.mean_detail_ratio(average_group, "派送成本", "出库体积"),
-            "平均每车出库体积": average_group["出库体积"].mean() if not average_group.empty else pd.NA,
-            "P80每车出库体积": processors.safe_p80(average_group["出库体积"]) if not average_group.empty else pd.NA,
+            "平均整车价": processors.safe_divide(average_cost, average_share),
+            "每方平均价": processors.mean_detail_ratio(
+                average_group,
+                "派送成本",
+                "批次出库体积" if "批次出库体积" in average_group.columns else "出库体积",
+            ),
+            "平均每车出库体积": pd.to_numeric(
+                trip_loads.get("整车出库体积", trip_loads.get("出库体积", pd.Series(dtype=float))),
+                errors="coerce",
+            ).mean(),
+            "P80每车出库体积": processors.safe_p80(
+                trip_loads.get("整车出库体积", trip_loads.get("出库体积", pd.Series(dtype=float)))
+            ),
         })
     return pd.DataFrame(rows)[columns]
 
@@ -555,11 +586,19 @@ def _build_transfer_report(matched):
 
     rows = []
     for (warehouse, period, target_name, line), group in transfer.groupby(["仓库", "统计周期", "调拨目标仓名称", "专线线路"], dropna=False):
-        trip_count = len(group)
+        exact_trip_count = _exact_vehicle_share_series(group).sum()
+        trip_count = _business_round_vehicle_count(exact_trip_count)
         total_volume = group["出库体积"].sum()
         total_pallets = group["出库卡板数"].sum()
         total_cost = group["派送成本"].sum()
-        average_group = processors.average_sample_rows(group)
+        average_source = group.copy()
+        if "整车出库体积" in average_source.columns:
+            average_source["批次出库体积"] = average_source["出库体积"]
+            average_source["出库体积"] = pd.to_numeric(average_source["整车出库体积"], errors="coerce")
+        average_group = processors.average_sample_rows(average_source)
+        average_share = _exact_vehicle_share_series(average_group).sum()
+        average_cost = pd.to_numeric(average_group["派送成本"], errors="coerce").fillna(0).sum()
+        trip_loads = average_group.drop_duplicates(["仓库", "车次号"]).copy()
         rows.append({
             "指标名称": "LA仓间调拨",
             "发货仓": warehouse,
@@ -570,9 +609,16 @@ def _build_transfer_report(matched):
             "总出库体积": total_volume,
             "总出库卡板数": total_pallets,
             "总派送成本": total_cost,
-            "平均整车价": average_group["派送成本"].mean() if not average_group.empty else pd.NA,
-            "每方平均价": processors.mean_detail_ratio(average_group, "派送成本", "出库体积"),
-            "平均每车出库体积": average_group["出库体积"].mean() if not average_group.empty else pd.NA,
+            "平均整车价": processors.safe_divide(average_cost, average_share),
+            "每方平均价": processors.mean_detail_ratio(
+                average_group,
+                "派送成本",
+                "批次出库体积" if "批次出库体积" in average_group.columns else "出库体积",
+            ),
+            "平均每车出库体积": pd.to_numeric(
+                trip_loads.get("整车出库体积", trip_loads.get("出库体积", pd.Series(dtype=float))),
+                errors="coerce",
+            ).mean(),
             "批次号集合": _combine_series_text(group.get("批次号集合")),
             "车次号集合": _combine_series_text(group.get("车次号")),
         })
@@ -644,7 +690,8 @@ def _patch_stage2_transfer_sheet():
             "调拨数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(transfer_report, "调拨数据"), "调拨数据"),
             "每方价格参考": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(price_reference, "成本"), "成本"),
             "分类型价格参考": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(type_price_reference, "成本"), "成本"),
-            "派送二_匹配后合并数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(matched, "明细"), "明细"),
+            "派送二_匹配后批次数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(matched, "明细"), "明细"),
+            "派送二_车次汇总核对": delivery_match_adapter._safe_round(delivery_workflow_module.build_trip_audit(matched), "明细"),
             "邮编异常审核": delivery_match_adapter._finalize_zip_audit_sheet(zip_audit),
             "区域识别规则": delivery_workflow_module.REGION_RULES_DF,
             "干线识别规则": delivery_workflow_module.LINEHAUL_RULES,
@@ -674,7 +721,7 @@ def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_modul
         if isinstance(result, tuple) and len(result) == 4:
             cleaned_batches, invalid_detail, zip_audit_df, raw_detail = result
             raw_detail = _apply_ltl_priority_to_detail(raw_detail)
-            cleaned_batches = tool_common.apply_dominant_destination_from_detail(cleaned_batches, raw_detail)
+            # 批次是目的地/区域/时效的原子粒度，禁止再用整车主目的地覆盖批次目的地。
             cleaned_batches = _apply_trip_cost_rule(cleaned_batches, raw_detail)
             cleaned_batches = _clean_delivery_time_columns(cleaned_batches)
             if cleaned_batches is not None and not cleaned_batches.empty:

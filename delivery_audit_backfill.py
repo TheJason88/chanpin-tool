@@ -11,6 +11,7 @@ ZIP_UPDATE_COLUMNS = [
 STATE_UPDATE_COLUMNS = ["补充目的州", "目的州", "州", "省/州", "省州", "State", "STATE"]
 BATCH_KEY_COLUMNS = ["批次号集合", "批次号"]
 MAIN_SHEET_CANDIDATES = [
+    "派送二_匹配后批次数据",
     "派送二_匹配后合并数据",
     "清洗后数据",
     "派送一_清洗合并数据",
@@ -262,12 +263,29 @@ def _build_linehaul_sheet(matched):
                 & period_source["_是否FTL"]
             ].copy()
 
-            trip_count = int(len(group))
+            import delivery_workflow
+
+            if "批次车份额" in group.columns:
+                exact_trip_count = pd.to_numeric(group["批次车份额"], errors="coerce").fillna(0).sum()
+            else:
+                exact_trip_count = float(len(group))
+            trip_count = delivery_workflow.business_round_vehicle_count(exact_trip_count)
             total_volume = float(group["出库体积"].sum(min_count=1)) if not group.empty and group["出库体积"].notna().any() else 0.0
             total_pallets = float(group["出库卡板数"].sum(min_count=1)) if not group.empty and group["出库卡板数"].notna().any() else 0.0
             total_cost = float(group["派送成本"].sum(min_count=1)) if not group.empty and group["派送成本"].notna().any() else 0.0
-            average_group = processors.average_sample_rows(group)
-            valid_duration = average_group["派送时效"].dropna() if not average_group.empty else pd.Series(dtype="float64")
+            average_source = group.copy()
+            if "整车出库体积" in average_source.columns:
+                average_source["批次出库体积"] = average_source["出库体积"]
+                average_source["出库体积"] = pd.to_numeric(average_source["整车出库体积"], errors="coerce")
+            average_group = processors.average_sample_rows(average_source)
+            timing_group = delivery_workflow.timing_sample_rows(average_group)
+            trip_loads = average_group.drop_duplicates(["仓库", "车次号"]).copy()
+            average_share = (
+                pd.to_numeric(average_group["批次车份额"], errors="coerce").fillna(0).sum()
+                if "批次车份额" in average_group.columns
+                else float(len(average_group))
+            )
+            average_cost = pd.to_numeric(average_group["派送成本"], errors="coerce").fillna(0).sum()
 
             rows.append({
                 "指标名称": "LA干线数据",
@@ -279,11 +297,18 @@ def _build_linehaul_sheet(matched):
                 "总出库体积": total_volume,
                 "总出库卡板数": total_pallets,
                 "总派送成本": total_cost,
-                "平均整车价": average_group["派送成本"].mean() if not average_group.empty else pd.NA,
-                "每方平均价": processors.mean_detail_ratio(average_group, "派送成本", "出库体积"),
-                "平均每车出库体积": average_group["出库体积"].mean() if not average_group.empty else pd.NA,
-                "平均派送时效": valid_duration.mean() if not valid_duration.empty else pd.NA,
-                "P80派送时效": processors.safe_p80(valid_duration) if not valid_duration.empty else pd.NA,
+                "平均整车价": processors.safe_divide(average_cost, average_share),
+                "每方平均价": processors.mean_detail_ratio(
+                    average_group,
+                    "派送成本",
+                    "批次出库体积" if "批次出库体积" in average_group.columns else "出库体积",
+                ),
+                "平均每车出库体积": pd.to_numeric(
+                    trip_loads.get("整车出库体积", trip_loads.get("出库体积", pd.Series(dtype=float))),
+                    errors="coerce",
+                ).mean(),
+                "平均派送时效": delivery_workflow.volume_weighted_average(timing_group),
+                "P80派送时效": delivery_workflow.volume_weighted_p80(timing_group),
                 "批次号集合": _combine_unique_text(group["批次号集合"]) if not group.empty else "",
                 "车次号集合": _combine_unique_text(group["车次号"]) if not group.empty else "",
             })
@@ -328,7 +353,9 @@ def apply_stage2_linehaul_sheet_patch():
         if not isinstance(reports, dict):
             return reports
 
-        matched = reports.get("派送二_匹配后合并数据")
+        matched = reports.get("派送二_匹配后批次数据")
+        if matched is None:
+            matched = reports.get("派送二_匹配后合并数据")
         linehaul_sheet = _build_linehaul_sheet(matched)
         if linehaul_sheet.empty:
             return reports

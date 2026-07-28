@@ -460,7 +460,9 @@ def _apply_zip_audit_updates(main_df, audit_df):
 def read_stage1_or_stage2_with_audit_updates(excel_file):
     excel_file.seek(0)
     xls = pd.ExcelFile(excel_file)
-    if "派送二_匹配后合并数据" in xls.sheet_names:
+    if "派送二_匹配后批次数据" in xls.sheet_names:
+        sheet_name = "派送二_匹配后批次数据"
+    elif "派送二_匹配后合并数据" in xls.sheet_names:
         sheet_name = "派送二_匹配后合并数据"
     elif "清洗后数据" in xls.sheet_names:
         sheet_name = "清洗后数据"
@@ -620,49 +622,74 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
         pallets = 0 if pd.isna(pallets) else float(pallets)
         if volume <= 0 and cost <= 0:
             continue
-        trip_record_id = str(row.get("分析批次ID", "")).strip()
-        if _is_blank(trip_record_id):
-            warehouse = str(row.get("仓库", "")).strip()
-            trip_no = str(row.get("车次号", "")).strip()
-            trip_record_id = f"{warehouse}||{trip_no}" if trip_no else f"{warehouse}||SOURCE-{source_index}"
+        warehouse = str(row.get("仓库", "")).strip()
+        trip_no = str(row.get("车次号", "")).strip()
+        trip_record_id = f"{warehouse}||{trip_no}" if trip_no else ""
+        exact_share = pd.to_numeric(row.get("批次车份额", pd.NA), errors="coerce")
+        trip_volume = pd.to_numeric(row.get("整车出库体积", volume), errors="coerce")
+        trip_pallets = pd.to_numeric(row.get("整车出库卡板数", pallets), errors="coerce")
+        trip_volume = volume if pd.isna(trip_volume) else float(trip_volume)
+        trip_pallets = pallets if pd.isna(trip_pallets) else float(trip_pallets)
 
         allocations = _parse_destination_allocation_details(row, object_type)
         expanded_objects = []
         if allocations:
-            allocated_volume = sum(item["出库体积"] for item in allocations)
-            denominator = max(volume, allocated_volume)
-            if denominator <= 0:
+            # 新批次模型必须是一批次一目的地。历史多目的地行不再等分，避免制造虚假仓点成本。
+            if len(allocations) != 1:
                 continue
-            for item in allocations:
-                trip_share = item["出库体积"] / denominator
-                expanded_objects.append({
-                    "平台": item["平台"],
-                    "仓点代码": item["仓点代码"],
-                    "批次号": item["批次号"],
-                    "出库体积": item["出库体积"],
-                    "出库卡板数": item["出库卡板数"],
-                    "派送成本": item["派送成本"],
-                    "车次数": trip_share,
-                    "仓点分摊口径": "批次成本原值+体积占比车次",
-                })
+            item = allocations[0]
+            if vehicle_group_override == "LTL":
+                vehicle_share = pd.NA
+            elif pd.notna(exact_share) and float(exact_share) > 0:
+                vehicle_share = float(exact_share)
+            elif trip_volume > 0:
+                vehicle_share = float(item["出库体积"]) / float(trip_volume)
+            else:
+                continue
+            expanded_objects.append({
+                "平台": item["平台"],
+                "仓点代码": item["仓点代码"],
+                "批次号": item["批次号"],
+                "出库体积": item["出库体积"],
+                "出库卡板数": item["出库卡板数"],
+                "派送成本": item["派送成本"],
+                "车次数": vehicle_share,
+                "仓点分摊口径": "批次成本原值+批次方数占整车方数的精确车份额",
+            })
         else:
             objects = _fallback_destination_objects(row, object_type)
-            if not objects:
+            # 兼容只有一个明确目的仓的旧文件；多个目的仓不再等分回退。
+            if len(objects) != 1:
                 continue
-            object_count = len(objects)
-            for platform, code in objects:
-                expanded_objects.append({
-                    "平台": platform,
-                    "仓点代码": code,
-                    "批次号": str(row.get("批次号集合", "")).strip(),
-                    "出库体积": volume / object_count,
-                    "出库卡板数": pallets / object_count,
-                    "派送成本": cost / object_count,
-                    "车次数": 1 / object_count,
-                    "仓点分摊口径": "仓点等分回退（缺少批次成本/体积分配）",
-                })
+            platform, code = objects[0]
+            if vehicle_group_override == "LTL":
+                vehicle_share = pd.NA
+            elif pd.notna(exact_share) and float(exact_share) > 0:
+                vehicle_share = float(exact_share)
+            elif trip_volume > 0:
+                vehicle_share = volume / trip_volume
+            else:
+                continue
+            expanded_objects.append({
+                "平台": platform,
+                "仓点代码": code,
+                "批次号": str(row.get("批次号集合", "")).strip(),
+                "出库体积": volume,
+                "出库卡板数": pallets,
+                "派送成本": cost,
+                "车次数": vehicle_share,
+                "仓点分摊口径": "单一目的仓旧数据兼容",
+            })
 
         for item in expanded_objects:
+            full_truck_equivalent = (
+                float(item["派送成本"]) / float(item["车次数"])
+                if vehicle_group_override != "LTL"
+                and pd.notna(item["车次数"])
+                and float(item["车次数"]) > 0
+                and float(item["派送成本"]) > 0
+                else pd.NA
+            )
             rows.append({
                 "仓库": row.get("仓库", ""), "统计周期": row.get("统计周期", ""),
                 "对象类型": object_type if object_type == "FBA" else "FBX平台仓",
@@ -674,9 +701,10 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
                 "出库体积": item["出库体积"],
                 "出库卡板数": item["出库卡板数"],
                 "派送成本": item["派送成本"],
-                "整车出库体积": volume,
-                "整车出库卡板数": pallets,
-                "整车派送成本": cost,
+                "批次整车等价价": full_truck_equivalent,
+                "整车出库体积": trip_volume,
+                "整车出库卡板数": trip_pallets,
+                "整车派送成本": pd.NA,
                 "整车记录ID": trip_record_id,
                 "仓点分摊口径": item["仓点分摊口径"],
             })
@@ -723,13 +751,24 @@ def build_station_cost_report(matched):
     rows = []
     full_load = ftl[(ftl["车型标准值"] == "53尺大车") & (ftl["装车类型标准值"] == "地板")].copy()
     for (warehouse, period), group in full_load.groupby(["仓库", "统计周期"], dropna=False):
+        if "批次车份额" in group.columns:
+            full_load_count = pd.to_numeric(group["批次车份额"], errors="coerce").fillna(0).sum()
+        else:
+            full_load_count = len(group)
+        trip_loads = group.copy()
+        if "车次号" in trip_loads.columns:
+            trip_loads = trip_loads.drop_duplicates(["仓库", "车次号"])
+        trip_volume = pd.to_numeric(
+            trip_loads.get("整车出库体积", trip_loads.get("出库体积", pd.Series(dtype=float))),
+            errors="coerce",
+        )
         rows.append({
             "指标名称": "满载情况", "仓库": warehouse, "统计周期": period,
             "对象类型": "FTL大车地板", "平台": "全部", "仓点代码": "全部", "车型装车分组": "大车地板",
-            "车次数": int(len(group)), "总出库体积": group["出库体积"].sum(), "总派送成本": group["派送成本"].sum(),
+            "车次数": full_load_count, "总出库体积": group["出库体积"].sum(), "总派送成本": group["派送成本"].sum(),
             "平均整车价": None, "每方平均价": None,
-            "平均每车出库体积": processors.regular_delivery_average_sample_rows(group)["出库体积"].mean(),
-            "P80每车出库体积": processors.safe_p80(processors.regular_delivery_average_sample_rows(group)["出库体积"]),
+            "平均每车出库体积": trip_volume.mean(),
+            "P80每车出库体积": processors.safe_p80(trip_volume),
         })
     cost_source = ftl[ftl["主产品类型"].isin(["FBA", "FBX"])].copy()
     expanded = pd.concat([
@@ -747,13 +786,15 @@ def build_station_cost_report(matched):
             total_cost = group["派送成本"].sum()
             if total_volume <= 0 and total_cost <= 0:
                 continue
-            cost_sample_source = group.copy()
+            cost_sample_source = group[
+                pd.to_numeric(group["派送成本"], errors="coerce").gt(0)
+                & pd.to_numeric(group["车次数"], errors="coerce").gt(0)
+            ].copy()
             cost_sample_source["批次出库体积"] = cost_sample_source["出库体积"]
-            cost_sample_source["批次派送成本"] = cost_sample_source["派送成本"]
             cost_sample_source["出库体积"] = cost_sample_source["整车出库体积"]
             cost_sample = processors.regular_delivery_average_sample_rows(cost_sample_source)
 
-            trip_sample_source = group.drop_duplicates("整车记录ID").copy()
+            trip_sample_source = group[group["整车记录ID"].astype(str).str.strip().ne("")].drop_duplicates("整车记录ID").copy()
             trip_sample_source["出库体积"] = trip_sample_source["整车出库体积"]
             trip_sample_source["出库卡板数"] = trip_sample_source["整车出库卡板数"]
             trip_sample = processors.regular_delivery_average_sample_rows(trip_sample_source)
@@ -764,15 +805,18 @@ def build_station_cost_report(matched):
                 )
             )
             row = dict(zip(group_cols, keys))
+            exact_vehicle_count = pd.to_numeric(cost_sample["车次数"], errors="coerce").sum() if not cost_sample.empty else 0
+            positive_cost = pd.to_numeric(cost_sample["派送成本"], errors="coerce").sum() if not cost_sample.empty else 0
+            positive_volume = pd.to_numeric(cost_sample["批次出库体积"], errors="coerce").sum() if not cost_sample.empty else 0
             row.update({
                 "指标名称": "FBA及FBX平台仓成本",
                 "车次数": group["车次数"].sum(),
                 "总出库体积": total_volume,
                 "总出库卡板数": total_pallets,
                 "总派送成本": total_cost,
-                "平均整车价": cost_sample["批次派送成本"].mean() if not cost_sample.empty else pd.NA,
-                "P80整车价": processors.safe_p80(cost_sample["批次派送成本"]),
-                "每方平均价": processors.mean_detail_ratio(cost_sample, "批次派送成本", "批次出库体积"),
+                "平均整车价": processors.safe_divide(positive_cost, exact_vehicle_count),
+                "P80整车价": processors.safe_p80(cost_sample["批次整车等价价"]),
+                "每方平均价": processors.safe_divide(positive_cost, positive_volume),
                 "平均每车出库体积": trip_sample["出库体积"].mean() if not trip_sample.empty else pd.NA,
                 "P80每车出库体积": processors.safe_p80(trip_sample["出库体积"]),
                 "平均每车出库卡板数": trip_sample["出库卡板数"].mean() if not trip_sample.empty else pd.NA,
@@ -816,6 +860,11 @@ def build_ltl_station_cost_report(matched):
         source["主产品类型"].isin(["FBA", "FBX"])
         & source["派送成本"].gt(0)
     ].copy()
+    # 缺车次号只计货量，不进入LTL成本。
+    if "是否有真实车次号" in source.columns:
+        source = source[tool_common.normalize_boolean_series(source["是否有真实车次号"])].copy()
+    elif "车次号" in source.columns:
+        source = source[source["车次号"].fillna("").astype(str).str.strip().ne("")].copy()
     expanded = pd.concat([
         _expand_cost_by_station(
             source[source["主产品类型"] == "FBA"],
@@ -865,12 +914,12 @@ def build_cost_price_reference_reports(cost_ftl, cost_ltl):
     原有成本指标。
     """
     station_columns = [
-        "排名", "仓库", "对象类型", "平台", "仓点代码", "统计周期范围",
-        "总出库体积", "总出库卡板数", "总派送成本", "每方价格参考",
+        "排名", "仓库", "统计周期", "对象类型", "平台", "仓点代码",
+        "目的地总出库体积", "总出库体积", "总出库卡板数", "总派送成本", "每方价格参考",
     ]
     type_preferred_columns = [
         "排名", "仓库", "对象类型", "平台", "仓点代码", "统计周期",
-        "统计周期范围", "目的地总出库体积", "成本计算类型",
+        "目的地总出库体积", "成本计算类型",
         "车次数", "细分货量方数", "整车价格", "每方成本", "仓点分摊口径",
         "总出库体积", "总出库卡板数", "总派送成本",
         "指标名称", "平均整车价", "P80整车价", "每方平均价",
@@ -907,10 +956,11 @@ def build_cost_price_reference_reports(cost_ftl, cost_ltl):
 
     source = pd.concat(frames, ignore_index=True, sort=False)
     source = tool_common.normalize_case_insensitive_labels(source)
-    station_keys = ["仓库", "对象类型", "平台", "仓点代码"]
+    # 周/月选择必须贯穿价格参考层；禁止再次跨周期合并同一目的仓点。
+    station_keys = ["仓库", "统计周期", "对象类型", "平台", "仓点代码"]
+    destination_keys = ["仓库", "对象类型", "平台", "仓点代码"]
 
     station = source.groupby(station_keys, dropna=False, as_index=False).agg(
-        统计周期范围=("统计周期", _combine_period_labels),
         总出库体积=("总出库体积", "sum"),
         总出库卡板数=("总出库卡板数", "sum"),
         总派送成本=("总派送成本", "sum"),
@@ -919,12 +969,32 @@ def build_cost_price_reference_reports(cost_ftl, cost_ltl):
         lambda row: processors.safe_divide(row["总派送成本"], row["总出库体积"]),
         axis=1,
     )
-    station = station.sort_values(
-        ["仓库", "总出库体积", "对象类型", "平台", "仓点代码"],
+    # “大排序”只看所选范围内各仓点的累计货量；该累计值不参与任何周期成本计算。
+    # 同一仓点的所有周期共用一个排名，确保输出时仓点连续排列。
+    destination_meta = source.groupby(
+        destination_keys,
+        dropna=False,
+        as_index=False,
+    ).agg(
+        目的地总出库体积=("总出库体积", "sum"),
+    )
+    destination_meta = destination_meta.sort_values(
+        ["仓库", "目的地总出库体积", "对象类型", "平台", "仓点代码"],
         ascending=[True, False, True, True, True],
         kind="stable",
     ).reset_index(drop=True)
-    station["排名"] = station.groupby("仓库").cumcount() + 1
+    destination_meta["排名"] = destination_meta.groupby("仓库").cumcount() + 1
+    station = station.merge(
+        destination_meta,
+        on=destination_keys,
+        how="left",
+        validate="many_to_one",
+    )
+    station = station.sort_values(
+        ["仓库", "排名", "对象类型", "平台", "仓点代码", "统计周期"],
+        ascending=[True, True, True, True, True, False],
+        kind="stable",
+    ).reset_index(drop=True)
 
     cost_type = source.copy()
     cost_type["细分货量方数"] = cost_type["总出库体积"]
@@ -939,14 +1009,16 @@ def build_cost_price_reference_reports(cost_ftl, cost_ltl):
         cost_type["成本计算类型"].isin(["大车地板", "大车卡板", "小车"]),
         pd.NA,
     )
-    destination_meta = station[
-        station_keys + ["排名", "统计周期范围", "总出库体积"]
-    ].rename(columns={"总出库体积": "目的地总出库体积"})
-    cost_type = cost_type.merge(destination_meta, on=station_keys, how="left")
+    cost_type = cost_type.merge(
+        destination_meta,
+        on=destination_keys,
+        how="left",
+        validate="many_to_one",
+    )
     cost_type["_类型顺序"] = cost_type["成本计算类型"].map(PRICE_REFERENCE_TYPE_ORDER)
     cost_type = cost_type.sort_values(
-        ["仓库", "排名", "_类型顺序", "统计周期"],
-        ascending=[True, True, True, True],
+        ["仓库", "排名", "对象类型", "平台", "仓点代码", "统计周期", "_类型顺序"],
+        ascending=[True, True, True, True, True, False, True],
         kind="stable",
     ).drop(columns=["_类型顺序"]).reset_index(drop=True)
 
@@ -986,7 +1058,8 @@ def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_d
         "派送时效": _safe_round(_finalize_sheet(timing, "派送时效"), "派送时效"),
         "每方价格参考": _safe_round(_finalize_sheet(price_reference, "成本"), "成本"),
         "分类型价格参考": _safe_round(_finalize_sheet(type_price_reference, "成本"), "成本"),
-        "派送二_匹配后合并数据": _safe_round(_finalize_sheet(matched, "明细"), "明细"),
+        "派送二_匹配后批次数据": _safe_round(_finalize_sheet(matched, "明细"), "明细"),
+        "派送二_车次汇总核对": _safe_round(delivery_workflow_module.build_trip_audit(matched), "明细"),
         "邮编异常审核": _finalize_zip_audit_sheet(zip_audit),
         "区域识别规则": delivery_workflow_module.REGION_RULES_DF,
         "干线识别规则": delivery_workflow_module.LINEHAUL_RULES,
