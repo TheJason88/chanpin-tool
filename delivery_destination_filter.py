@@ -11,7 +11,8 @@ BASE_STAGE2_SHEETS = [
     "发车量",
     "派送时效",
     "成本",
-    "派送二_匹配后合并数据",
+    "派送二_匹配后批次数据",
+    "派送二_车次汇总核对",
     "邮编异常审核",
     "区域识别规则",
     "干线识别规则",
@@ -27,7 +28,8 @@ def get_stage2_report_sheet_names(destination_type="全部"):
             "发车量",
             "派送时效",
             "成本",
-            "派送二_匹配后合并数据",
+            "派送二_匹配后批次数据",
+            "派送二_车次汇总核对",
             "邮编异常审核",
             "区域识别规则",
             "干线识别规则",
@@ -39,7 +41,8 @@ def get_stage2_report_sheet_names(destination_type="全部"):
             "发车量",
             "派送时效",
             "成本",
-            "派送二_匹配后合并数据",
+            "派送二_匹配后批次数据",
+            "派送二_车次汇总核对",
             "邮编异常审核",
             "区域识别规则",
             "干线识别规则",
@@ -51,7 +54,8 @@ def get_stage2_report_sheet_names(destination_type="全部"):
         "发车量",
         "派送时效",
         "成本",
-        "派送二_匹配后合并数据",
+        "派送二_匹配后批次数据",
+        "派送二_车次汇总核对",
         "邮编异常审核",
         "区域识别规则",
         "干线识别规则",
@@ -138,8 +142,8 @@ def _split_combined_report(combined):
 
 
 def build_stage2_report_for_destination(delivery_workflow_module, cleaned_batches, match_df=None, period_type="按周统计", destination_type="全部"):
-    matched = delivery_workflow_module.prepare_stage2_for_report(cleaned_batches, match_df, period_type)
-    matched = filter_delivery_destination_type(matched, destination_type)
+    all_matched = delivery_workflow_module.prepare_stage2_for_report(cleaned_batches, match_df, period_type)
+    matched = filter_delivery_destination_type(all_matched, destination_type)
 
     combined = delivery_workflow_module.build_sheet1_volume_dispatch_time_report(matched)
     volume, dispatch, timing = _split_combined_report(combined)
@@ -166,7 +170,8 @@ def build_stage2_report_for_destination(delivery_workflow_module, cleaned_batche
         "发车量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(dispatch, "发车量"), "发车量"),
         "派送时效": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(timing, "派送时效"), "派送时效"),
         "成本": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(cost, "成本"), "成本"),
-        "派送二_匹配后合并数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(matched, "明细"), "明细"),
+        "派送二_匹配后批次数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(matched, "明细"), "明细"),
+        "派送二_车次汇总核对": delivery_match_adapter._safe_round(delivery_workflow_module.build_trip_audit(all_matched), "明细"),
         "邮编异常审核": delivery_match_adapter._finalize_zip_audit_sheet(zip_audit),
         "区域识别规则": delivery_workflow_module.REGION_RULES_DF,
         "干线识别规则": delivery_workflow_module.LINEHAUL_RULES,

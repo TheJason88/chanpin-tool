@@ -363,7 +363,9 @@ def _apply_zip_audit_updates_safely(main_df, audit_df):
 def _read_stage1_or_stage2_with_audit_updates_safely(excel_file):
     excel_file.seek(0)
     xls = pd.ExcelFile(excel_file)
-    if "派送二_匹配后合并数据" in xls.sheet_names:
+    if "派送二_匹配后批次数据" in xls.sheet_names:
+        sheet_name = "派送二_匹配后批次数据"
+    elif "派送二_匹配后合并数据" in xls.sheet_names:
         sheet_name = "派送二_匹配后合并数据"
     elif "清洗后数据" in xls.sheet_names:
         sheet_name = "清洗后数据"

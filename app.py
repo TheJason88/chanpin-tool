@@ -22,7 +22,7 @@ try:
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-07-27-batch-cost-trip-load-v8"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-07-27-destination-period-sorting-v11"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
@@ -133,10 +133,10 @@ def rebuild_zip_audit_from_cleaned(cleaned_batches):
 
 def get_stage2_report_sheet_names(destination_type="全部"):
     if destination_type == "FBA":
-        return ["货量", "FBA货量排行", "发车量", "派送时效", "调拨数据", "每方价格参考", "分类型价格参考", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
+        return ["货量", "FBA货量排行", "发车量", "派送时效", "调拨数据", "每方价格参考", "分类型价格参考", "派送二_匹配后批次数据", "派送二_车次汇总核对", "邮编异常审核", "区域识别规则", "干线识别规则"]
     if destination_type == "FBX":
-        return ["货量", "FBX平台仓货量", "发车量", "派送时效", "调拨数据", "每方价格参考", "分类型价格参考", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
-    return ["货量", "FBA货量排行", "FBX平台仓货量", "发车量", "派送时效", "调拨数据", "每方价格参考", "分类型价格参考", "派送二_匹配后合并数据", "邮编异常审核", "区域识别规则", "干线识别规则"]
+        return ["货量", "FBX平台仓货量", "发车量", "派送时效", "调拨数据", "每方价格参考", "分类型价格参考", "派送二_匹配后批次数据", "派送二_车次汇总核对", "邮编异常审核", "区域识别规则", "干线识别规则"]
+    return ["货量", "FBA货量排行", "FBX平台仓货量", "发车量", "派送时效", "调拨数据", "每方价格参考", "分类型价格参考", "派送二_匹配后批次数据", "派送二_车次汇总核对", "邮编异常审核", "区域识别规则", "干线识别规则"]
 
 
 def _split_combined_report(combined):
@@ -151,8 +151,8 @@ def _split_combined_report(combined):
 
 
 def build_stage2_report_for_destination(cleaned_batches, match_df=None, period_type="按周统计", destination_type="全部"):
-    matched = delivery_workflow.prepare_stage2_for_report(cleaned_batches, match_df, period_type)
-    matched = filter_delivery_destination_type(matched, destination_type)
+    all_matched = delivery_workflow.prepare_stage2_for_report(cleaned_batches, match_df, period_type)
+    matched = filter_delivery_destination_type(all_matched, destination_type)
 
     combined = delivery_workflow.build_sheet1_volume_dispatch_time_report(matched)
     volume, dispatch, timing = _split_combined_report(combined)
@@ -185,7 +185,8 @@ def build_stage2_report_for_destination(cleaned_batches, match_df=None, period_t
         "调拨数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(transfer, "调拨数据"), "调拨数据"),
         "每方价格参考": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(price_reference, "成本"), "成本"),
         "分类型价格参考": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(type_price_reference, "成本"), "成本"),
-        "派送二_匹配后合并数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(matched, "明细"), "明细"),
+        "派送二_匹配后批次数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(matched, "明细"), "明细"),
+        "派送二_车次汇总核对": delivery_match_adapter._safe_round(delivery_workflow.build_trip_audit(all_matched), "明细"),
         "邮编异常审核": delivery_match_adapter._finalize_zip_audit_sheet(zip_audit),
         "区域识别规则": delivery_workflow.REGION_RULES_DF,
         "干线识别规则": delivery_workflow.LINEHAUL_RULES,
@@ -308,7 +309,9 @@ st.caption(
     "派送二支持：按月统计 / 按周统计 / 按原文件时间范围；并单独输出LA至NJ/SAV/DAL盈仓调拨数据。"
     "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
     "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
-    "派送二成本输出为每方价格参考和分类型价格参考；前者按FBA/FBX目的地仓点汇总，后者合并大车地板、大车卡板、小车和LTL，同一目的地连续排列，并按目的地总货量降序。分类型表并列显示车次数、细分货量方数、整车价格和每方成本；整车价格沿用原平均整车价列名，但成本样本按批次计算，仅用于大车地板、大车卡板、小车，LTL该列留空。大车无法识别卡板/地板时按大车卡板；合并车次仅按各批次实际方数占整车方数的比例计算车次数，批次派送成本保留原值，不按整车总成本二次分摊。整车合并结果用于计算完整车次的平均出库体积、卡板数及确认货物构成。缺少历史批次成本或分仓体积时才按仓点等分回退。部署后需重新运行派送一再生成派送二。每方成本按总派送成本除以细分货量方数计算。"
+    "派送一按批次输出：目的仓、区域、方数、成本、出库时间和签收时间均保留批次原值；车次只用于统一最终FTL/LTL、识别车型装车、计算整车总量和批次车份额。一个批次出现多个目的地、缺目的地或方数无效时转入无效数据；缺车次只保留货量。"
+    "派送二成本输出为每方价格参考和分类型价格参考；前者按FBA/FBX目的地仓点汇总，后者合并大车地板、大车卡板、小车和LTL，同一目的地连续排列，并按目的地总货量降序。分类型表并列显示车次数、细分货量方数、整车价格和每方成本；FTL整车价格=批次总派送成本÷批次精确车份额合计，LTL整车价格留空。大车无法识别卡板/地板时按大车卡板；批次派送成本保留原值，不按整车总成本二次分摊；历史多目的地整车不再等分回退。每方成本按总派送成本除以细分货量方数计算。"
+    "目的仓点、区域和干线发车数先汇总批次精确车份额，再按四舍五入显示整数；派送时效按批次出库至批次签收计算，并按有效批次方数加权求平均和P80。LTL、缺车次、缺失/异常时间以及备注含‘里’或‘外’的批次不参与时效。"
     "运输类型先按仓库和车次判断：派送卡车显示AMAZON FREIGHT时最高优先级整车按FTL；否则同车次同时含FTL和LTL时整车统一按FTL；同车次只有LTL但总出库体积大于60CBM时也按FTL，60CBM仍按LTL。重判后的FTL车次回读原文件车型和装车类型，并在后续发车、时效和成本中均使用最终FTL口径。"
     "6B支持多文件上传；结构完全相同的匹配文件默认纵向合并。"
     "邮编异常审核表请填写“补充标准邮编”，可选填写“补充目的州”。"
@@ -368,7 +371,12 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
                 st.dataframe(zip_audit_df.head(100), use_container_width=True)
                 st.subheader("无效数据预览")
                 st.dataframe(invalid_detail.head(100), use_container_width=True)
-                output = tool_common.write_sheets_to_excel({"清洗后数据": cleaned_batches, "邮编异常数据": zip_audit_df, "无效数据": invalid_detail})
+                output = tool_common.write_sheets_to_excel({
+                    "清洗后数据": cleaned_batches,
+                    "车次汇总核对": delivery_workflow.build_trip_audit(cleaned_batches),
+                    "邮编异常数据": zip_audit_df,
+                    "无效数据": invalid_detail,
+                })
                 file_name = tool_common.build_output_filename(warehouse, DELIVERY_STAGE1_MODULE, delivery_destination_type)
                 st.download_button("下载派送一结果 Excel", output, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_delivery_stage1")
         except Exception as e:
