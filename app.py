@@ -22,7 +22,7 @@ try:
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-07-27-destination-period-sorting-v11"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-07-28-stage1-volume-alias-hotfix-v12"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
