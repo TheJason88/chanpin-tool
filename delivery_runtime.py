@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-07-28-stage2-supplier-volume-share-v13"
+RUNTIME_SCHEMA_VERSION = "2026-07-28-parallel-station-cost-source-v14"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
@@ -491,22 +491,16 @@ def _exact_vehicle_share_series(df):
     return pd.Series(1.0, index=df.index)
 
 
-def _filter_regular_trips_for_cost(matched):
-    """普通派送成本纳入成本大于0的整车记录；一车多批次由仓点分摊层处理。"""
-    if matched is None or matched.empty:
+def _station_cost_source_rows(matched):
+    """仓点成本从完整清洗后数据独立取数，不受干线/调拨标签反向排除。"""
+    if matched is None:
         return matched
-    out = matched.copy()
-    transfer_targets = out.apply(_transfer_target_from_row, axis=1)
-    regular = out[~transfer_targets.isin(TRANSFER_TARGETS.keys())].copy()
-    if "专线线路" in regular.columns:
-        regular = regular[regular["专线线路"].astype(str).isin(["", "未知线路", "非LA干线"])].copy()
-    if regular.empty:
-        return regular
-    return _filter_positive_cost_rows(regular)
+    return matched.copy()
 
 
-# 兼容旧测试或外部调用；当前已不再限制单批次。
-_filter_regular_single_batch_trips_for_cost = _filter_regular_trips_for_cost
+# 兼容旧测试或外部调用；旧函数名不再代表排除干线/调拨。
+_filter_regular_trips_for_cost = _station_cost_source_rows
+_filter_regular_single_batch_trips_for_cost = _station_cost_source_rows
 
 
 def _combine_series_text(series):
@@ -640,9 +634,11 @@ def _patch_cost_report_single_batch_only():
     delivery_match_adapter._original_build_station_cost_report = original_func
 
     def build_station_cost_report_with_transfer(matched):
-        regular_cost = original_func(_filter_regular_trips_for_cost(matched))
+        # 仓点成本、干线、调拨是从同一清洗后数据集并行取数的三个分析分支。
+        # 干线/调拨标签只能用于各自汇总，不能从FBA/FBX仓点成本中剔除批次。
+        station_cost = original_func(_station_cost_source_rows(matched))
         transfer_cost = _build_transfer_cost_report(matched)
-        frames = [df for df in [regular_cost, transfer_cost] if df is not None and not df.empty]
+        frames = [df for df in [station_cost, transfer_cost] if df is not None and not df.empty]
         if not frames:
             return pd.DataFrame()
         return pd.concat(frames, ignore_index=True, sort=False)

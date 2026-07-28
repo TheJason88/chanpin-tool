@@ -307,16 +307,56 @@ class MultiUnloadAverageTests(unittest.TestCase):
 
         self.assertTrue(report.empty)
 
-    def test_regular_cost_source_excludes_recognized_linehaul_trips(self):
+    def test_station_cost_source_keeps_linehaul_transfer_and_zero_cost_rows(self):
         rows = pd.DataFrame([
             {"专线线路": "LA-NJ", "批次号集合": "A", "派送成本": 500},
-            {"专线线路": "未知线路", "批次号集合": "B", "派送成本": 600},
-            {"专线线路": "未知线路", "批次号集合": "C,D", "派送成本": 700},
+            {
+                "专线线路": "LA-DAL", "批次号集合": "B", "派送成本": 600,
+                "调入仓库": "DAL", "业务场景": "仓间调拨",
+            },
+            {"专线线路": "未知线路", "批次号集合": "C", "派送成本": 0},
         ])
 
-        regular = delivery_runtime._filter_regular_trips_for_cost(rows)
+        source = delivery_runtime._station_cost_source_rows(rows)
 
-        self.assertEqual(regular["批次号集合"].tolist(), ["B", "C,D"])
+        self.assertEqual(source["批次号集合"].tolist(), ["A", "B", "C"])
+
+    def test_station_cost_reference_keeps_fba_linehaul_and_zero_cost_volume(self):
+        rows = pd.DataFrame([
+            {
+                "仓库": "LA", "统计周期": "2026-06", "专线线路": "LA-DAL",
+                "是否FTL发车": True, "标准运输类型": "FTL", "车次号": "FTW1-T1",
+                "车型标准值": "53尺大车", "装车类型标准值": "地板",
+                "主产品类型": "FBA", "FBA仓点代码集合": "FTW1",
+                "出库体积": 80, "出库卡板数": 40, "派送成本": 5000,
+                "批次车份额": 1, "整车出库体积": 80, "整车出库卡板数": 40,
+            },
+            {
+                "仓库": "LA", "统计周期": "2026-06", "专线线路": "LA-DAL",
+                "是否FTL发车": True, "标准运输类型": "FTL", "车次号": "FTW1-T2",
+                "车型标准值": "53尺大车", "装车类型标准值": "地板",
+                "主产品类型": "FBA", "FBA仓点代码集合": "FTW1",
+                "出库体积": 20, "出库卡板数": 10, "派送成本": 0,
+                "批次车份额": 1, "整车出库体积": 20, "整车出库卡板数": 10,
+            },
+        ])
+
+        delivery_runtime.bootstrap(delivery_workflow)
+        cost_ftl = delivery_match_adapter.build_station_cost_report(rows)
+        price_reference, type_reference = delivery_match_adapter.build_cost_price_reference_reports(
+            cost_ftl,
+            pd.DataFrame(),
+        )
+
+        station = price_reference[price_reference["仓点代码"] == "FTW1"].iloc[0]
+        self.assertEqual(station["总出库体积"], 100)
+        self.assertEqual(station["总派送成本"], 5000)
+        self.assertEqual(station["每方价格参考"], 50)
+
+        detail = type_reference[type_reference["仓点代码"] == "FTW1"].iloc[0]
+        self.assertEqual(detail["成本计算类型"], "大车地板")
+        self.assertEqual(detail["细分货量方数"], 100)
+        self.assertEqual(detail["每方成本"], 50)
 
     def test_trip_level_transport_rules_reclassify_mixed_and_over_60_ltl_into_ftl_cost(self):
         def detail_row(
