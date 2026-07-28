@@ -22,7 +22,7 @@ try:
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-07-28-parallel-station-cost-source-v14"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-07-28-trip-transfer-destination-v15"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
@@ -311,6 +311,7 @@ st.caption(
     "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
     "派送二的FBA货量排行和FBX平台仓货量在末列显示派送卡车使用比例：按仓库、统计周期、目的仓点汇总批次方数，空白或同批次供应商冲突的方数只进入分母，仅罗列占比严格大于10%的已识别供应商。"
     "仓点成本、干线和调拨均从清洗后有效数据集并行独立取数；干线或调拨标签不会把有效FBA/FBX批次从每方价格参考和分类型价格参考中排除。"
+    "调拨目的地优先于普通目的仓识别：同一真实车次只要任一批次明确为调拨，该车次全部批次统一覆盖到同一目标盈仓；目标仓缺失或同车次目标冲突时转入无效审核，不回退为FBA/FBX。"
     "派送一按批次输出：目的仓、区域、方数、成本、出库时间和签收时间均保留批次原值；车次只用于统一最终FTL/LTL、识别车型装车、计算整车总量和批次车份额。一个批次出现多个目的地、缺目的地或方数无效时转入无效数据；缺车次只保留货量。"
     "派送二成本输出为每方价格参考和分类型价格参考；前者按FBA/FBX目的地仓点汇总，后者合并大车地板、大车卡板、小车和LTL，同一目的地连续排列，并按目的地总货量降序。分类型表并列显示车次数、细分货量方数、整车价格和每方成本；FTL整车价格=批次总派送成本÷批次精确车份额合计，LTL整车价格留空。大车无法识别卡板/地板时按大车卡板；批次派送成本保留原值，不按整车总成本二次分摊；历史多目的地整车不再等分回退。每方成本按总派送成本除以细分货量方数计算。"
     "目的仓点、区域和干线发车数先汇总批次精确车份额，再按四舍五入显示整数；派送时效按批次出库至批次签收计算，并按有效批次方数加权求平均和P80。LTL、缺车次、缺失/异常时间以及备注含‘里’或‘外’的批次不参与时效。"

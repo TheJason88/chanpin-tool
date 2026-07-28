@@ -90,6 +90,156 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(exported.columns[-1], "同车次备注集合")
         self.assertEqual(set(exported["同车次备注集合"]), {"正常批次", "里仓两卸"})
 
+    def test_one_transfer_batch_overrides_every_batch_in_same_trip(self):
+        detail = pd.DataFrame([
+            {
+                "原始行号": 2, "仓库": "LA", "标准运输类型": "FTL",
+                "车次号": "TRANSFER-TRIP-1", "批次号": "A",
+                "出库时间": "2026-07-01", "签收时间": "2026-07-03",
+                "出库体积": 20, "出库卡板数": 2, "派送成本": 300,
+                "FBA/FBX": "FBA", "FBA仓点代码": "ONT8",
+                "目的地": "Amazon-ONT8", "出库类型": "调拨",
+                "业务场景": "仓间调拨", "调入仓库": "NJ", "备注": "",
+            },
+            {
+                "原始行号": 3, "仓库": "LA", "标准运输类型": "FTL",
+                "车次号": "TRANSFER-TRIP-1", "批次号": "B",
+                "出库时间": "2026-07-01", "签收时间": "2026-07-04",
+                "出库体积": 40, "出库卡板数": 4, "派送成本": 600,
+                "FBA/FBX": "FBA", "FBA仓点代码": "LAS1",
+                "目的地": "Amazon-LAS1", "出库类型": "派送",
+                "业务场景": "", "调入仓库": "", "备注": "",
+            },
+        ])
+
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(detail)
+
+        self.assertEqual(len(cleaned), 2)
+        self.assertEqual(set(cleaned["出库类型"]), {"调拨"})
+        self.assertEqual(set(cleaned["业务场景"]), {"仓间调拨"})
+        self.assertEqual(set(cleaned["调入仓库"]), {"新泽西盈仓"})
+        self.assertEqual(set(cleaned["调拨目标仓代码"]), {"NJ"})
+        self.assertEqual(set(cleaned["系统产品类型"]), {"仓间调拨"})
+        self.assertEqual(set(cleaned["主产品类型"]), {"仓间调拨"})
+        self.assertEqual(set(cleaned["批次目的地类型"]), {"其他"})
+        self.assertEqual(set(cleaned["批次目的仓点"]), {"新泽西盈仓"})
+        self.assertEqual(set(cleaned["FBA仓点代码集合"]), {""})
+        self.assertEqual(cleaned["FBA出库体积"].sum(), 0)
+        self.assertTrue(cleaned["目的仓点分配明细"].str.contains("新泽西盈仓").all())
+        self.assertTrue(cleaned["调拨覆盖审核"].str.startswith("同车次调拨统一覆盖").all())
+
+        delivery_runtime.bootstrap(delivery_workflow)
+        matched = delivery_workflow.prepare_stage2_for_report(
+            cleaned,
+            pd.DataFrame(),
+            "按月统计",
+        )
+        self.assertEqual(set(matched["主产品类型"]), {"仓间调拨"})
+        self.assertEqual(set(matched["专线线路"]), {"LA-NJ"})
+        transfer = delivery_runtime._build_transfer_report(matched)
+        self.assertEqual(len(transfer), 1)
+        self.assertEqual(transfer.iloc[0]["总出库体积"], 60)
+        self.assertEqual(set(transfer.iloc[0]["批次号集合"].split(",")), {"A", "B"})
+        self.assertTrue(delivery_match_adapter.build_fba_rank_sheet(matched).empty)
+
+    def test_transfer_without_trip_propagates_within_same_batch(self):
+        detail = pd.DataFrame([
+            {
+                "原始行号": 2, "仓库": "LA", "标准运输类型": "FTL",
+                "车次号": "", "批次号": "BATCH-SAV",
+                "出库时间": "2026-07-01", "签收时间": "2026-07-03",
+                "出库体积": 10, "出库卡板数": 1, "派送成本": 100,
+                "FBA/FBX": "FBA", "FBA仓点代码": "ONT8",
+                "出库类型": "调拨", "调入仓库": "SAV", "备注": "",
+            },
+            {
+                "原始行号": 3, "仓库": "LA", "标准运输类型": "FTL",
+                "车次号": "", "批次号": "BATCH-SAV",
+                "出库时间": "2026-07-01", "签收时间": "2026-07-03",
+                "出库体积": 5, "出库卡板数": 1, "派送成本": 100,
+                "FBA/FBX": "FBA", "FBA仓点代码": "LAS1",
+                "出库类型": "派送", "调入仓库": "", "备注": "",
+            },
+        ])
+
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(detail)
+
+        self.assertEqual(len(cleaned), 1)
+        self.assertEqual(cleaned.iloc[0]["调入仓库"], "萨凡纳盈仓")
+        self.assertEqual(cleaned.iloc[0]["批次目的仓点"], "萨凡纳盈仓")
+        self.assertTrue(cleaned.iloc[0]["调拨覆盖审核"].startswith("同批次调拨统一覆盖"))
+
+    def test_conflicting_or_missing_transfer_target_is_invalid(self):
+        base = {
+            "仓库": "LA", "标准运输类型": "FTL", "车次号": "CONFLICT-1",
+            "出库时间": "2026-07-01", "签收时间": "2026-07-03",
+            "出库体积": 20, "出库卡板数": 2, "派送成本": 300,
+            "FBA/FBX": "FBA", "FBA仓点代码": "ONT8",
+            "出库类型": "调拨", "业务场景": "仓间调拨", "备注": "",
+        }
+        conflict = pd.DataFrame([
+            {**base, "原始行号": 2, "批次号": "A", "调入仓库": "NJ"},
+            {**base, "原始行号": 3, "批次号": "B", "调入仓库": "DAL"},
+        ])
+
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(conflict)
+        invalid = pd.DataFrame(cleaned.attrs["batch_invalid_records"])
+
+        self.assertTrue(cleaned.empty)
+        self.assertEqual(len(invalid), 2)
+        self.assertTrue(invalid["批次无效原因"].str.contains("同车次调拨目标冲突").all())
+
+        missing = pd.DataFrame([{
+            **base,
+            "原始行号": 4,
+            "车次号": "MISSING-TARGET",
+            "批次号": "C",
+            "调入仓库": "",
+            "目的地": "Amazon-LAS1",
+        }])
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(missing)
+        invalid = pd.DataFrame(cleaned.attrs["batch_invalid_records"])
+        self.assertTrue(cleaned.empty)
+        self.assertIn("调拨目标盈仓无法识别", invalid.iloc[0]["批次无效原因"])
+
+    def test_stage2_legacy_rows_reapply_trip_transfer_override(self):
+        legacy = pd.DataFrame([
+            {
+                "仓库": "LA", "标准运输类型": "FTL", "车次号": "OLD-TRIP",
+                "是否有真实车次号": True, "批次号": "A", "批次号集合": "A",
+                "批次出库时间": "2026-07-01", "批次签收时间": "2026-07-03",
+                "出库体积": 20, "出库卡板数": 2, "派送成本": 300,
+                "批次车份额": 0.33, "FBA出库体积": 20, "FBX出库体积": 0,
+                "系统产品类型": "FBA", "主产品类型": "FBA",
+                "FBA仓点代码集合": "ONT8", "标准邮编集合": "92316",
+                "出库类型": "调拨", "业务场景": "仓间调拨", "调入仓库": "DAL",
+                "备注": "",
+            },
+            {
+                "仓库": "LA", "标准运输类型": "FTL", "车次号": "OLD-TRIP",
+                "是否有真实车次号": True, "批次号": "B", "批次号集合": "B",
+                "批次出库时间": "2026-07-01", "批次签收时间": "2026-07-04",
+                "出库体积": 40, "出库卡板数": 4, "派送成本": 600,
+                "批次车份额": 0.67, "FBA出库体积": 40, "FBX出库体积": 0,
+                "系统产品类型": "FBA", "主产品类型": "FBA",
+                "FBA仓点代码集合": "LAS1", "标准邮编集合": "92316",
+                "出库类型": "派送", "业务场景": "", "调入仓库": "",
+                "备注": "",
+            },
+        ])
+
+        delivery_runtime.bootstrap(delivery_workflow)
+        matched = delivery_workflow.prepare_stage2_for_report(
+            legacy,
+            pd.DataFrame(),
+            "按月统计",
+        )
+
+        self.assertEqual(set(matched["调入仓库"]), {"达拉斯盈仓"})
+        self.assertEqual(set(matched["主产品类型"]), {"仓间调拨"})
+        self.assertEqual(set(matched["FBA仓点代码集合"]), {""})
+        self.assertEqual(set(matched["专线线路"]), {"LA-DAL"})
+
     def test_stage1_remark_marker_excludes_entire_trip_from_linehaul_averages(self):
         rows = self.rows.copy()
         rows["同车次备注集合"] = ["正常", "外仓两卸"]

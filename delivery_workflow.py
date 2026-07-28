@@ -6,6 +6,7 @@ import pandas as pd
 
 import processors
 import delivery_reference
+import tool_common
 
 
 LINEHAUL_RULES = pd.DataFrame([
@@ -346,6 +347,11 @@ def product_summary_type(fba_volume, fbx_volume, system_types):
 
 
 def main_product_for_dispatch(row):
+    if "仓间调拨" in {
+        _clean_text(row.get("系统产品类型", "")),
+        _clean_text(row.get("主产品类型", "")),
+    }:
+        return "仓间调拨"
     fba = float(row.get("FBA出库体积", 0) or 0)
     fbx = float(row.get("FBX出库体积", 0) or 0)
     if fba <= 0 and fbx <= 0:
@@ -396,6 +402,14 @@ def _batch_delivery_truck(series):
 
 def _batch_destination(group):
     """返回批次唯一目的地；一个批次出现多个目的地时不做等分，直接转无效审核。"""
+    transfer_errors = [
+        _clean_text(value)
+        for value in group.get(tool_common.TRANSFER_AUDIT_COLUMN, pd.Series(dtype=object))
+        if _clean_text(value).startswith(tool_common.TRANSFER_ERROR_PREFIX)
+    ]
+    if transfer_errors:
+        return None, combine_unique(transfer_errors)
+
     transfer_target = first_nonblank(group.get("调入仓库", pd.Series(dtype=object)))
     transfer_text = " ".join(
         _clean_text(value)
@@ -407,6 +421,7 @@ def _batch_destination(group):
         target = _clean_text(transfer_target)
         if target:
             return {"对象类型": "其他", "平台": "联宇盈仓", "仓点代码": target}, ""
+        return None, "调拨批次缺少可识别目标盈仓"
 
     products = [
         _clean_text(value).upper()
@@ -486,7 +501,7 @@ def build_cleaned_batches_from_detail(valid_detail):
     批次字段（目的地、方数、成本、出库/签收时间）绝不再被整车汇总值覆盖。
     同一真实车次只负责统一最终运输类型、车型/装车方式、整车总量和批次车份额。
     """
-    df = valid_detail.copy()
+    df = tool_common.apply_trip_transfer_destination_rules(valid_detail)
     if df.empty:
         return pd.DataFrame()
     for col in ["出库体积", "出库卡板数", "派送成本"]:
@@ -497,7 +512,7 @@ def build_cleaned_batches_from_detail(valid_detail):
         if col not in df.columns:
             df[col] = pd.NaT
         df[col] = pd.to_datetime(df[col], errors="coerce")
-    for col in ["标准运输类型", "车次号", "派送卡车", "批次号", "仓库", "出库类型", "业务场景", "系统产品类型", "FBA/FBX", "平台名称", "FBX代码", "标准邮编", "邮编前三位", "目的州", "FBA仓点代码", "装车类型", "车型", "装车类型标准值", "车型标准值", "调入仓库", "邮编来源", "备注", "目的地", "标准地址"]:
+    for col in ["标准运输类型", "车次号", "派送卡车", "批次号", "仓库", "出库类型", "业务场景", "系统产品类型", "主产品类型", "FBA/FBX", "平台名称", "FBX代码", "标准邮编", "邮编前三位", "目的州", "FBA仓点代码", "装车类型", "车型", "装车类型标准值", "车型标准值", "调入仓库", "调拨目标仓代码", tool_common.TRANSFER_AUDIT_COLUMN, "邮编来源", "备注", "目的地", "标准地址"]:
         if col not in df.columns:
             df[col] = ""
     if "原始行号" not in df.columns:
@@ -559,6 +574,12 @@ def build_cleaned_batches_from_detail(valid_detail):
         fbx_code = destination["仓点代码"] if destination and destination["对象类型"] == "FBX平台仓" else ""
         platform = destination["平台"] if destination and destination["对象类型"] == "FBX平台仓" else ""
         allocation_json = _destination_allocation_json(destination, batch_no, volume, pallets, cost)
+        system_product = product_group or first_nonblank(group["系统产品类型"])
+        main_product = (
+            product_group
+            or first_nonblank(group["主产品类型"])
+            or ("仓间调拨" if system_product == "仓间调拨" else "未知")
+        )
 
         rows.append({
             "分析批次ID": f"BATCH_{batch_key}",
@@ -577,6 +598,8 @@ def build_cleaned_batches_from_detail(valid_detail):
             "出库类型": first_nonblank(group["出库类型"]),
             "业务场景": first_nonblank(group["业务场景"]),
             "调入仓库": first_nonblank(group["调入仓库"]),
+            "调拨目标仓代码": first_nonblank(group["调拨目标仓代码"]),
+            tool_common.TRANSFER_AUDIT_COLUMN: first_nonblank(group[tool_common.TRANSFER_AUDIT_COLUMN]),
             "批次出库时间": start_time,
             "批次签收时间": end_time,
             "派送时效": duration,
@@ -588,8 +611,8 @@ def build_cleaned_batches_from_detail(valid_detail):
             "供应商审核": supplier_audit,
             "FBA出库体积": volume if product_group == "FBA" else 0.0,
             "FBX出库体积": volume if product_group == "FBX" else 0.0,
-            "系统产品类型": product_group or first_nonblank(group["系统产品类型"]),
-            "主产品类型": product_group or "未知",
+            "系统产品类型": system_product,
+            "主产品类型": main_product,
             "平台名称": platform,
             "FBX代码集合": fbx_code,
             "平台仓代码集合": fbx_code,
@@ -817,7 +840,16 @@ def add_analysis_period(df, period_type):
 
 
 def prepare_stage2_for_report(cleaned_batches, match_df, period_type):
-    cleaned_input = cleaned_batches.copy()
+    cleaned_input = tool_common.apply_trip_transfer_destination_rules(cleaned_batches)
+    transfer_errors = tool_common.transfer_override_error_rows(cleaned_input)
+    if not transfer_errors.empty:
+        audit_values = combine_unique(
+            transfer_errors[tool_common.TRANSFER_AUDIT_COLUMN]
+        )
+        raise ValueError(
+            "调拨目的地覆盖失败，请先修正调拨目标盈仓后重新运行功能一："
+            + audit_values
+        )
     cleaned_input.attrs = {}
     matched = apply_manual_match_to_cleaned_batches(cleaned_input, match_df)
     matched = apply_linehaul_rules_second_part(matched)

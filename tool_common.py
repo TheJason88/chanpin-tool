@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import datetime
 from io import BytesIO
@@ -184,24 +185,291 @@ def split_values(value):
     return [p.strip() for p in parts if p.strip() and p.strip().lower() not in ["nan", "none", "null", "false", "0"]]
 
 
+def _transfer_keyword_matches(upper_text, keyword):
+    key = str(keyword).upper().strip()
+    if not key:
+        return False
+    if key.isalpha() and len(key) <= 3:
+        return bool(
+            re.search(
+                rf"(?<![A-Z0-9]){re.escape(key)}(?![A-Z0-9])",
+                upper_text,
+            )
+        )
+    return key in upper_text
+
+
 def infer_transfer_target_from_text(text):
     upper = str(text).upper()
     for target, info in TRANSFER_WAREHOUSE_INFO.items():
         for keyword in info["keywords"]:
-            if str(keyword).upper() in upper:
+            if _transfer_keyword_matches(upper, keyword):
                 return target, info
     return "", None
 
 
-def infer_transfer_target_from_row(row):
-    preferred_cols = ["调入仓库", "出库类型", "业务场景", "实际目的地", "修正后目的地", "目的地", "备注", "车次号", "批次号集合"]
+def infer_transfer_targets_from_text(text):
+    """返回文本中命中的全部调拨目标仓，供同车次目标冲突审核使用。"""
+    upper = str(text).upper()
+    targets = []
+    for target, info in TRANSFER_WAREHOUSE_INFO.items():
+        if any(
+            _transfer_keyword_matches(upper, keyword)
+            for keyword in info["keywords"]
+        ):
+            targets.append(target)
+    return targets
+
+
+def infer_transfer_targets_from_row(row):
+    """调入仓库优先；当前字段命中后不再让低优先级旧目的地制造冲突。"""
+    preferred_cols = [
+        "调入仓库", "出库类型", "业务场景", "实际目的地", "修正后目的地",
+        "目的地", "备注", "车次号", "批次号集合",
+    ]
     for col in preferred_cols:
-        if col in row.index:
-            target, info = infer_transfer_target_from_text(row.get(col, ""))
-            if info:
-                return target, info
-    text = " ".join(str(row.get(c, "")) for c in preferred_cols if c in row.index)
-    return infer_transfer_target_from_text(text)
+        if col not in row.index:
+            continue
+        targets = infer_transfer_targets_from_text(row.get(col, ""))
+        if targets:
+            return targets
+    return []
+
+
+def infer_transfer_target_from_row(row):
+    targets = infer_transfer_targets_from_row(row)
+    if not targets:
+        return "", None
+    target = targets[0]
+    return target, TRANSFER_WAREHOUSE_INFO[target]
+
+
+TRANSFER_AUDIT_COLUMN = "调拨覆盖审核"
+TRANSFER_ERROR_PREFIX = "异常："
+TRANSFER_SEMANTIC_COLUMNS = ["出库类型", "业务场景", "调入仓库", "备注"]
+TRANSFER_DESTINATION_TEXT_COLUMNS = [
+    "实际目的地", "修正后目的地", "目的地", "标准地址", "调入仓库",
+]
+TRANSFER_RAW_CODE_COLUMNS = ["FBA仓点代码", "FBX代码", "平台仓代码"]
+TRANSFER_BATCH_CODE_COLUMNS = [
+    "FBA仓点代码集合", "FBX代码集合", "平台仓代码集合", "平台仓配对集合",
+]
+
+
+def _clean_transfer_text(value):
+    if processors.is_blank(value):
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "none", "null", "<na>"} else text
+
+
+def transfer_row_has_semantics(row):
+    """调入仓库非空，或业务字段明确含调拨/仓间/调入，即视为调拨。"""
+    if _clean_transfer_text(row.get("调入仓库", "")):
+        return True
+    text = " ".join(
+        _clean_transfer_text(row.get(col, ""))
+        for col in TRANSFER_SEMANTIC_COLUMNS
+        if col in row.index
+    )
+    return any(keyword in text for keyword in ["调拨", "仓间", "调入"])
+
+
+def _transfer_group_key(row, index):
+    warehouse = _clean_transfer_text(row.get("仓库", "")).upper()
+    trip_no = _clean_transfer_text(row.get("车次号", ""))
+    batch_no = _clean_transfer_text(
+        row.get("批次号", row.get("批次号集合", ""))
+    )
+    if trip_no:
+        return f"TRIP||{warehouse}||{trip_no}"
+    if batch_no:
+        return f"BATCH||{warehouse}||{batch_no}"
+    return f"ROW||{warehouse}||{index}"
+
+
+def _ensure_transfer_columns(df):
+    out = df.copy()
+    text_columns = [
+        "出库类型", "业务场景", "调入仓库", "实际目的地", "修正后目的地",
+        "目的地", "标准地址", "标准邮编", "邮编前三位", "标准邮编集合",
+        "邮编前三位集合", "目的州", "邮编来源", "FBA/FBX", "系统产品类型",
+        "主产品类型", "平台名称", "FBA仓点代码", "FBX代码", "平台仓代码",
+        "FBA仓点代码集合", "FBX代码集合", "平台仓代码集合", "平台仓配对集合",
+        "批次目的地类型", "批次目的仓点", "目的仓点分配明细",
+        "专线线路", "专线识别方式", "调拨目标仓代码", TRANSFER_AUDIT_COLUMN,
+    ]
+    for col in text_columns:
+        if col not in out.columns:
+            out[col] = ""
+        else:
+            out[col] = out[col].astype(object)
+    for col in ["FBA出库体积", "FBX出库体积"]:
+        if col not in out.columns:
+            out[col] = 0.0
+        else:
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0).astype(float)
+    if "目的地邮编待补充" not in out.columns:
+        out["目的地邮编待补充"] = False
+    else:
+        out["目的地邮编待补充"] = out["目的地邮编待补充"].astype(object)
+    return out
+
+
+def _transfer_allocation_json(row, display):
+    def numeric(name):
+        value = pd.to_numeric(row.get(name, 0), errors="coerce")
+        return 0.0 if pd.isna(value) else float(value)
+
+    batch_no = _clean_transfer_text(
+        row.get("批次号", row.get("批次号集合", ""))
+    )
+    return json.dumps(
+        [{
+            "对象类型": "其他",
+            "平台": "盈仓",
+            "仓点代码": display,
+            "批次号": batch_no,
+            "出库体积": numeric("出库体积"),
+            "出库卡板数": numeric("出库卡板数"),
+            "派送成本": numeric("派送成本"),
+        }],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _clear_destination_for_invalid_transfer(out, indexes, audit_text):
+    out.loc[indexes, "出库类型"] = "调拨"
+    out.loc[indexes, "业务场景"] = "仓间调拨"
+    out.loc[indexes, "调入仓库"] = ""
+    out.loc[indexes, "调拨目标仓代码"] = ""
+    out.loc[indexes, TRANSFER_AUDIT_COLUMN] = audit_text
+    out.loc[indexes, "系统产品类型"] = "仓间调拨"
+    out.loc[indexes, "主产品类型"] = "仓间调拨"
+    out.loc[indexes, "FBA/FBX"] = ""
+    out.loc[indexes, "平台名称"] = "盈仓"
+    for col in TRANSFER_DESTINATION_TEXT_COLUMNS:
+        out.loc[indexes, col] = ""
+    for col in TRANSFER_RAW_CODE_COLUMNS + TRANSFER_BATCH_CODE_COLUMNS:
+        out.loc[indexes, col] = ""
+    out.loc[indexes, "FBA出库体积"] = 0.0
+    out.loc[indexes, "FBX出库体积"] = 0.0
+    out.loc[indexes, "批次目的地类型"] = ""
+    out.loc[indexes, "批次目的仓点"] = ""
+    out.loc[indexes, "目的仓点分配明细"] = ""
+    out.loc[indexes, "标准邮编"] = ""
+    out.loc[indexes, "邮编前三位"] = ""
+    out.loc[indexes, "标准邮编集合"] = ""
+    out.loc[indexes, "邮编前三位集合"] = ""
+    out.loc[indexes, "目的州"] = ""
+    out.loc[indexes, "邮编来源"] = ""
+    out.loc[indexes, "目的地邮编待补充"] = True
+    out.loc[indexes, "专线线路"] = ""
+    out.loc[indexes, "专线识别方式"] = audit_text
+
+
+def _apply_transfer_target(out, indexes, target, info, scope):
+    display = info["display"]
+    out.loc[indexes, "出库类型"] = "调拨"
+    out.loc[indexes, "业务场景"] = "仓间调拨"
+    out.loc[indexes, "调入仓库"] = display
+    out.loc[indexes, "调拨目标仓代码"] = target
+    out.loc[indexes, TRANSFER_AUDIT_COLUMN] = f"{scope}调拨统一覆盖:{display}"
+    for col in TRANSFER_DESTINATION_TEXT_COLUMNS:
+        out.loc[indexes, col] = display
+    out.loc[indexes, "标准邮编"] = info["zip"]
+    out.loc[indexes, "邮编前三位"] = info["zip3"]
+    out.loc[indexes, "标准邮编集合"] = info["zip"]
+    out.loc[indexes, "邮编前三位集合"] = info["zip3"]
+    out.loc[indexes, "目的州"] = info["state"]
+    out.loc[indexes, "邮编来源"] = "调拨目标仓地址规则"
+    out.loc[indexes, "目的地邮编待补充"] = False
+    out.loc[indexes, "FBA/FBX"] = ""
+    out.loc[indexes, "系统产品类型"] = "仓间调拨"
+    out.loc[indexes, "主产品类型"] = "仓间调拨"
+    out.loc[indexes, "平台名称"] = "盈仓"
+    for col in TRANSFER_RAW_CODE_COLUMNS + TRANSFER_BATCH_CODE_COLUMNS:
+        out.loc[indexes, col] = ""
+    out.loc[indexes, "平台仓代码集合"] = display
+    out.loc[indexes, "FBA出库体积"] = 0.0
+    out.loc[indexes, "FBX出库体积"] = 0.0
+    out.loc[indexes, "批次目的地类型"] = "其他"
+    out.loc[indexes, "批次目的仓点"] = display
+    out.loc[indexes, "专线线路"] = info["line"]
+    out.loc[indexes, "专线识别方式"] = "调拨目标仓优先覆盖"
+    for index in indexes:
+        out.at[index, "目的仓点分配明细"] = _transfer_allocation_json(
+            out.loc[index],
+            display,
+        )
+
+
+def apply_trip_transfer_destination_rules(df):
+    """把调拨目的地作为清洗最高优先级，并按真实车次传播到全部批次。"""
+    if df is None or df.empty:
+        return df
+    out = _ensure_transfer_columns(df)
+    group_keys = pd.Series(
+        (_transfer_group_key(row, index) for index, row in out.iterrows()),
+        index=out.index,
+        dtype=object,
+    )
+    for group_key, indexes in group_keys.groupby(group_keys, sort=False).groups.items():
+        group = out.loc[indexes]
+        transfer_mask = group.apply(transfer_row_has_semantics, axis=1)
+        if not transfer_mask.any():
+            continue
+
+        targets = []
+        for _, row in group.loc[transfer_mask].iterrows():
+            for target in infer_transfer_targets_from_row(row):
+                if target not in targets:
+                    targets.append(target)
+        if not targets:
+            for _, row in group.iterrows():
+                for target in infer_transfer_targets_from_row(row):
+                    if target not in targets:
+                        targets.append(target)
+
+        if len(targets) == 0:
+            _clear_destination_for_invalid_transfer(
+                out,
+                indexes,
+                f"{TRANSFER_ERROR_PREFIX}调拨目标盈仓无法识别",
+            )
+            continue
+        if len(targets) > 1:
+            _clear_destination_for_invalid_transfer(
+                out,
+                indexes,
+                f"{TRANSFER_ERROR_PREFIX}同车次调拨目标冲突:" + ",".join(targets),
+            )
+            continue
+
+        scope = (
+            "同车次"
+            if str(group_key).startswith("TRIP||")
+            else "同批次"
+            if str(group_key).startswith("BATCH||")
+            else "单行"
+        )
+        target = targets[0]
+        _apply_transfer_target(
+            out,
+            indexes,
+            target,
+            TRANSFER_WAREHOUSE_INFO[target],
+            scope,
+        )
+    return out
+
+
+def transfer_override_error_rows(df):
+    if df is None or df.empty or TRANSFER_AUDIT_COLUMN not in df.columns:
+        return pd.DataFrame()
+    audit = df[TRANSFER_AUDIT_COLUMN].fillna("").astype(str)
+    return df[audit.str.startswith(TRANSFER_ERROR_PREFIX)].copy()
 
 
 def apply_dominant_destination_from_detail(cleaned_batches, detail_df):

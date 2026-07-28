@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-07-28-parallel-station-cost-source-v14"
+RUNTIME_SCHEMA_VERSION = "2026-07-28-trip-transfer-destination-v15"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
@@ -717,7 +717,8 @@ def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_modul
         if isinstance(result, tuple) and len(result) == 4:
             cleaned_batches, invalid_detail, zip_audit_df, raw_detail = result
             raw_detail = _apply_ltl_priority_to_detail(raw_detail)
-            # 批次是目的地/区域/时效的原子粒度，禁止再用整车主目的地覆盖批次目的地。
+            # 批次仍是普通派送目的地/区域/时效的原子粒度；仅“整车明确为调拨”时，
+            # 允许车次级规则把全部批次统一覆盖到同一目标盈仓。
             cleaned_batches = _apply_trip_cost_rule(cleaned_batches, raw_detail)
             cleaned_batches = _clean_delivery_time_columns(cleaned_batches)
             if cleaned_batches is not None and not cleaned_batches.empty:
