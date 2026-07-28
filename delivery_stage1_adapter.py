@@ -219,9 +219,9 @@ def _infer_transfer_target_from_row(row):
 
 def _apply_transfer_destination_override(cleaned_batches):
     """
-    功能一末尾再次执行幂等校验，确保调拨车次的全部批次均已覆盖到同一目标盈仓。
+    功能一末尾再次执行幂等校验，确保调拨目的地只覆盖本批次且不传播到同车次其他批次。
     """
-    return tool_common.apply_trip_transfer_destination_rules(cleaned_batches)
+    return tool_common.apply_batch_transfer_destination_rules(cleaned_batches)
 
 
 def _force_cleaned_totals_from_detail(cleaned_batches, detail_df):

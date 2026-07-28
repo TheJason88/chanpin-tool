@@ -501,7 +501,7 @@ def build_cleaned_batches_from_detail(valid_detail):
     批次字段（目的地、方数、成本、出库/签收时间）绝不再被整车汇总值覆盖。
     同一真实车次只负责统一最终运输类型、车型/装车方式、整车总量和批次车份额。
     """
-    df = tool_common.apply_trip_transfer_destination_rules(valid_detail)
+    df = tool_common.apply_batch_transfer_destination_rules(valid_detail)
     if df.empty:
         return pd.DataFrame()
     for col in ["出库体积", "出库卡板数", "派送成本"]:
@@ -605,7 +605,10 @@ def build_cleaned_batches_from_detail(valid_detail):
             "派送时效": duration,
             "出库体积": volume,
             "出库卡板数": pallets,
+            tool_common.BASE_DELIVERY_COST_COLUMN: cost,
+            tool_common.FLOOR_LOADING_FEE_COLUMN: 0.0,
             "派送成本": cost,
+            tool_common.FLOOR_LOADING_FEE_AUDIT_COLUMN: "",
             "批次成本审核": cost_audit,
             "派送卡车": delivery_truck,
             "供应商审核": supplier_audit,
@@ -673,6 +676,7 @@ def build_cleaned_batches_from_detail(valid_detail):
             result.loc[indexes, "批次车份额"] = shares.values
             result.loc[indexes, "车次份额合计"] = float(shares.sum())
 
+    result = tool_common.apply_floor_loading_fee(result)
     result["批次出库时间"] = pd.to_datetime(result["批次出库时间"], errors="coerce")
     result["批次签收时间"] = pd.to_datetime(result["批次签收时间"], errors="coerce")
     result["派送时效"] = pd.to_numeric(result["派送时效"], errors="coerce")
@@ -840,7 +844,7 @@ def add_analysis_period(df, period_type):
 
 
 def prepare_stage2_for_report(cleaned_batches, match_df, period_type):
-    cleaned_input = tool_common.apply_trip_transfer_destination_rules(cleaned_batches)
+    cleaned_input = tool_common.apply_batch_transfer_destination_rules(cleaned_batches)
     transfer_errors = tool_common.transfer_override_error_rows(cleaned_input)
     if not transfer_errors.empty:
         audit_values = combine_unique(
@@ -881,6 +885,7 @@ def prepare_stage2_for_report(cleaned_batches, match_df, period_type):
         )
         matched["批次车份额"] = share
     matched["是否FTL发车"] = matched["标准运输类型"].eq("FTL") & matched["是否有真实车次号"] & share.gt(0)
+    matched = tool_common.apply_floor_loading_fee(matched)
     matched["主产品类型"] = matched.apply(main_product_for_dispatch, axis=1)
     remark_cols = [col for col in processors.MULTI_UNLOAD_REMARK_COLUMNS if col in matched.columns and col != "同车次备注集合"]
     if "同车次备注集合" in matched.columns:

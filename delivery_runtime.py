@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-07-28-trip-transfer-destination-v15"
+RUNTIME_SCHEMA_VERSION = "2026-07-28-batch-transfer-floor-loading-v16"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
@@ -313,7 +313,9 @@ def _stage1_force_totals_with_unique_cost_rule(cleaned_batches, detail_df):
 
         out.at[idx, "出库体积"] = float(matched["出库体积"].sum())
         out.at[idx, "出库卡板数"] = float(matched["出库卡板数"].sum())
-        out.at[idx, "派送成本"] = _aggregate_unique_batch_costs(_batch_costs_by_ordered_batch_ids(matched, batch_keys))
+        base_cost = _aggregate_unique_batch_costs(_batch_costs_by_ordered_batch_ids(matched, batch_keys))
+        out.at[idx, tool_common.BASE_DELIVERY_COST_COLUMN] = base_cost
+        out.at[idx, "派送成本"] = base_cost
         out.at[idx, "FBA出库体积"] = float(matched.loc[matched["FBA/FBX"] == "FBA", "出库体积"].sum())
         out.at[idx, "FBX出库体积"] = float(matched.loc[matched["FBA/FBX"] == "FBX", "出库体积"].sum())
 
@@ -328,7 +330,7 @@ def _stage1_force_totals_with_unique_cost_rule(cleaned_batches, detail_df):
             out.at[idx, "系统产品类型"] = "FBX"
         out.at[idx, "主产品类型"] = "FBA" if fba_volume >= fbx_volume and fba_volume > 0 else ("FBX" if fbx_volume > 0 else "未知")
 
-    return _clean_delivery_time_columns(out)
+    return _clean_delivery_time_columns(tool_common.apply_floor_loading_fee(out))
 
 
 def _apply_trip_cost_rule(cleaned_batches, raw_detail):
@@ -356,9 +358,11 @@ def _apply_trip_cost_rule(cleaned_batches, raw_detail):
         matched = detail[detail["批次号_匹配Key"].isin(batch_keys)].copy()
         if matched.empty:
             continue
-        out.at[idx, "派送成本"] = _aggregate_unique_batch_costs(_batch_costs_by_ordered_batch_ids(matched, batch_keys))
+        base_cost = _aggregate_unique_batch_costs(_batch_costs_by_ordered_batch_ids(matched, batch_keys))
+        out.at[idx, tool_common.BASE_DELIVERY_COST_COLUMN] = base_cost
+        out.at[idx, "派送成本"] = base_cost
 
-    return _clean_delivery_time_columns(out)
+    return _clean_delivery_time_columns(tool_common.apply_floor_loading_fee(out))
 
 
 def _original_file_period_label(df, date_col="批次出库时间"):
@@ -717,8 +721,8 @@ def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_modul
         if isinstance(result, tuple) and len(result) == 4:
             cleaned_batches, invalid_detail, zip_audit_df, raw_detail = result
             raw_detail = _apply_ltl_priority_to_detail(raw_detail)
-            # 批次仍是普通派送目的地/区域/时效的原子粒度；仅“整车明确为调拨”时，
-            # 允许车次级规则把全部批次统一覆盖到同一目标盈仓。
+            # 调拨只覆盖本批次目的地；同一车次的其他FBA/FBX批次保留各自目的地，
+            # 以支持一车多卸。车次仍只提供运输类型、车型装车和批次车份额上下文。
             cleaned_batches = _apply_trip_cost_rule(cleaned_batches, raw_detail)
             cleaned_batches = _clean_delivery_time_columns(cleaned_batches)
             if cleaned_batches is not None and not cleaned_batches.empty:
