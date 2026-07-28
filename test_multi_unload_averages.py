@@ -884,6 +884,43 @@ class MultiUnloadAverageTests(unittest.TestCase):
         invalid = pd.DataFrame(cleaned.attrs["batch_invalid_records"])
         self.assertIn("无效出库体积", invalid.iloc[0]["批次无效原因"])
 
+    def test_stage1_keeps_canonical_volume_and_pallet_headers_before_batch_validation(self):
+        """真实导出表头进入批次有效性校验前，不得被通用别名二次改名成0。"""
+        source = pd.DataFrame([{
+            "装车类型": "卡板",
+            "批次号": "PC2606010066",
+            "出库体积": 73.2577,
+            "目的地": "Amazon-TOL3",
+            "派送卡车": "UPS",
+            "车次号": "CC260601000053",
+            "出库时间": "2026-06-01 19:16:47",
+            "签收时间": "",
+            "出库卡板数": 21,
+            "派送方式": "卡车派送",
+            "出库类型": "派送",
+            "批次状态": "",
+            "派送成本": 350,
+            "运输类型": "FTL",
+            "车型": "53尺大车",
+        }])
+
+        delivery_runtime.bootstrap(delivery_workflow)
+        cleaned, invalid, zip_audit, detail = (
+            delivery_workflow.process_stage1_raw_files_to_cleaned_batches(
+                [("列表数据.xlsx", source)],
+                "LA",
+            )
+        )
+
+        self.assertEqual(len(cleaned), 1)
+        self.assertTrue(invalid.empty)
+        self.assertEqual(detail.iloc[0]["出库体积"], 73.2577)
+        self.assertEqual(detail.iloc[0]["出库卡板数"], 21)
+        self.assertEqual(cleaned.iloc[0]["出库体积"], 73.2577)
+        self.assertEqual(cleaned.iloc[0]["出库卡板数"], 21)
+        self.assertNotIn("缺少或无效出库体积", str(invalid.get("无效批次剔除原因", "")))
+        self.assertIsInstance(zip_audit, pd.DataFrame)
+
     def test_missing_trip_keeps_volume_but_excludes_dispatch_time_and_cost(self):
         detail = pd.DataFrame([{
             "原始行号": 2, "仓库": "LA", "标准运输类型": "FTL", "车次号": "",
