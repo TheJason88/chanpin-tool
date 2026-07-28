@@ -918,8 +918,81 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(detail.iloc[0]["出库卡板数"], 21)
         self.assertEqual(cleaned.iloc[0]["出库体积"], 73.2577)
         self.assertEqual(cleaned.iloc[0]["出库卡板数"], 21)
+        self.assertEqual(cleaned.iloc[0]["派送卡车"], "UPS")
         self.assertNotIn("缺少或无效出库体积", str(invalid.get("无效批次剔除原因", "")))
         self.assertIsInstance(zip_audit, pd.DataFrame)
+
+    def test_batch_delivery_truck_conflict_keeps_volume_without_supplier_assignment(self):
+        detail = pd.DataFrame([
+            {
+                "原始行号": 2, "仓库": "LA", "标准运输类型": "FTL", "车次号": "T1",
+                "批次号": "B1", "出库时间": "2026-07-01", "签收时间": "2026-07-02",
+                "出库体积": 20, "FBA/FBX": "FBA", "FBA仓点代码": "ONT8",
+                "派送卡车": "JTeam INC",
+            },
+            {
+                "原始行号": 3, "仓库": "LA", "标准运输类型": "FTL", "车次号": "T1",
+                "批次号": "B1", "出库时间": "2026-07-01", "签收时间": "2026-07-02",
+                "出库体积": 30, "FBA/FBX": "FBA", "FBA仓点代码": "ONT8",
+                "派送卡车": "GN Trucking",
+            },
+        ])
+
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(detail)
+
+        self.assertEqual(cleaned.iloc[0]["出库体积"], 50)
+        self.assertEqual(cleaned.iloc[0]["派送卡车"], "")
+        self.assertIn("多个派送卡车", cleaned.iloc[0]["供应商审核"])
+        self.assertIn("计入占比分母", cleaned.iloc[0]["供应商审核"])
+
+    def test_stage2_destination_volume_tables_append_delivery_truck_volume_share(self):
+        rows = pd.DataFrame([
+            {"仓库": "LA", "统计周期": "2026-06", "FBA出库体积": 20, "FBA仓点代码集合": "ONT8", "派送卡车": "JTeam INC"},
+            {"仓库": "LA", "统计周期": "2026-06", "FBA出库体积": 35, "FBA仓点代码集合": "ONT8", "派送卡车": "jteam inc"},
+            {"仓库": "LA", "统计周期": "2026-06", "FBA出库体积": 25, "FBA仓点代码集合": "ONT8", "派送卡车": "GN Trucking"},
+            {"仓库": "LA", "统计周期": "2026-06", "FBA出库体积": 10, "FBA仓点代码集合": "ONT8", "派送卡车": "AMAZON FREIGHT"},
+            {"仓库": "LA", "统计周期": "2026-06", "FBA出库体积": 10, "FBA仓点代码集合": "ONT8", "派送卡车": ""},
+            {"仓库": "LA", "统计周期": "2026-07", "FBA出库体积": 40, "FBA仓点代码集合": "ONT8", "派送卡车": "July Carrier"},
+            {"仓库": "NJ", "统计周期": "2026-06", "FBA出库体积": 30, "FBA仓点代码集合": "ONT8", "派送卡车": "NJ Carrier"},
+            {
+                "仓库": "LA", "统计周期": "2026-06", "FBA出库体积": 0,
+                "FBX出库体积": 30, "平台名称": "谷仓", "FBX代码集合": "16号仓",
+                "平台仓配对集合": "谷仓||16号仓", "派送卡车": "JTeam INC",
+            },
+            {
+                "仓库": "LA", "统计周期": "2026-06", "FBA出库体积": 0,
+                "FBX出库体积": 20, "平台名称": "谷仓", "FBX代码集合": "16号仓",
+                "平台仓配对集合": "谷仓||16号仓", "派送卡车": "",
+            },
+        ]).fillna({
+            "FBA出库体积": 0, "FBX出库体积": 0, "平台名称": "",
+            "FBX代码集合": "", "平台仓配对集合": "",
+        })
+
+        fba = delivery_match_adapter.build_fba_rank_sheet(rows)
+        fba_june_la = fba[
+            (fba["仓库"] == "LA")
+            & (fba["统计周期"] == "2026-06")
+            & (fba["FBA仓点"] == "ONT8")
+        ].iloc[0]
+        self.assertEqual(
+            fba_june_la["派送卡车使用比例（>10%）"],
+            "JTeam INC 55.00%；GN Trucking 25.00%",
+        )
+        self.assertNotIn("AMAZON FREIGHT", fba_june_la["派送卡车使用比例（>10%）"])
+        self.assertEqual(
+            fba[(fba["仓库"] == "LA") & (fba["统计周期"] == "2026-07")].iloc[0]["派送卡车使用比例（>10%）"],
+            "July Carrier 100.00%",
+        )
+        self.assertEqual(
+            fba[(fba["仓库"] == "NJ") & (fba["统计周期"] == "2026-06")].iloc[0]["派送卡车使用比例（>10%）"],
+            "NJ Carrier 100.00%",
+        )
+        self.assertEqual(fba.columns[-1], "派送卡车使用比例（>10%）")
+
+        fbx = delivery_match_adapter.build_fbx_platform_warehouse_sheet(rows)
+        self.assertEqual(fbx.iloc[0]["派送卡车使用比例（>10%）"], "JTeam INC 60.00%")
+        self.assertEqual(fbx.columns[-1], "派送卡车使用比例（>10%）")
 
     def test_missing_trip_keeps_volume_but_excludes_dispatch_time_and_cost(self):
         detail = pd.DataFrame([{
