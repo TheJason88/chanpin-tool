@@ -178,8 +178,8 @@ MULTI_UNLOAD_REMARK_MARKERS = ("里", "外")
 MULTI_UNLOAD_REMARK_COLUMNS = ("同车次备注集合", "匹配备注集合", "备注", "备注信息", "MEMO", "跟进记录", "内部备注")
 MIN_TRANSFER_LINEHAUL_AVERAGE_VOLUME = 45
 REGULAR_DELIVERY_MIN_AVERAGE_VOLUME = {
-    "大车地板": 45,
-    "大车卡板": 30,
+    "大车地板": 80,
+    "大车卡板": 40,
 }
 
 
@@ -210,7 +210,7 @@ def regular_delivery_average_sample_rows(df):
 
     Totals continue to use the unfiltered detail rows.  Only average/P80
     samples exclude under-loaded 53-foot trips: floor-loaded trips below
-    45 CBM and pallet-loaded trips below 30 CBM.  Boundary values remain
+    80 CBM and pallet-loaded trips below 40 CBM.  Boundary values remain
     eligible.
     """
     if df is None or df.empty:
