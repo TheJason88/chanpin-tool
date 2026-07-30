@@ -412,17 +412,17 @@ class MultiUnloadAverageTests(unittest.TestCase):
 
     def test_regular_delivery_floor_and_pallet_thresholds_filter_only_average_samples(self):
         rows = pd.DataFrame([
-            {"车型装车分组": "大车地板", "出库体积": 45, "出库卡板数": 9, "派送成本": 450},
-            {"车型装车分组": "大车地板", "出库体积": 44.99, "出库卡板数": 99, "派送成本": 999},
-            {"车型装车分组": "大车卡板", "出库体积": 30, "出库卡板数": 10, "派送成本": 300},
-            {"车型装车分组": "大车卡板", "出库体积": 29.99, "出库卡板数": 88, "派送成本": 888},
+            {"车型装车分组": "大车地板", "出库体积": 80, "出库卡板数": 16, "派送成本": 800},
+            {"车型装车分组": "大车地板", "出库体积": 79.99, "出库卡板数": 99, "派送成本": 999},
+            {"车型装车分组": "大车卡板", "出库体积": 40, "出库卡板数": 12, "派送成本": 400},
+            {"车型装车分组": "大车卡板", "出库体积": 39.99, "出库卡板数": 88, "派送成本": 888},
             {"车型装车分组": "小车", "出库体积": 10, "出库卡板数": 2, "派送成本": 100},
         ])
 
         eligible = processors.regular_delivery_average_sample_rows(rows)
 
         self.assertEqual(eligible.index.tolist(), [0, 2, 4])
-        self.assertAlmostEqual(rows["出库体积"].sum(), 159.98, places=2)
+        self.assertAlmostEqual(rows["出库体积"].sum(), 249.98, places=2)
 
     def test_regular_cost_report_uses_filtered_detail_for_all_average_and_p80_metrics(self):
         rows = pd.DataFrame([
@@ -431,14 +431,14 @@ class MultiUnloadAverageTests(unittest.TestCase):
                 "车次号": "COST-T1",
                 "车型标准值": "53尺大车", "装车类型标准值": "地板",
                 "主产品类型": "FBA", "FBA仓点代码集合": "ONT8",
-                "出库体积": 45, "出库卡板数": 9, "派送成本": 450,
+                "出库体积": 80, "出库卡板数": 16, "派送成本": 800,
             },
             {
                 "仓库": "LA", "统计周期": "2026-W28", "是否FTL发车": True,
                 "车次号": "COST-T2",
                 "车型标准值": "53尺大车", "装车类型标准值": "地板",
                 "主产品类型": "FBA", "FBA仓点代码集合": "ONT8",
-                "出库体积": 44, "出库卡板数": 99, "派送成本": 999,
+                "出库体积": 79, "出库卡板数": 99, "派送成本": 999,
             },
         ])
 
@@ -446,35 +446,41 @@ class MultiUnloadAverageTests(unittest.TestCase):
         row = report.loc[report["指标名称"] == "FBA及FBX平台仓成本"].iloc[0]
 
         self.assertEqual(row["车次数"], 2)
-        self.assertEqual(row["总出库体积"], 89)
-        self.assertEqual(row["总出库卡板数"], 108)
-        self.assertEqual(row["总派送成本"], 1449)
-        self.assertEqual(row["平均整车价"], 450)
-        self.assertEqual(row["P80整车价"], 450)
+        self.assertEqual(row["总出库体积"], 159)
+        self.assertEqual(row["总出库卡板数"], 115)
+        self.assertEqual(row["总派送成本"], 1799)
+        self.assertEqual(row["平均整车价"], 800)
+        self.assertEqual(row["P80整车价"], 800)
         self.assertEqual(row["每方平均价"], 10)
-        self.assertEqual(row["平均每车出库体积"], 45)
-        self.assertEqual(row["P80每车出库体积"], 45)
-        self.assertEqual(row["平均每车出库卡板数"], 9)
-        self.assertEqual(row["P80每车出库卡板数"], 9)
+        self.assertEqual(row["平均每车出库体积"], 80)
+        self.assertEqual(row["P80每车出库体积"], 80)
+        self.assertEqual(row["平均每车出库卡板数"], 16)
+        self.assertEqual(row["P80每车出库卡板数"], 16)
+
+        full_load_row = report.loc[report["指标名称"] == "满载情况"].iloc[0]
+        self.assertEqual(full_load_row["车次数"], 2)
+        self.assertEqual(full_load_row["总出库体积"], 159)
+        self.assertEqual(full_load_row["平均每车出库体积"], 80)
+        self.assertEqual(full_load_row["P80每车出库体积"], 80)
 
         exported = tool_common.clean_for_excel_output(report, sheet_type="成本")
         exported_row = exported.loc[exported["指标名称"] == "FBA及FBX平台仓成本"].iloc[0]
-        self.assertEqual(exported_row["总派送成本"], 1449)
-        self.assertEqual(exported_row["平均整车价"], 450)
-        self.assertEqual(exported_row["P80整车价"], 450)
+        self.assertEqual(exported_row["总派送成本"], 1799)
+        self.assertEqual(exported_row["平均整车价"], 800)
+        self.assertEqual(exported_row["P80整车价"], 800)
         self.assertEqual(exported_row["每方平均价"], 10)
-        self.assertEqual(exported_row["平均每车出库体积"], 45)
-        self.assertEqual(exported_row["P80每车出库体积"], 45)
-        self.assertEqual(exported_row["平均每车出库卡板数"], 9)
-        self.assertEqual(exported_row["P80每车出库卡板数"], 9)
+        self.assertEqual(exported_row["平均每车出库体积"], 80)
+        self.assertEqual(exported_row["P80每车出库体积"], 80)
+        self.assertEqual(exported_row["平均每车出库卡板数"], 16)
+        self.assertEqual(exported_row["P80每车出库卡板数"], 16)
 
         workbook = tool_common.write_sheets_to_excel({"成本": report})
         workbook_row = pd.read_excel(workbook, sheet_name="成本").loc[
             lambda df: df["指标名称"] == "FBA及FBX平台仓成本"
         ].iloc[0]
-        self.assertEqual(workbook_row["平均整车价"], 450)
+        self.assertEqual(workbook_row["平均整车价"], 800)
         self.assertEqual(workbook_row["每方平均价"], 10)
-        self.assertEqual(workbook_row["平均每车出库体积"], 45)
+        self.assertEqual(workbook_row["平均每车出库体积"], 80)
 
     def test_zy_multibatch_trip_uses_volume_share_for_vehicle_but_preserves_batch_cost(self):
         detail = pd.DataFrame([
@@ -746,10 +752,11 @@ class MultiUnloadAverageTests(unittest.TestCase):
         floor = type_price_reference.loc[
             type_price_reference["成本计算类型"] == "大车地板"
         ].iloc[0]
-        self.assertEqual(floor["平均整车价"], 810)
-        self.assertEqual(floor["P80整车价"], 822.33)
-        self.assertEqual(floor["每方平均价"], 13.28)
-        self.assertEqual(floor["整车价格"], 810)
+        self.assertTrue(pd.isna(floor["平均整车价"]))
+        self.assertTrue(pd.isna(floor["P80整车价"]))
+        self.assertTrue(pd.isna(floor["每方平均价"]))
+        self.assertTrue(pd.isna(floor["整车价格"]))
+        self.assertEqual(floor["每方成本"], 13.28)
 
     def test_amazon_freight_carrier_rows_are_ftl_without_false_trip_merge(self):
         raw = pd.DataFrame([
@@ -967,7 +974,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
                 "仓库": "LA", "出库时间": "2026-07-20", "签收时间": "2026-07-22",
                 "目的地": "Amazon-ONT8", "派送方式": "卡车派送", "运输类型": "FTL",
                 "车型": "53尺大车", "装车类型": "卡板", "车次号": "FTL-1",
-                "批次号": "FTL-FBA-1", "出库体积": 30, "出库卡板数": 10, "派送成本": 300,
+                "批次号": "FTL-FBA-1", "出库体积": 40, "出库卡板数": 10, "派送成本": 300,
             },
         ])
 
@@ -990,10 +997,10 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(price_reference["仓点代码"].tolist(), ["ONT8", "16号仓"])
         self.assertEqual(price_reference["排名"].tolist(), [1, 2])
         ont8 = price_reference.loc[price_reference["仓点代码"] == "ONT8"].iloc[0]
-        self.assertEqual(ont8["总出库体积"], 38)
+        self.assertEqual(ont8["总出库体积"], 48)
         self.assertEqual(ont8["总出库卡板数"], 12)
         self.assertEqual(ont8["总派送成本"], 420)
-        self.assertEqual(ont8["每方价格参考"], round(420 / 38, 2))
+        self.assertEqual(ont8["每方价格参考"], round(420 / 48, 2))
 
         type_price_reference = metrics["分类型价格参考"]
         self.assertEqual(
@@ -1005,7 +1012,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
             type_price_reference.columns[car_count_index:car_count_index + 4].tolist(),
             ["车次数", "细分货量方数", "整车价格", "每方成本"],
         )
-        self.assertEqual(type_price_reference["总出库体积"].sum(), 44)
+        self.assertEqual(type_price_reference["总出库体积"].sum(), 54)
         self.assertEqual(type_price_reference["总出库卡板数"].sum(), 13)
         self.assertEqual(type_price_reference["总派送成本"].sum(), 510)
         ftl_row = type_price_reference.loc[
@@ -1014,8 +1021,8 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertIn("平均整车价", type_price_reference.columns)
         self.assertEqual(ftl_row["平均整车价"], 300)
         self.assertEqual(ftl_row["整车价格"], 300)
-        self.assertEqual(ftl_row["细分货量方数"], 30)
-        self.assertEqual(ftl_row["每方成本"], 10)
+        self.assertEqual(ftl_row["细分货量方数"], 40)
+        self.assertEqual(ftl_row["每方成本"], 7.5)
         self.assertTrue(
             type_price_reference.loc[
                 type_price_reference["成本计算类型"] == "LTL",

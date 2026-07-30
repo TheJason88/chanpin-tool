@@ -200,7 +200,20 @@ def _finalize_sheet(df, sheet_type=""):
         out = _drop_empty_columns(out, preserve=["同车次备注集合"])
         out = out[[col for col in out.columns if col != "同车次备注集合"] + ["同车次备注集合"]]
         return _format_numbers(out, sheet_type=sheet_type)
-    return _format_numbers(_drop_empty_columns(_strip_remark_columns(df)), sheet_type=sheet_type)
+    preserve = []
+    if sheet_type == "成本":
+        # 即使当前范围没有任何大车达到平均/P80样本门槛，也保留固定
+        # 成本结果列并以空值表示，避免导出表结构随样本资格变化。
+        preserve = [
+            "车次数", "细分货量方数", "整车价格", "每方成本",
+            "平均整车价", "P80整车价", "每方平均价",
+            "平均每车出库体积", "P80每车出库体积",
+            "平均每车出库卡板数", "P80每车出库卡板数",
+        ]
+    return _format_numbers(
+        _drop_empty_columns(_strip_remark_columns(df), preserve=preserve),
+        sheet_type=sheet_type,
+    )
 
 
 def _finalize_zip_audit_sheet(df):
@@ -824,10 +837,12 @@ def build_station_cost_report(matched):
         trip_loads = group.copy()
         if "车次号" in trip_loads.columns:
             trip_loads = trip_loads.drop_duplicates(["仓库", "车次号"])
-        trip_volume = pd.to_numeric(
+        trip_loads["出库体积"] = pd.to_numeric(
             trip_loads.get("整车出库体积", trip_loads.get("出库体积", pd.Series(dtype=float))),
             errors="coerce",
         )
+        trip_loads = processors.regular_delivery_average_sample_rows(trip_loads)
+        trip_volume = pd.to_numeric(trip_loads["出库体积"], errors="coerce")
         rows.append({
             "指标名称": "满载情况", "仓库": warehouse, "统计周期": period,
             "对象类型": "FTL大车地板", "平台": "全部", "仓点代码": "全部", "车型装车分组": "大车地板",
