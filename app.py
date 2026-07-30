@@ -22,7 +22,7 @@ try:
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-07-28-parallel-station-cost-source-v14"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-07-30-container-mode-multifile-v17"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
@@ -303,16 +303,18 @@ elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
 st.caption(
     "说明：柜量、提柜和拆柜已合并为一个柜级分析功能。可从 ETA、Available时间、提柜时间、实际抵仓时间、拆柜完成时间中任选一个作为统计时间指标；"
     "时间筛选、同柜去重排序、周/月归属和原文件时间范围全部跟随该指标。"
-    "结果一次性输出柜量、提柜时效和拆柜时效；源文件有派送方式字段时自动筛选拆送/拆柜，"
-    "未提供该字段时按上传文件已是拆送范围处理，并在清洗明细中注明口径。"
+    "柜类分析支持同时上传多个相同结构的新导出文件，系统先纵向拼接，再按所选时间指标和柜号去重。"
+    "派送方式=直送时仅输出总柜量、联宇柜量和非联宇柜量，不计算时效；派送方式=拆柜/拆送时继续输出原柜量、提柜时效和拆柜时效。"
+    "直送和拆送的联宇/非联宇判定完全一致；无法识别的派送方式仅保留在清洗明细中待确认。"
     "提柜时效：LA/NJ/SAV按Available时间到实际抵仓时间，DAL按提柜时间到实际抵仓时间；拆柜时效按实际抵仓时间到拆柜完成时间。"
     "派送二支持：按月统计 / 按周统计 / 按原文件时间范围；并单独输出LA至NJ/SAV/DAL盈仓调拨数据。"
     "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
     "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
     "派送二的FBA货量排行和FBX平台仓货量在末列显示派送卡车使用比例：按仓库、统计周期、目的仓点汇总批次方数，空白或同批次供应商冲突的方数只进入分母，仅罗列占比严格大于10%的已识别供应商。"
     "仓点成本、干线和调拨均从清洗后有效数据集并行独立取数；干线或调拨标签不会把有效FBA/FBX批次从每方价格参考和分类型价格参考中排除。"
+    "调拨目的地优先于本批次的普通目的仓识别，但只在该批次内覆盖；同一车次的其他FBA/FBX批次保留各自目的地，支持一车多卸。调拨批次目标仓缺失或同批次目标冲突时转入无效审核，不回退为FBA/FBX。"
     "派送一按批次输出：目的仓、区域、方数、成本、出库时间和签收时间均保留批次原值；车次只用于统一最终FTL/LTL、识别车型装车、计算整车总量和批次车份额。一个批次出现多个目的地、缺目的地或方数无效时转入无效数据；缺车次只保留货量。"
-    "派送二成本输出为每方价格参考和分类型价格参考；前者按FBA/FBX目的地仓点汇总，后者合并大车地板、大车卡板、小车和LTL，同一目的地连续排列，并按目的地总货量降序。分类型表并列显示车次数、细分货量方数、整车价格和每方成本；FTL整车价格=批次总派送成本÷批次精确车份额合计，LTL整车价格留空。大车无法识别卡板/地板时按大车卡板；批次派送成本保留原值，不按整车总成本二次分摊；历史多目的地整车不再等分回退。每方成本按总派送成本除以细分货量方数计算。"
+    "派送二成本输出为每方价格参考和分类型价格参考；前者按FBA/FBX目的地仓点汇总，后者合并大车地板、大车卡板、小车和LTL，同一目的地连续排列，并按目的地总货量降序。分类型表并列显示车次数、细分货量方数、整车价格和每方成本；FTL整车价格=批次总派送成本÷批次精确车份额合计，LTL整车价格留空。大车无法识别卡板/地板时按大车卡板；批次基础派送成本不按整车总成本二次分摊；FTL大车地板另按批次精确车份额×$200增加装车费并计入后续全部成本统计；历史多目的地整车不再等分回退。每方成本按总派送成本除以细分货量方数计算。"
     "目的仓点、区域和干线发车数先汇总批次精确车份额，再按四舍五入显示整数；派送时效按批次出库至批次签收计算，并按有效批次方数加权求平均和P80。LTL、缺车次、缺失/异常时间以及备注含‘里’或‘外’的批次不参与时效。"
     "运输类型先按仓库和车次判断：派送卡车显示AMAZON FREIGHT时最高优先级整车按FTL；否则同车次同时含FTL和LTL时整车统一按FTL；同车次只有LTL但总出库体积大于60CBM时也按FTL，60CBM仍按LTL。重判后的FTL车次回读原文件车型和装车类型，并在后续发车、时效和成本中均使用最终FTL口径。"
     "6B支持多文件上传；结构完全相同的匹配文件默认纵向合并。"
@@ -425,14 +427,18 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
             st.exception(e)
 
 else:
-    uploaded_file = st.file_uploader("6. 上传 Excel", type=["xlsx", "xls"], key="normal_uploaded_file")
-    if uploaded_file is not None:
+    uploaded_files = st.file_uploader(
+        "6. 上传一个或多个柜类 Excel",
+        type=["xlsx", "xls"],
+        accept_multiple_files=True,
+        key="normal_uploaded_files",
+    )
+    if uploaded_files:
         try:
-            uploaded_file.seek(0)
-            excel_file = pd.ExcelFile(uploaded_file)
-            sheet_names = excel_file.sheet_names
-            sheet_name = st.selectbox("选择工作表", sheet_names, key="normal_sheet_select") if len(sheet_names) > 1 else sheet_names[0]
-            st.success(f"文件上传成功，当前工作表：{sheet_name}")
+            combined_container_df, combine_message = processors.combine_container_uploaded_files(
+                uploaded_files
+            )
+            st.success(combine_message)
             if st.button("开始分析", type="primary", key="run_normal_analysis"):
                 if not selection_complete:
                     st.warning("请先把仓点、分析模块、统计周期都选择完整。")
@@ -441,22 +447,19 @@ else:
                 elif period_type != ORIGINAL_FILE_PERIOD and date_range[0] > date_range[1]:
                     st.warning("开始日期不能晚于结束日期。")
                 else:
-                    validate_uploaded_warehouse(uploaded_file, sheet_name, warehouse)
-                    uploaded_file.seek(0)
+                    validate_uploaded_warehouse_for_df(combined_container_df, warehouse)
                     warehouse_for_processing = "四仓合并" if warehouse == "全部" else warehouse
                     normal_start_date = None if period_type == ORIGINAL_FILE_PERIOD else date_range[0]
                     normal_end_date = None if period_type == ORIGINAL_FILE_PERIOD else date_range[1]
-                    detail_df, result_df, final_module = processors.process_uploaded_file(
-                        uploaded_file=uploaded_file,
-                        sheet_name=sheet_name,
+                    detail_df, result_df = processors.process_container_analysis(
+                        combined_container_df,
                         warehouse=warehouse_for_processing,
-                        product_type=DEFAULT_PRODUCT_TYPE,
-                        analysis_module=analysis_module,
                         period_type=period_type,
+                        time_dimension=time_dimension,
                         start_date=normal_start_date,
                         end_date=normal_end_date,
-                        time_dimension=time_dimension,
                     )
+                    final_module = analysis_module
                     st.subheader("数据处理结果")
                     st.dataframe(result_df, use_container_width=True)
                     st.subheader("清洗后的数据集预览")
@@ -468,4 +471,4 @@ else:
             st.error("处理失败，请检查文件字段、工作表、时间范围或分析模块是否匹配。")
             st.exception(e)
     else:
-        st.info("请先完成选择，并上传 Excel 文件。")
+        st.info("请先完成选择，并上传一个或多个相同结构的柜类 Excel 文件。")

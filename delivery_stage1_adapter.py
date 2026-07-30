@@ -3,6 +3,7 @@ import re
 import pandas as pd
 
 import processors
+import tool_common
 
 
 VOLUME_CANDIDATES = [
@@ -218,44 +219,9 @@ def _infer_transfer_target_from_row(row):
 
 def _apply_transfer_destination_override(cleaned_batches):
     """
-    调拨/调入仓库不为空的行，实际目的地必须覆盖为调入仓库。
-    这一步放在功能一最后，确保邮编异常审核不会再把“调拨到盈仓”的行当成普通目的地异常。
+    功能一末尾再次执行幂等校验，确保调拨目的地只覆盖本批次且不传播到同车次其他批次。
     """
-    if cleaned_batches is None or cleaned_batches.empty:
-        return cleaned_batches
-    out = _as_mutable_object_df(cleaned_batches)
-    for col in DESTINATION_OVERRIDE_COLS:
-        if col not in out.columns:
-            out[col] = "" if col not in ["FBA出库体积", "FBX出库体积"] else 0.0
-
-    for idx, row in out.iterrows():
-        if not _row_is_transfer(row):
-            continue
-        target, info = _infer_transfer_target_from_row(row)
-        if not info:
-            continue
-
-        display = info["display"]
-        out.at[idx, "实际目的地"] = display
-        out.at[idx, "修正后目的地"] = display
-        out.at[idx, "目的地"] = display
-        out.at[idx, "调入仓库"] = display
-        out.at[idx, "标准邮编集合"] = info["zip"]
-        out.at[idx, "邮编前三位集合"] = info["zip3"]
-        out.at[idx, "目的州"] = info["state"]
-        out.at[idx, "邮编来源"] = "调拨目标仓地址规则"
-        out.at[idx, "系统产品类型"] = "仓间调拨"
-        out.at[idx, "主产品类型"] = "仓间调拨"
-        out.at[idx, "平台名称"] = "盈仓"
-        out.at[idx, "FBX代码集合"] = ""
-        out.at[idx, "平台仓代码集合"] = display
-        out.at[idx, "FBA仓点代码集合"] = ""
-        out.at[idx, "FBA出库体积"] = 0.0
-        out.at[idx, "FBX出库体积"] = 0.0
-        out.at[idx, "目的地邮编待补充"] = False
-        out.at[idx, "专线线路"] = info["line"]
-        out.at[idx, "专线识别方式"] = "调入仓库优先覆盖"
-    return out
+    return tool_common.apply_batch_transfer_destination_rules(cleaned_batches)
 
 
 def _force_cleaned_totals_from_detail(cleaned_batches, detail_df):

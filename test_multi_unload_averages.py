@@ -1,3 +1,4 @@
+import json
 import unittest
 
 import pandas as pd
@@ -89,6 +90,287 @@ class MultiUnloadAverageTests(unittest.TestCase):
         exported = delivery_match_adapter._finalize_sheet(stage2, "明细")
         self.assertEqual(exported.columns[-1], "同车次备注集合")
         self.assertEqual(set(exported["同车次备注集合"]), {"正常批次", "里仓两卸"})
+
+    def test_transfer_and_fba_batches_in_same_trip_keep_individual_destinations(self):
+        detail = pd.DataFrame([
+            {
+                "原始行号": 2, "仓库": "LA", "标准运输类型": "FTL",
+                "车次号": "TRANSFER-TRIP-1", "批次号": "A",
+                "出库时间": "2026-07-01", "签收时间": "2026-07-03",
+                "出库体积": 20, "出库卡板数": 2, "派送成本": 300,
+                "FBA/FBX": "FBA", "FBA仓点代码": "ONT8",
+                "目的地": "Amazon-ONT8", "出库类型": "调拨",
+                "业务场景": "仓间调拨", "调入仓库": "NJ", "备注": "",
+            },
+            {
+                "原始行号": 3, "仓库": "LA", "标准运输类型": "FTL",
+                "车次号": "TRANSFER-TRIP-1", "批次号": "B",
+                "出库时间": "2026-07-01", "签收时间": "2026-07-04",
+                "出库体积": 40, "出库卡板数": 4, "派送成本": 600,
+                "FBA/FBX": "FBA", "FBA仓点代码": "LAS1",
+                "目的地": "Amazon-LAS1", "出库类型": "派送",
+                "业务场景": "", "调入仓库": "", "备注": "",
+            },
+        ])
+
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(detail)
+
+        self.assertEqual(len(cleaned), 2)
+        transfer_batch = cleaned.loc[cleaned["批次号"] == "A"].iloc[0]
+        fba_batch = cleaned.loc[cleaned["批次号"] == "B"].iloc[0]
+        self.assertEqual(transfer_batch["出库类型"], "调拨")
+        self.assertEqual(transfer_batch["调入仓库"], "新泽西盈仓")
+        self.assertEqual(transfer_batch["调拨目标仓代码"], "NJ")
+        self.assertEqual(transfer_batch["主产品类型"], "仓间调拨")
+        self.assertEqual(transfer_batch["批次目的地类型"], "其他")
+        self.assertEqual(transfer_batch["批次目的仓点"], "新泽西盈仓")
+        self.assertEqual(transfer_batch["FBA出库体积"], 0)
+        self.assertTrue(transfer_batch["调拨覆盖审核"].startswith("同批次调拨统一覆盖"))
+        self.assertEqual(fba_batch["出库类型"], "派送")
+        self.assertEqual(fba_batch["主产品类型"], "FBA")
+        self.assertEqual(fba_batch["批次目的地类型"], "FBA")
+        self.assertEqual(fba_batch["批次目的仓点"], "LAS1")
+        self.assertEqual(fba_batch["FBA仓点代码集合"], "LAS1")
+        self.assertEqual(fba_batch["FBA出库体积"], 40)
+        self.assertNotIn("新泽西盈仓", fba_batch["目的仓点分配明细"])
+
+        delivery_runtime.bootstrap(delivery_workflow)
+        matched = delivery_workflow.prepare_stage2_for_report(
+            cleaned,
+            pd.DataFrame(),
+            "按月统计",
+        )
+        self.assertEqual(set(matched["主产品类型"]), {"仓间调拨", "FBA"})
+        self.assertEqual(matched.loc[matched["批次号"] == "A", "专线线路"].iloc[0], "LA-NJ")
+        transfer = delivery_runtime._build_transfer_report(matched)
+        self.assertEqual(len(transfer), 1)
+        self.assertEqual(transfer.iloc[0]["总出库体积"], 20)
+        self.assertEqual(transfer.iloc[0]["批次号集合"], "A")
+        fba_rank = delivery_match_adapter.build_fba_rank_sheet(matched)
+        self.assertEqual(fba_rank.iloc[0]["FBA仓点"], "LAS1")
+        self.assertEqual(fba_rank.iloc[0]["出库体积"], 40)
+
+    def test_transfer_without_trip_propagates_within_same_batch(self):
+        detail = pd.DataFrame([
+            {
+                "原始行号": 2, "仓库": "LA", "标准运输类型": "FTL",
+                "车次号": "", "批次号": "BATCH-SAV",
+                "出库时间": "2026-07-01", "签收时间": "2026-07-03",
+                "出库体积": 10, "出库卡板数": 1, "派送成本": 100,
+                "FBA/FBX": "FBA", "FBA仓点代码": "ONT8",
+                "出库类型": "调拨", "调入仓库": "SAV", "备注": "",
+            },
+            {
+                "原始行号": 3, "仓库": "LA", "标准运输类型": "FTL",
+                "车次号": "", "批次号": "BATCH-SAV",
+                "出库时间": "2026-07-01", "签收时间": "2026-07-03",
+                "出库体积": 5, "出库卡板数": 1, "派送成本": 100,
+                "FBA/FBX": "FBA", "FBA仓点代码": "LAS1",
+                "出库类型": "派送", "调入仓库": "", "备注": "",
+            },
+        ])
+
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(detail)
+
+        self.assertEqual(len(cleaned), 1)
+        self.assertEqual(cleaned.iloc[0]["调入仓库"], "萨凡纳盈仓")
+        self.assertEqual(cleaned.iloc[0]["批次目的仓点"], "萨凡纳盈仓")
+        self.assertTrue(cleaned.iloc[0]["调拨覆盖审核"].startswith("同批次调拨统一覆盖"))
+
+    def test_conflicting_or_missing_transfer_target_is_invalid(self):
+        base = {
+            "仓库": "LA", "标准运输类型": "FTL", "车次号": "CONFLICT-1",
+            "出库时间": "2026-07-01", "签收时间": "2026-07-03",
+            "出库体积": 20, "出库卡板数": 2, "派送成本": 300,
+            "FBA/FBX": "FBA", "FBA仓点代码": "ONT8",
+            "出库类型": "调拨", "业务场景": "仓间调拨", "备注": "",
+        }
+        separate_batches = pd.DataFrame([
+            {**base, "原始行号": 2, "批次号": "A", "调入仓库": "NJ"},
+            {**base, "原始行号": 3, "批次号": "B", "调入仓库": "DAL"},
+        ])
+
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(separate_batches)
+        self.assertEqual(len(cleaned), 2)
+        self.assertEqual(set(cleaned["批次目的仓点"]), {"新泽西盈仓", "达拉斯盈仓"})
+
+        same_batch_conflict = pd.DataFrame([
+            {**base, "原始行号": 4, "批次号": "C", "调入仓库": "NJ"},
+            {**base, "原始行号": 5, "批次号": "C", "调入仓库": "DAL"},
+        ])
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(same_batch_conflict)
+        invalid = pd.DataFrame(cleaned.attrs["batch_invalid_records"])
+
+        self.assertTrue(cleaned.empty)
+        self.assertEqual(len(invalid), 1)
+        self.assertIn("同批次调拨目标冲突", invalid.iloc[0]["批次无效原因"])
+
+        missing = pd.DataFrame([{
+            **base,
+            "原始行号": 6,
+            "车次号": "MISSING-TARGET",
+            "批次号": "C",
+            "调入仓库": "",
+            "目的地": "Amazon-LAS1",
+        }])
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(missing)
+        invalid = pd.DataFrame(cleaned.attrs["batch_invalid_records"])
+        self.assertTrue(cleaned.empty)
+        self.assertIn("调拨目标盈仓无法识别", invalid.iloc[0]["批次无效原因"])
+
+    def test_stage2_legacy_rows_reapply_batch_transfer_override(self):
+        legacy = pd.DataFrame([
+            {
+                "仓库": "LA", "标准运输类型": "FTL", "车次号": "OLD-TRIP",
+                "是否有真实车次号": True, "批次号": "A", "批次号集合": "A",
+                "批次出库时间": "2026-07-01", "批次签收时间": "2026-07-03",
+                "出库体积": 20, "出库卡板数": 2, "派送成本": 300,
+                "批次车份额": 0.33, "FBA出库体积": 20, "FBX出库体积": 0,
+                "系统产品类型": "FBA", "主产品类型": "FBA",
+                "FBA仓点代码集合": "ONT8", "标准邮编集合": "92316",
+                "出库类型": "调拨", "业务场景": "仓间调拨", "调入仓库": "DAL",
+                "备注": "",
+            },
+            {
+                "仓库": "LA", "标准运输类型": "FTL", "车次号": "OLD-TRIP",
+                "是否有真实车次号": True, "批次号": "B", "批次号集合": "B",
+                "批次出库时间": "2026-07-01", "批次签收时间": "2026-07-04",
+                "出库体积": 40, "出库卡板数": 4, "派送成本": 600,
+                "批次车份额": 0.67, "FBA出库体积": 40, "FBX出库体积": 0,
+                "系统产品类型": "FBA", "主产品类型": "FBA",
+                "FBA仓点代码集合": "LAS1", "标准邮编集合": "92316",
+                "出库类型": "派送", "业务场景": "", "调入仓库": "",
+                "备注": "",
+            },
+        ])
+
+        delivery_runtime.bootstrap(delivery_workflow)
+        matched = delivery_workflow.prepare_stage2_for_report(
+            legacy,
+            pd.DataFrame(),
+            "按月统计",
+        )
+
+        transfer_batch = matched.loc[matched["批次号"] == "A"].iloc[0]
+        fba_batch = matched.loc[matched["批次号"] == "B"].iloc[0]
+        self.assertEqual(transfer_batch["调入仓库"], "达拉斯盈仓")
+        self.assertEqual(transfer_batch["主产品类型"], "仓间调拨")
+        self.assertEqual(transfer_batch["FBA仓点代码集合"], "")
+        self.assertEqual(transfer_batch["专线线路"], "LA-DAL")
+        self.assertEqual(fba_batch["调入仓库"], "")
+        self.assertEqual(fba_batch["主产品类型"], "FBA")
+        self.assertEqual(fba_batch["FBA仓点代码集合"], "LAS1")
+
+    def test_ftl_big_truck_floor_loading_fee_uses_exact_batch_share_once(self):
+        detail = pd.DataFrame([
+            {
+                "原始行号": 2, "仓库": "LA", "标准运输类型": "FTL",
+                "车次号": "FLOOR-TRIP-1", "批次号": "A",
+                "出库时间": "2026-07-01", "签收时间": "2026-07-03",
+                "出库体积": 40, "出库卡板数": 8, "派送成本": 350,
+                "FBA/FBX": "FBA", "FBA仓点代码": "ONT8",
+                "车型": "53尺大车", "装车类型": "地板", "备注": "",
+            },
+            {
+                "原始行号": 3, "仓库": "LA", "标准运输类型": "FTL",
+                "车次号": "FLOOR-TRIP-1", "批次号": "B",
+                "出库时间": "2026-07-01", "签收时间": "2026-07-04",
+                "出库体积": 20, "出库卡板数": 4, "派送成本": 220,
+                "FBA/FBX": "FBA", "FBA仓点代码": "LAS1",
+                "车型": "53尺大车", "装车类型": "地板", "备注": "",
+            },
+        ])
+
+        cleaned = delivery_workflow.build_cleaned_batches_from_detail(detail)
+        batch_a = cleaned.loc[cleaned["批次号"] == "A"].iloc[0]
+        batch_b = cleaned.loc[cleaned["批次号"] == "B"].iloc[0]
+        self.assertAlmostEqual(batch_a["批次车份额"], 2 / 3)
+        self.assertAlmostEqual(batch_b["批次车份额"], 1 / 3)
+        self.assertEqual(batch_a["原始派送成本"], 350)
+        self.assertEqual(batch_b["原始派送成本"], 220)
+        self.assertAlmostEqual(batch_a["大车地板装车费"], 200 * 2 / 3)
+        self.assertAlmostEqual(batch_b["大车地板装车费"], 200 * 1 / 3)
+        self.assertAlmostEqual(batch_a["派送成本"], 350 + 200 * 2 / 3)
+        self.assertAlmostEqual(batch_b["派送成本"], 220 + 200 * 1 / 3)
+        self.assertAlmostEqual(cleaned["大车地板装车费"].sum(), 200)
+        self.assertAlmostEqual(cleaned["派送成本"].sum(), 770)
+        allocation = json.loads(batch_a["目的仓点分配明细"])[0]
+        self.assertAlmostEqual(allocation["原始派送成本"], 350)
+        self.assertAlmostEqual(allocation["大车地板装车费"], 200 * 2 / 3)
+        self.assertAlmostEqual(allocation["派送成本"], 350 + 200 * 2 / 3)
+
+        first = delivery_workflow.prepare_stage2_for_report(
+            cleaned,
+            pd.DataFrame([{"工作单号": "", "ZIP": ""}]),
+            "按月统计",
+        )
+        second = delivery_workflow.prepare_stage2_for_report(
+            first,
+            pd.DataFrame([{"工作单号": "", "ZIP": ""}]),
+            "按月统计",
+        )
+        self.assertAlmostEqual(first["派送成本"].sum(), 770)
+        self.assertAlmostEqual(second["派送成本"].sum(), 770)
+        self.assertAlmostEqual(second["大车地板装车费"].sum(), 200)
+
+    def test_floor_loading_fee_excludes_pallet_small_truck_ltl_and_missing_share(self):
+        rows = pd.DataFrame([
+            {"标准运输类型": "FTL", "车型标准值": "53尺大车", "装车类型标准值": "卡板", "批次车份额": 1, "派送成本": 100},
+            {"标准运输类型": "FTL", "车型标准值": "小车", "装车类型标准值": "地板", "批次车份额": 1, "派送成本": 200},
+            {"标准运输类型": "LTL", "车型标准值": "53尺大车", "装车类型标准值": "地板", "批次车份额": 1, "派送成本": 300},
+            {"标准运输类型": "FTL", "车型标准值": "53尺大车", "装车类型标准值": "地板", "批次车份额": pd.NA, "派送成本": 400},
+        ])
+        adjusted = tool_common.apply_floor_loading_fee(rows)
+        self.assertEqual(adjusted["大车地板装车费"].sum(), 0)
+        self.assertEqual(adjusted["派送成本"].tolist(), [100, 200, 300, 400])
+
+        half_truck = tool_common.apply_floor_loading_fee(pd.DataFrame([{
+            "标准运输类型": "FTL", "车型标准值": "53尺大车",
+            "装车类型标准值": "地板", "批次车份额": 0.5, "派送成本": 400,
+        }])).iloc[0]
+        self.assertEqual(half_truck["大车地板装车费"], 100)
+        self.assertEqual(half_truck["派送成本"], 500)
+
+    def test_stage1_runtime_and_stage2_cost_reports_keep_floor_loading_fee(self):
+        source = pd.DataFrame([
+            {
+                "装车类型": "地板", "批次号": "FLOOR-A", "出库体积": 40,
+                "目的地": "Amazon-ONT8", "派送卡车": "JTeam INC",
+                "车次号": "FLOOR-RUNTIME-1", "出库时间": "2026-07-01",
+                "签收时间": "2026-07-03", "出库卡板数": 8,
+                "派送方式": "卡车派送", "出库类型": "派送",
+                "派送成本": 350, "运输类型": "FTL", "车型": "53尺大车",
+            },
+            {
+                "装车类型": "地板", "批次号": "FLOOR-B", "出库体积": 20,
+                "目的地": "Amazon-LAS1", "派送卡车": "JTeam INC",
+                "车次号": "FLOOR-RUNTIME-1", "出库时间": "2026-07-01",
+                "签收时间": "2026-07-04", "出库卡板数": 4,
+                "派送方式": "卡车派送", "出库类型": "派送",
+                "派送成本": 220, "运输类型": "FTL", "车型": "53尺大车",
+            },
+        ])
+
+        delivery_runtime.bootstrap(delivery_workflow)
+        cleaned, invalid, _, _ = delivery_workflow.process_stage1_raw_files_to_cleaned_batches(
+            [("地板装车费样例.xlsx", source)],
+            "LA",
+        )
+        self.assertTrue(invalid.empty)
+        self.assertAlmostEqual(cleaned["原始派送成本"].sum(), 570)
+        self.assertAlmostEqual(cleaned["大车地板装车费"].sum(), 200)
+        self.assertAlmostEqual(cleaned["派送成本"].sum(), 770)
+
+        reports = delivery_workflow.process_stage2_analysis(
+            cleaned,
+            pd.DataFrame([{"工作单号": "", "ZIP": ""}]),
+            "按月统计",
+        )
+        self.assertAlmostEqual(reports["每方价格参考"]["总派送成本"].sum(), 770)
+        self.assertAlmostEqual(
+            reports["分类型价格参考"]["总派送成本"].sum(),
+            770,
+        )
 
     def test_stage1_remark_marker_excludes_entire_trip_from_linehaul_averages(self):
         rows = self.rows.copy()
@@ -448,8 +730,8 @@ class MultiUnloadAverageTests(unittest.TestCase):
 
         self.assertEqual(price_reference["仓点代码"].tolist(), ["ONT8"])
         self.assertEqual(price_reference.iloc[0]["总出库体积"], 166)
-        self.assertEqual(price_reference.iloc[0]["总派送成本"], 1360)
-        self.assertEqual(price_reference.iloc[0]["每方价格参考"], round(1360 / 166, 2))
+        self.assertEqual(price_reference.iloc[0]["总派送成本"], 1560)
+        self.assertEqual(price_reference.iloc[0]["每方价格参考"], round(1560 / 166, 2))
         self.assertEqual(
             type_price_reference["成本计算类型"].tolist(),
             ["大车地板", "大车卡板", "LTL"],
@@ -464,10 +746,10 @@ class MultiUnloadAverageTests(unittest.TestCase):
         floor = type_price_reference.loc[
             type_price_reference["成本计算类型"] == "大车地板"
         ].iloc[0]
-        self.assertEqual(floor["平均整车价"], 610)
-        self.assertEqual(floor["P80整车价"], 622.33)
-        self.assertEqual(floor["每方平均价"], 10)
-        self.assertEqual(floor["整车价格"], 610)
+        self.assertEqual(floor["平均整车价"], 810)
+        self.assertEqual(floor["P80整车价"], 822.33)
+        self.assertEqual(floor["每方平均价"], 13.28)
+        self.assertEqual(floor["整车价格"], 810)
 
     def test_amazon_freight_carrier_rows_are_ftl_without_false_trip_merge(self):
         raw = pd.DataFrame([

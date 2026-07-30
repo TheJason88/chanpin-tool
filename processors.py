@@ -95,6 +95,7 @@ CONTAINER_NO_PATTERN = re.compile(r"^[A-Z]{3}[UJZ]\d{7}$")
 CHINESE_PATTERN = re.compile(r"[\u4e00-\u9fff]")
 CONTAINER_TIME_DIMENSIONS = ["ETA", "Available时间", "提柜时间", "实际抵仓时间", "拆柜完成时间"]
 SPLIT_DELIVERY_MARKERS = ("拆送", "拆柜")
+DIRECT_DELIVERY_MARKERS = ("直送",)
 
 
 # =========================
@@ -289,7 +290,7 @@ def deduplicate_by_container_no(df, sort_col=None):
 
     if sort_col and sort_col in df.columns:
         df[sort_col] = pd.to_datetime(df[sort_col], errors="coerce")
-        df = df.sort_values(sort_col)
+        df = df.sort_values(sort_col, kind="mergesort")
 
     return df.drop_duplicates(subset=["标准柜号"], keep="last").copy()
 
@@ -309,27 +310,66 @@ def filter_date_range(df, date_col, start_date=None, end_date=None):
     return df.copy()
 
 
-def filter_split_delivery_rows(df, module_name="柜量及提拆柜分析"):
-    """Keep only split-delivery container rows.
+def classify_container_delivery_mode(value):
+    """Map the source delivery method to the container business mode."""
+    method = "" if pd.isna(value) else re.sub(r"\s+", "", str(value))
+    is_direct = any(marker in method for marker in DIRECT_DELIVERY_MARKERS)
+    is_split = any(marker in method for marker in SPLIT_DELIVERY_MARKERS)
+    if is_direct and not is_split:
+        return "直送"
+    if is_split and not is_direct:
+        return "拆送"
+    return "待确认"
 
-    The source system currently exposes both ``拆送`` and ``拆柜`` wording for
-    the same operating population, so both values are accepted. Direct-delivery
-    rows and blank values are excluded when the field is available. Some source
-    exports omit this field after users have already filtered the population;
-    those files are retained and explicitly marked for audit instead of failing.
-    """
+
+def add_container_delivery_mode(df, module_name="柜量及提拆柜分析"):
+    """Classify containers from the explicit source ``派送方式`` field."""
     df = df.copy()
-    if "派送方式" not in df.columns:
-        df["拆送筛选口径"] = "源文件未提供派送方式字段，按上传范围为拆送数据处理"
-        return df
+    require_columns(df, ["派送方式"], module_name)
+    df["业务方式"] = df["派送方式"].apply(classify_container_delivery_mode)
+    df["业务方式识别口径"] = "按派送方式识别：直送=直送；拆柜/拆送=拆送"
+    df["是否进入柜量统计"] = df["业务方式"].isin(["直送", "拆送"])
+    df["业务方式异常原因"] = ""
+    df.loc[df["业务方式"] == "待确认", "业务方式异常原因"] = (
+        "派送方式为空、无法识别或同时包含直送与拆送"
+    )
+    return df
 
-    method = df["派送方式"].fillna("").astype(str).str.replace(r"\s+", "", regex=True)
-    mask = pd.Series(False, index=df.index)
-    for marker in SPLIT_DELIVERY_MARKERS:
-        mask |= method.str.contains(marker, na=False, regex=False)
-    result = df.loc[mask].copy()
-    result["拆送筛选口径"] = "按派送方式筛选拆送/拆柜"
-    return result
+
+def combine_container_uploaded_files(uploaded_files):
+    """Read and vertically concatenate one or more same-structure exports."""
+    files = list(uploaded_files or [])
+    if not files:
+        raise ValueError("请至少上传一个柜类数据文件。")
+
+    frames = []
+    signatures = []
+    for file_index, uploaded_file in enumerate(files, start=1):
+        uploaded_file.seek(0)
+        excel_file = pd.ExcelFile(uploaded_file)
+        sheet_name = excel_file.sheet_names[0]
+        uploaded_file.seek(0)
+        frame = pd.read_excel(uploaded_file, sheet_name=sheet_name, dtype=str)
+        frame = normalize_columns(frame)
+        signatures.append(tuple(frame.columns))
+        source_name = getattr(uploaded_file, "name", f"柜类数据文件{file_index}")
+        frame["来源文件"] = source_name
+        frame["来源文件序号"] = file_index
+        frame["来源工作表"] = sheet_name
+        frame["来源原始行号"] = range(2, len(frame) + 2)
+        frames.append(frame)
+
+    if len(set(signatures)) != 1:
+        raise ValueError(
+            "柜类分析的多个上传文件字段结构不一致；请上传与新导出格式相同的文件。"
+        )
+
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    message = (
+        f"已合并 {len(files)} 个柜类数据文件，共 {len(combined)} 行；"
+        "文件结构一致，已按行纵向拼接，后续按所选时间指标和柜号去重。"
+    )
+    return combined, message
 
 
 def prepare_base_df(df):
@@ -868,6 +908,54 @@ def build_combined_container_summary(df):
     return result_df
 
 
+def build_direct_container_summary(df):
+    """Direct-delivery containers only need volume counts by customer type."""
+    output_cols = ["仓库", "统计周期", "业务方式", "总柜量", "联宇柜量", "非联宇柜量"]
+    if df.empty:
+        return pd.DataFrame(columns=output_cols)
+
+    rows = []
+    for keys, group in df.groupby(["仓库", "统计周期"], dropna=False):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        rows.append({
+            "仓库": keys[0],
+            "统计周期": keys[1],
+            "业务方式": "直送",
+            "总柜量": int(len(group)),
+            "联宇柜量": int((group["客户类型"] == "联宇").sum()),
+            "非联宇柜量": int((group["客户类型"] == "非联宇").sum()),
+        })
+    return pd.DataFrame(rows, columns=output_cols)
+
+
+def build_container_mode_summary(df):
+    """Combine minimal direct-delivery counts with the original split KPIs."""
+    direct_summary = build_direct_container_summary(df[df["业务方式"] == "直送"])
+    split_summary = build_combined_container_summary(df[df["业务方式"] == "拆送"])
+    if not split_summary.empty:
+        split_summary.insert(2, "业务方式", "拆送")
+
+    base_cols = ["仓库", "统计周期", "业务方式", "总柜量", "联宇柜量", "非联宇柜量"]
+    extra_cols = [col for col in split_summary.columns if col not in base_cols]
+    output_cols = base_cols + extra_cols
+    frames = [
+        frame.reindex(columns=output_cols)
+        for frame in [direct_summary, split_summary]
+        if not frame.empty
+    ]
+    if not frames:
+        return pd.DataFrame(columns=output_cols)
+
+    result = pd.concat(frames, ignore_index=True, sort=False)
+    result["业务方式排序"] = result["业务方式"].map({"直送": 0, "拆送": 1}).fillna(9)
+    result = result.sort_values(
+        ["仓库", "统计周期", "业务方式排序"],
+        kind="mergesort",
+    ).drop(columns=["业务方式排序"])
+    return result.reset_index(drop=True)
+
+
 def mark_duration_abnormal(df, duration_col, start_col, end_col, min_days, max_days):
     df = df.copy()
     df["是否有效"] = (
@@ -940,7 +1028,7 @@ def process_container_analysis(
     df = filter_warehouse(df, warehouse)
     module_name = "柜量及提拆柜分析"
     required_cols = [
-        "柜号", "客户名称", time_dimension,
+        "柜号", "客户名称", "派送方式", time_dimension,
         "提柜时间", "实际抵仓时间", "拆柜完成时间",
     ]
     if warehouse != "DAL":
@@ -948,24 +1036,21 @@ def process_container_analysis(
     require_columns(df, list(dict.fromkeys(required_cols)), module_name)
     check_product_channel_available(df, module_name)
 
-    df = filter_split_delivery_rows(df, module_name)
-    if df.empty:
-        raise ValueError("派送方式中没有识别到“拆送”或“拆柜”数据。")
-
     for date_col in CONTAINER_TIME_DIMENSIONS:
         if date_col not in df.columns:
             df[date_col] = pd.NaT
         df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
 
+    # 先清洗有效柜号，再由所选时间指标统一控制筛选、去重与周期归属。
+    df = filter_valid_container_rows(df, module_name)
+    if df.empty:
+        raise ValueError("所选数据中没有符合标准格式的有效柜号。")
     df = filter_date_range(df, time_dimension, start_date, end_date)
     df = df[df[time_dimension].notna()].copy()
     if df.empty:
         raise ValueError(f"所选时间范围内没有有效的“{time_dimension}”数据。")
-
-    df = filter_valid_container_rows(df, module_name)
-    if df.empty:
-        raise ValueError("所选数据中没有符合标准格式的有效柜号。")
     df = deduplicate_by_container_no(df, sort_col=time_dimension)
+
     if period_type == "按原文件时间范围":
         period_start = df[time_dimension].min().strftime("%Y-%m-%d")
         period_end = df[time_dimension].max().strftime("%Y-%m-%d")
@@ -973,57 +1058,96 @@ def process_container_analysis(
     else:
         df = add_period_column(df, period_type, time_dimension)
     df["统计时间指标"] = time_dimension
+    df = add_container_delivery_mode(df, module_name)
+    if not df["是否进入柜量统计"].any():
+        raise ValueError("派送方式中没有识别到“直送”“拆送”或“拆柜”数据。")
 
+    # 直送与拆送复用完全相同的联宇/非联宇及T渠道判定。
     df["客户类型"] = df.apply(classify_customer_type_for_product_volume, axis=1)
     df["T渠道类型"] = df["产品渠道"].apply(classify_t_channel)
 
-    df["提柜时效开始时间"] = np.where(
-        df["仓库"].isin(["LA", "NJ", "SAV"]),
-        df["Available时间"],
-        df["提柜时间"],
+    # 直送暂不统计任何时效；只有拆送进入原提柜/拆柜时效计算。
+    df["提柜时效开始时间"] = pd.NaT
+    df["提柜时效结束时间"] = pd.NaT
+    df["提柜时效"] = np.nan
+    df["提柜时效是否有效"] = False
+    df["提柜时效异常原因"] = np.where(
+        df["业务方式"] == "直送",
+        "直送暂不统计时效",
+        "业务方式待确认，不统计时效",
     )
-    df["提柜时效开始时间"] = pd.to_datetime(df["提柜时效开始时间"], errors="coerce")
-    df["提柜时效结束时间"] = df["实际抵仓时间"]
-    df["提柜时效"] = (
-        df["提柜时效结束时间"] - df["提柜时效开始时间"]
-    ).dt.total_seconds() / 86400
-    pickup_zero_mask = (
-        df["提柜时效开始时间"].notna()
-        & df["提柜时效结束时间"].notna()
-        & df["提柜时效"].eq(0)
+    df["拆柜时效开始时间"] = pd.NaT
+    df["拆柜时效结束时间"] = pd.NaT
+    df["拆柜时效"] = np.nan
+    df["拆柜时效是否有效"] = False
+    df["拆柜时效异常原因"] = np.where(
+        df["业务方式"] == "直送",
+        "直送暂不统计时效",
+        "业务方式待确认，不统计时效",
     )
-    df.loc[pickup_zero_mask, "提柜时效"] = 0.5
-    pickup_checked = mark_duration_abnormal(
-        df,
-        "提柜时效",
-        "提柜时效开始时间",
-        "提柜时效结束时间",
-        min_days=0.01,
-        max_days=20,
-    )
-    df["提柜时效是否有效"] = pickup_checked["是否有效"]
-    df["提柜时效异常原因"] = pickup_checked["异常原因"]
-    df.loc[~df["提柜时效是否有效"], "提柜时效"] = np.nan
 
-    df["拆柜时效开始时间"] = df["实际抵仓时间"]
-    df["拆柜时效结束时间"] = df["拆柜完成时间"]
-    df["拆柜时效"] = (
-        df["拆柜时效结束时间"] - df["拆柜时效开始时间"]
-    ).dt.total_seconds() / 86400
-    unload_checked = mark_duration_abnormal(
-        df,
-        "拆柜时效",
-        "拆柜时效开始时间",
-        "拆柜时效结束时间",
-        min_days=0.01,
-        max_days=20,
-    )
-    df["拆柜时效是否有效"] = unload_checked["是否有效"]
-    df["拆柜时效异常原因"] = unload_checked["异常原因"]
-    df.loc[~df["拆柜时效是否有效"], "拆柜时效"] = np.nan
+    split_df = df[df["业务方式"] == "拆送"].copy()
+    if not split_df.empty:
+        split_df["提柜时效开始时间"] = np.where(
+            split_df["仓库"].isin(["LA", "NJ", "SAV"]),
+            split_df["Available时间"],
+            split_df["提柜时间"],
+        )
+        split_df["提柜时效开始时间"] = pd.to_datetime(
+            split_df["提柜时效开始时间"],
+            errors="coerce",
+        )
+        split_df["提柜时效结束时间"] = split_df["实际抵仓时间"]
+        split_df["提柜时效"] = (
+            split_df["提柜时效结束时间"] - split_df["提柜时效开始时间"]
+        ).dt.total_seconds() / 86400
+        pickup_zero_mask = (
+            split_df["提柜时效开始时间"].notna()
+            & split_df["提柜时效结束时间"].notna()
+            & split_df["提柜时效"].eq(0)
+        )
+        split_df.loc[pickup_zero_mask, "提柜时效"] = 0.5
+        pickup_checked = mark_duration_abnormal(
+            split_df,
+            "提柜时效",
+            "提柜时效开始时间",
+            "提柜时效结束时间",
+            min_days=0.01,
+            max_days=20,
+        )
+        split_df["提柜时效是否有效"] = pickup_checked["是否有效"]
+        split_df["提柜时效异常原因"] = pickup_checked["异常原因"]
+        split_df.loc[~split_df["提柜时效是否有效"], "提柜时效"] = np.nan
+
+        split_df["拆柜时效开始时间"] = split_df["实际抵仓时间"]
+        split_df["拆柜时效结束时间"] = split_df["拆柜完成时间"]
+        split_df["拆柜时效"] = (
+            split_df["拆柜时效结束时间"] - split_df["拆柜时效开始时间"]
+        ).dt.total_seconds() / 86400
+        unload_checked = mark_duration_abnormal(
+            split_df,
+            "拆柜时效",
+            "拆柜时效开始时间",
+            "拆柜时效结束时间",
+            min_days=0.01,
+            max_days=20,
+        )
+        split_df["拆柜时效是否有效"] = unload_checked["是否有效"]
+        split_df["拆柜时效异常原因"] = unload_checked["异常原因"]
+        split_df.loc[~split_df["拆柜时效是否有效"], "拆柜时效"] = np.nan
+
+        timing_cols = [
+            "提柜时效开始时间", "提柜时效结束时间", "提柜时效",
+            "提柜时效是否有效", "提柜时效异常原因",
+            "拆柜时效开始时间", "拆柜时效结束时间", "拆柜时效",
+            "拆柜时效是否有效", "拆柜时效异常原因",
+        ]
+        df.loc[split_df.index, timing_cols] = split_df[timing_cols]
 
     detail_df = df.copy()
-    result_df = build_combined_container_summary(detail_df)
+    result_df = build_container_mode_summary(
+        detail_df[detail_df["是否进入柜量统计"]].copy()
+    )
     return detail_df, result_df
 
 
@@ -1602,8 +1726,11 @@ def process_uploaded_file(
     end_date=None,
     time_dimension=None,
 ):
-    uploaded_file.seek(0)
-    df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+    if isinstance(uploaded_file, (list, tuple)):
+        df, _ = combine_container_uploaded_files(uploaded_file)
+    else:
+        uploaded_file.seek(0)
+        df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
 
     if analysis_module == "柜量及提拆柜分析":
         detail_df, result_df = process_container_analysis(
