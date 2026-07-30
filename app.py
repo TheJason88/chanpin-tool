@@ -22,7 +22,7 @@ try:
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-07-28-batch-transfer-floor-loading-v16"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-07-30-container-mode-multifile-v17"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
@@ -303,8 +303,9 @@ elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
 st.caption(
     "说明：柜量、提柜和拆柜已合并为一个柜级分析功能。可从 ETA、Available时间、提柜时间、实际抵仓时间、拆柜完成时间中任选一个作为统计时间指标；"
     "时间筛选、同柜去重排序、周/月归属和原文件时间范围全部跟随该指标。"
-    "结果一次性输出柜量、提柜时效和拆柜时效；源文件有派送方式字段时自动筛选拆送/拆柜，"
-    "未提供该字段时按上传文件已是拆送范围处理，并在清洗明细中注明口径。"
+    "柜类分析支持同时上传多个相同结构的新导出文件，系统先纵向拼接，再按所选时间指标和柜号去重。"
+    "派送方式=直送时仅输出总柜量、联宇柜量和非联宇柜量，不计算时效；派送方式=拆柜/拆送时继续输出原柜量、提柜时效和拆柜时效。"
+    "直送和拆送的联宇/非联宇判定完全一致；无法识别的派送方式仅保留在清洗明细中待确认。"
     "提柜时效：LA/NJ/SAV按Available时间到实际抵仓时间，DAL按提柜时间到实际抵仓时间；拆柜时效按实际抵仓时间到拆柜完成时间。"
     "派送二支持：按月统计 / 按周统计 / 按原文件时间范围；并单独输出LA至NJ/SAV/DAL盈仓调拨数据。"
     "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
@@ -426,14 +427,18 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
             st.exception(e)
 
 else:
-    uploaded_file = st.file_uploader("6. 上传 Excel", type=["xlsx", "xls"], key="normal_uploaded_file")
-    if uploaded_file is not None:
+    uploaded_files = st.file_uploader(
+        "6. 上传一个或多个柜类 Excel",
+        type=["xlsx", "xls"],
+        accept_multiple_files=True,
+        key="normal_uploaded_files",
+    )
+    if uploaded_files:
         try:
-            uploaded_file.seek(0)
-            excel_file = pd.ExcelFile(uploaded_file)
-            sheet_names = excel_file.sheet_names
-            sheet_name = st.selectbox("选择工作表", sheet_names, key="normal_sheet_select") if len(sheet_names) > 1 else sheet_names[0]
-            st.success(f"文件上传成功，当前工作表：{sheet_name}")
+            combined_container_df, combine_message = processors.combine_container_uploaded_files(
+                uploaded_files
+            )
+            st.success(combine_message)
             if st.button("开始分析", type="primary", key="run_normal_analysis"):
                 if not selection_complete:
                     st.warning("请先把仓点、分析模块、统计周期都选择完整。")
@@ -442,22 +447,19 @@ else:
                 elif period_type != ORIGINAL_FILE_PERIOD and date_range[0] > date_range[1]:
                     st.warning("开始日期不能晚于结束日期。")
                 else:
-                    validate_uploaded_warehouse(uploaded_file, sheet_name, warehouse)
-                    uploaded_file.seek(0)
+                    validate_uploaded_warehouse_for_df(combined_container_df, warehouse)
                     warehouse_for_processing = "四仓合并" if warehouse == "全部" else warehouse
                     normal_start_date = None if period_type == ORIGINAL_FILE_PERIOD else date_range[0]
                     normal_end_date = None if period_type == ORIGINAL_FILE_PERIOD else date_range[1]
-                    detail_df, result_df, final_module = processors.process_uploaded_file(
-                        uploaded_file=uploaded_file,
-                        sheet_name=sheet_name,
+                    detail_df, result_df = processors.process_container_analysis(
+                        combined_container_df,
                         warehouse=warehouse_for_processing,
-                        product_type=DEFAULT_PRODUCT_TYPE,
-                        analysis_module=analysis_module,
                         period_type=period_type,
+                        time_dimension=time_dimension,
                         start_date=normal_start_date,
                         end_date=normal_end_date,
-                        time_dimension=time_dimension,
                     )
+                    final_module = analysis_module
                     st.subheader("数据处理结果")
                     st.dataframe(result_df, use_container_width=True)
                     st.subheader("清洗后的数据集预览")
@@ -469,4 +471,4 @@ else:
             st.error("处理失败，请检查文件字段、工作表、时间范围或分析模块是否匹配。")
             st.exception(e)
     else:
-        st.info("请先完成选择，并上传 Excel 文件。")
+        st.info("请先完成选择，并上传一个或多个相同结构的柜类 Excel 文件。")

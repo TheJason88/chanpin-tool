@@ -78,18 +78,26 @@ class ContainerAnalysisTests(unittest.TestCase):
             end_date="2026-07-12",
         )
 
-        self.assertEqual(detail["标准柜号"].tolist(), ["MSCU1234567", "TGHU7654321"])
+        self.assertEqual(
+            detail["标准柜号"].tolist(),
+            ["MSCU1234567", "TGHU7654321", "OOLU1111111"],
+        )
         kept = detail.loc[detail["标准柜号"] == "MSCU1234567"].iloc[0]
         self.assertEqual(kept["提柜时间"], pd.Timestamp("2026-07-08"))
         self.assertEqual(detail["统计时间指标"].unique().tolist(), ["提柜时间"])
         self.assertEqual(detail["统计周期"].unique().tolist(), ["2026-07-06 ~ 2026-07-12"])
+        self.assertEqual(set(detail["业务方式"]), {"直送", "拆送"})
 
-        result = summary.iloc[0]
-        self.assertEqual(result["总柜量"], 2)
-        self.assertAlmostEqual(result["总平均提柜时效"], 1.25)
-        self.assertAlmostEqual(result["总P80提柜时效"], 1.7)
-        self.assertAlmostEqual(result["总平均拆柜时效"], 1.5)
-        self.assertAlmostEqual(result["总P80拆柜时效"], 1.8)
+        direct_result = summary.loc[summary["业务方式"] == "直送"].iloc[0]
+        split_result = summary.loc[summary["业务方式"] == "拆送"].iloc[0]
+        self.assertEqual(direct_result["总柜量"], 1)
+        self.assertEqual(direct_result["联宇柜量"], 1)
+        self.assertTrue(pd.isna(direct_result["总平均提柜时效"]))
+        self.assertEqual(split_result["总柜量"], 2)
+        self.assertAlmostEqual(split_result["总平均提柜时效"], 1.25)
+        self.assertAlmostEqual(split_result["总P80提柜时效"], 1.7)
+        self.assertAlmostEqual(split_result["总平均拆柜时效"], 1.5)
+        self.assertAlmostEqual(split_result["总P80拆柜时效"], 1.8)
 
     def test_each_supported_time_dimension_drives_month_attribution(self):
         source = pd.DataFrame([
@@ -186,23 +194,16 @@ class ContainerAnalysisTests(unittest.TestCase):
         self.assertEqual(summary.iloc[0]["总平均提柜时效"], 1)
         self.assertTrue(pd.isna(summary.iloc[0]["总平均拆柜时效"]))
 
-    def test_no_split_delivery_rows_reports_clear_error(self):
+    def test_direct_delivery_only_reports_counts_without_timing(self):
         source = pd.DataFrame([
-            container_row("MSCU1234567", delivery_method="直送")
+            container_row("MSCU1234567", delivery_method="直送"),
+            container_row(
+                "TGHU7654321",
+                delivery_method="直送",
+                customer="ACME",
+                channel="T2",
+            ),
         ])
-
-        with self.assertRaisesRegex(ValueError, "拆送.*拆柜"):
-            processors.process_container_analysis(
-                source,
-                warehouse="LA",
-                period_type="按月统计",
-                time_dimension="ETA",
-            )
-
-    def test_missing_delivery_method_keeps_uploaded_scope_with_audit_note(self):
-        source = pd.DataFrame([
-            container_row("MSCU1234567")
-        ]).drop(columns=["派送方式"])
 
         detail, summary = processors.process_container_analysis(
             source,
@@ -211,11 +212,29 @@ class ContainerAnalysisTests(unittest.TestCase):
             time_dimension="ETA",
         )
 
-        self.assertEqual(summary.iloc[0]["总柜量"], 1)
+        self.assertEqual(summary["业务方式"].tolist(), ["直送"])
+        self.assertEqual(summary.iloc[0]["总柜量"], 2)
+        self.assertEqual(summary.iloc[0]["联宇柜量"], 1)
+        self.assertEqual(summary.iloc[0]["非联宇柜量"], 0)
+        self.assertTrue(detail["提柜时效"].isna().all())
+        self.assertTrue(detail["拆柜时效"].isna().all())
         self.assertEqual(
-            detail.iloc[0]["拆送筛选口径"],
-            "源文件未提供派送方式字段，按上传范围为拆送数据处理",
+            detail["提柜时效异常原因"].unique().tolist(),
+            ["直送暂不统计时效"],
         )
+
+    def test_missing_delivery_method_reports_required_field_error(self):
+        source = pd.DataFrame([
+            container_row("MSCU1234567")
+        ]).drop(columns=["派送方式"])
+
+        with self.assertRaisesRegex(ValueError, "派送方式"):
+            processors.process_container_analysis(
+                source,
+                warehouse="LA",
+                period_type="按月统计",
+                time_dimension="ETA",
+            )
 
     def test_delivery_method_alias_is_recognized_and_filtered(self):
         source = pd.DataFrame([
@@ -230,21 +249,50 @@ class ContainerAnalysisTests(unittest.TestCase):
             time_dimension="ETA",
         )
 
-        self.assertEqual(detail["标准柜号"].tolist(), ["MSCU1234567"])
-        self.assertEqual(summary.iloc[0]["总柜量"], 1)
-        self.assertEqual(detail.iloc[0]["拆送筛选口径"], "按派送方式筛选拆送/拆柜")
+        self.assertEqual(
+            detail["标准柜号"].tolist(),
+            ["MSCU1234567", "TGHU7654321"],
+        )
+        self.assertEqual(set(summary["业务方式"]), {"直送", "拆送"})
+        self.assertEqual(
+            detail.set_index("标准柜号").loc["MSCU1234567", "业务方式"],
+            "拆送",
+        )
+        self.assertEqual(
+            detail.set_index("标准柜号").loc["TGHU7654321", "业务方式"],
+            "直送",
+        )
 
-    def test_uploaded_excel_without_delivery_method_runs_end_to_end(self):
-        source = pd.DataFrame([
-            container_row("MSCU1234567")
-        ]).drop(columns=["派送方式"])
-        uploaded = BytesIO()
-        source.to_excel(uploaded, index=False, sheet_name="订单")
-        uploaded.seek(0)
+    def test_multiple_uploaded_files_combine_and_deduplicate_end_to_end(self):
+        source_one = pd.DataFrame([
+            container_row("MSCU1234567", pickup="2026-07-01"),
+            container_row(
+                "TGHU7654321",
+                delivery_method="直送",
+                pickup="2026-07-02",
+            ),
+        ])
+        source_two = pd.DataFrame([
+            container_row("MSCU1234567", pickup="2026-07-03"),
+            container_row(
+                "OOLU1111111",
+                delivery_method="直送",
+                pickup="2026-07-04",
+                customer="ACME",
+            ),
+        ])
+
+        uploads = []
+        for index, source in enumerate([source_one, source_two], start=1):
+            uploaded = BytesIO()
+            source.to_excel(uploaded, index=False, sheet_name="订单")
+            uploaded.seek(0)
+            uploaded.name = f"柜类导出{index}.xlsx"
+            uploads.append(uploaded)
 
         detail, summary, final_module = processors.process_uploaded_file(
-            uploaded_file=uploaded,
-            sheet_name="订单",
+            uploaded_file=uploads,
+            sheet_name=None,
             warehouse="LA",
             product_type="全部",
             analysis_module="柜量及提拆柜分析",
@@ -253,8 +301,38 @@ class ContainerAnalysisTests(unittest.TestCase):
         )
 
         self.assertEqual(final_module, "柜量及提拆柜分析")
-        self.assertEqual(summary.iloc[0]["总柜量"], 1)
-        self.assertIn("拆送筛选口径", detail.columns)
+        self.assertEqual(len(detail), 3)
+        self.assertEqual(
+            detail.set_index("标准柜号").loc["MSCU1234567", "提柜时间"],
+            pd.Timestamp("2026-07-03"),
+        )
+        self.assertEqual(
+            summary.set_index("业务方式").loc["直送", "总柜量"],
+            2,
+        )
+        self.assertEqual(
+            summary.set_index("业务方式").loc["拆送", "总柜量"],
+            1,
+        )
+        self.assertEqual(set(detail["来源文件"]), {"柜类导出1.xlsx", "柜类导出2.xlsx"})
+
+    def test_unknown_delivery_method_is_retained_for_audit_not_counted(self):
+        source = pd.DataFrame([
+            container_row("MSCU1234567", delivery_method="直送"),
+            container_row("TGHU7654321", delivery_method=""),
+        ])
+
+        detail, summary = processors.process_container_analysis(
+            source,
+            warehouse="LA",
+            period_type="按月统计",
+            time_dimension="ETA",
+        )
+
+        unknown = detail.loc[detail["标准柜号"] == "TGHU7654321"].iloc[0]
+        self.assertEqual(unknown["业务方式"], "待确认")
+        self.assertFalse(bool(unknown["是否进入柜量统计"]))
+        self.assertEqual(summary["总柜量"].sum(), 1)
 
 
 if __name__ == "__main__":
