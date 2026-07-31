@@ -1111,6 +1111,150 @@ def build_cost_price_reference_reports(cost_ftl, cost_ltl):
     return station[station_columns], cost_type[type_columns]
 
 
+GOLDEN_STANDARD_PREFERRED_COLUMNS = [
+    "黄金标准类型", "黄金标准判定依据", "同车次有效批次数", "黄金标准成本判定值",
+    "仓库", "统计周期", "分析批次ID", "批次号", "批次号集合", "车次号",
+    "标准运输类型", "车型标准值", "装车类型标准值", "出库体积", "出库卡板数",
+    tool_common.BASE_DELIVERY_COST_COLUMN, tool_common.FLOOR_LOADING_FEE_COLUMN, "派送成本",
+    "批次车份额", "整车批次数", "整车出库体积", "整车出库卡板数",
+    "创建时间", "批次创建时间", "批次出库时间", "批次签收时间",
+    "主产品类型", "批次目的仓点", "派送卡车",
+]
+
+
+def _golden_batch_tokens(row):
+    """Return the authoritative batch tokens represented by one cleaned row."""
+    for col in ["批次号集合", "批次号"]:
+        if col not in row.index:
+            continue
+        values = _split_values(row.get(col, ""))
+        if values:
+            return list(dict.fromkeys(values))
+    analysis_id = row.get("分析批次ID", "")
+    return [str(analysis_id).strip()] if not _is_blank(analysis_id) else []
+
+
+def build_golden_standard_batch_report(matched):
+    """List stage-2 batches suitable as strict one-batch/one-truck reference data.
+
+    Eligibility is intentionally stricter than ordinary totals:
+    - one valid batch on one real FTL trip;
+    - 53-foot/large truck;
+    - floor-loaded 80-120 CBM, or pallet-loaded 40-80 CBM (inclusive);
+    - positive source delivery cost.  The source/base cost is required so a
+      zero-cost floor load cannot qualify merely because the $200 loading fee
+      made its final cost positive. Legacy files without a separate base-cost
+      column treat their only delivery-cost column as the source cost.
+    """
+    if matched is None:
+        return pd.DataFrame(columns=GOLDEN_STANDARD_PREFERRED_COLUMNS)
+    source = matched.copy()
+    if source.empty:
+        return pd.DataFrame(columns=list(dict.fromkeys([*GOLDEN_STANDARD_PREFERRED_COLUMNS, *source.columns])))
+
+    if "批次数据是否有效" in source.columns:
+        source = source[tool_common.normalize_boolean_series(source["批次数据是否有效"])].copy()
+    if source.empty:
+        return pd.DataFrame(columns=list(dict.fromkeys([*GOLDEN_STANDARD_PREFERRED_COLUMNS, *matched.columns])))
+
+    source["_黄金车次号"] = source.get("车次号", pd.Series("", index=source.index)).fillna("").astype(str).str.strip()
+    source["_黄金仓库"] = source.get("仓库", pd.Series("", index=source.index)).fillna("").astype(str).str.upper().str.strip()
+    source["_黄金批次Tokens"] = source.apply(_golden_batch_tokens, axis=1)
+    source["_黄金本行批次数"] = source["_黄金批次Tokens"].apply(len)
+    source["_黄金车次Key"] = source["_黄金仓库"] + "||" + source["_黄金车次号"]
+
+    trip_batch_counts = {}
+    for trip_key, group in source[source["_黄金车次号"].ne("")].groupby("_黄金车次Key", sort=False):
+        tokens = {
+            token
+            for values in group["_黄金批次Tokens"]
+            for token in values
+            if token
+        }
+        trip_batch_counts[trip_key] = len(tokens)
+    source["同车次有效批次数"] = source["_黄金车次Key"].map(trip_batch_counts).fillna(0).astype(int)
+
+    batch_trip_keys = {}
+    for _, row in source[source["_黄金车次号"].ne("")].iterrows():
+        for token in row["_黄金批次Tokens"]:
+            batch_trip_keys.setdefault(token, set()).add(row["_黄金车次Key"])
+    source["_黄金批次对应车次数"] = source["_黄金批次Tokens"].apply(
+        lambda values: max((len(batch_trip_keys.get(token, set())) for token in values), default=0)
+    )
+
+    if "是否有真实车次号" in source.columns:
+        has_real_trip = tool_common.normalize_boolean_series(source["是否有真实车次号"])
+    else:
+        has_real_trip = source["_黄金车次号"].ne("")
+    has_real_trip &= source["_黄金车次号"].ne("")
+
+    transport = source.get("标准运输类型", pd.Series("", index=source.index)).fillna("").astype(str).str.upper().str.strip()
+    vehicle = source.get("车型标准值", pd.Series("", index=source.index)).fillna("").astype(str)
+    loading = source.get("装车类型标准值", pd.Series("", index=source.index)).fillna("").astype(str)
+    volume = pd.to_numeric(source.get("出库体积", pd.Series(pd.NA, index=source.index)), errors="coerce")
+    final_cost = pd.to_numeric(source.get("派送成本", pd.Series(pd.NA, index=source.index)), errors="coerce")
+    if tool_common.BASE_DELIVERY_COST_COLUMN in source.columns:
+        source_cost = pd.to_numeric(source[tool_common.BASE_DELIVERY_COST_COLUMN], errors="coerce")
+    else:
+        source_cost = final_cost
+    source["黄金标准成本判定值"] = source_cost
+
+    single_batch_trip = (
+        source["_黄金本行批次数"].eq(1)
+        & source["同车次有效批次数"].eq(1)
+        & source["_黄金批次对应车次数"].eq(1)
+    )
+    if "整车批次数" in source.columns:
+        declared_batch_count = pd.to_numeric(source["整车批次数"], errors="coerce")
+        single_batch_trip &= declared_batch_count.isna() | declared_batch_count.eq(1)
+    if "批次车份额" in source.columns:
+        exact_share = pd.to_numeric(source["批次车份额"], errors="coerce")
+        single_batch_trip &= exact_share.isna() | exact_share.sub(1).abs().le(1e-6)
+    is_large_truck = vehicle.str.contains(r"53|大车", regex=True, na=False)
+    is_floor = loading.str.contains("地板", na=False)
+    is_pallet = loading.str.contains("卡板", na=False)
+    floor_volume_ok = volume.between(80, 120, inclusive="both")
+    pallet_volume_ok = volume.between(40, 80, inclusive="both")
+    volume_loading_ok = (is_floor & floor_volume_ok) | (is_pallet & pallet_volume_ok)
+
+    eligible = (
+        has_real_trip
+        & transport.eq("FTL")
+        & single_batch_trip
+        & is_large_truck
+        & volume_loading_ok
+        & source_cost.gt(0)
+    )
+    result = source.loc[eligible].copy()
+    result["黄金标准类型"] = result["装车类型标准值"].astype(str).apply(
+        lambda value: "大车地板" if "地板" in value else "大车卡板"
+    )
+    result["黄金标准判定依据"] = result.apply(
+        lambda row: (
+            "一批次一真实车次；大车；地板；80≤出库体积≤120；原始派送成本>0"
+            if row["黄金标准类型"] == "大车地板"
+            else "一批次一真实车次；大车；卡板；40≤出库体积≤80；原始派送成本>0"
+        ),
+        axis=1,
+    )
+    result = result.drop(
+        columns=[
+            "_黄金车次号", "_黄金仓库", "_黄金批次Tokens", "_黄金本行批次数",
+            "_黄金车次Key", "_黄金批次对应车次数",
+        ],
+        errors="ignore",
+    )
+    dedup_columns = [
+        col for col in ["仓库", "车次号", "批次号集合", "批次号", "分析批次ID"]
+        if col in result.columns
+    ]
+    if dedup_columns:
+        result = result.drop_duplicates(subset=dedup_columns, keep="first")
+    columns = [col for col in GOLDEN_STANDARD_PREFERRED_COLUMNS if col in result.columns]
+    columns += [col for col in result.columns if col not in columns]
+    return result[columns].reset_index(drop=True)
+
+
 def _safe_round(df, sheet_type):
     # 先按原有逻辑保留两位小数，再把计数列改回整数。
     rounded = processors.round_output_numbers(df, processors.RESULT_DECIMALS) if df is not None else df
@@ -1130,6 +1274,7 @@ def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_d
     cost_ftl = build_station_cost_report(matched)
     cost_ltl = build_ltl_station_cost_report(matched)
     price_reference, type_price_reference = build_cost_price_reference_reports(cost_ftl, cost_ltl)
+    golden_standard = build_golden_standard_batch_report(matched)
     zip_audit = matched[matched["目的地邮编待补充"]].copy() if "目的地邮编待补充" in matched.columns else pd.DataFrame()
     return {
         "货量": _safe_round(_finalize_sheet(volume, "货量"), "货量"),
@@ -1139,6 +1284,7 @@ def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_d
         "派送时效": _safe_round(_finalize_sheet(timing, "派送时效"), "派送时效"),
         "每方价格参考": _safe_round(_finalize_sheet(price_reference, "成本"), "成本"),
         "分类型价格参考": _safe_round(_finalize_sheet(type_price_reference, "成本"), "成本"),
+        "黄金标准数据": _safe_round(golden_standard, "明细"),
         "派送二_匹配后批次数据": _safe_round(_finalize_sheet(matched, "明细"), "明细"),
         "派送二_车次汇总核对": _safe_round(delivery_workflow_module.build_trip_audit(matched), "明细"),
         "邮编异常审核": _finalize_zip_audit_sheet(zip_audit),
