@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-07-30-container-mode-multifile-v17"
+RUNTIME_SCHEMA_VERSION = "2026-07-31-golden-standard-v18"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
@@ -675,6 +675,7 @@ def _patch_stage2_transfer_sheet():
             cost_ftl,
             cost_ltl,
         )
+        golden_standard = delivery_match_adapter.build_golden_standard_batch_report(matched)
         transfer_report = _build_transfer_report(matched)
         if "目的地邮编待补充" in matched.columns:
             zip_audit = matched[tool_common.normalize_boolean_series(matched["目的地邮编待补充"])].copy()
@@ -690,6 +691,7 @@ def _patch_stage2_transfer_sheet():
             "调拨数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(transfer_report, "调拨数据"), "调拨数据"),
             "每方价格参考": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(price_reference, "成本"), "成本"),
             "分类型价格参考": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(type_price_reference, "成本"), "成本"),
+            "黄金标准数据": delivery_match_adapter._safe_round(golden_standard, "明细"),
             "派送二_匹配后批次数据": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(matched, "明细"), "明细"),
             "派送二_车次汇总核对": delivery_match_adapter._safe_round(delivery_workflow_module.build_trip_audit(matched), "明细"),
             "邮编异常审核": delivery_match_adapter._finalize_zip_audit_sheet(zip_audit),

@@ -927,6 +927,61 @@ class MultiUnloadAverageTests(unittest.TestCase):
             ["LAX9", "ONT8", "ONT8", "ONT8"],
         )
 
+    def test_golden_standard_data_uses_strict_single_batch_trip_boundaries(self):
+        def golden_row(batch, trip, loading, volume, cost=500, **overrides):
+            row = {
+                "仓库": "LA",
+                "分析批次ID": f"BATCH_{batch}",
+                "批次号": batch,
+                "批次号集合": batch,
+                "车次号": trip,
+                "是否有真实车次号": bool(trip),
+                "批次数据是否有效": True,
+                "标准运输类型": "FTL",
+                "车型标准值": "53尺大车",
+                "装车类型标准值": loading,
+                "出库体积": volume,
+                "出库卡板数": 10,
+                "原始派送成本": cost,
+                "派送成本": cost,
+                "批次车份额": 1,
+                "整车批次数": 1,
+                "整车出库体积": volume,
+            }
+            row.update(overrides)
+            return row
+
+        rows = pd.DataFrame([
+            golden_row("FLOOR-80", "T-FLOOR-80", "地板", 80),
+            golden_row("FLOOR-120", "T-FLOOR-120", "地板", 120),
+            golden_row("PALLET-40", "T-PALLET-40", "卡板", 40),
+            golden_row("PALLET-80", "T-PALLET-80", "卡板", 80),
+            golden_row("FLOOR-LOW", "T-FLOOR-LOW", "地板", 79.99),
+            golden_row("FLOOR-HIGH", "T-FLOOR-HIGH", "地板", 120.01),
+            golden_row("PALLET-LOW", "T-PALLET-LOW", "卡板", 39.99),
+            golden_row("PALLET-HIGH", "T-PALLET-HIGH", "卡板", 80.01),
+            golden_row("ZERO-BASE", "T-ZERO", "地板", 90, cost=0, 派送成本=200),
+            golden_row("MISSING-BASE", "T-MISSING-BASE", "地板", 90, 原始派送成本=pd.NA, 派送成本=700),
+            golden_row("SMALL", "T-SMALL", "卡板", 50, 车型标准值="26尺小车"),
+            golden_row("LTL", "T-LTL", "卡板", 50, 标准运输类型="LTL"),
+            golden_row("NO-TRIP", "", "卡板", 50),
+            golden_row("MULTI-A", "T-MULTI", "卡板", 50, 批次车份额=0.5, 整车批次数=2),
+            golden_row("MULTI-B", "T-MULTI", "卡板", 50, 批次车份额=0.5, 整车批次数=2),
+            golden_row("TWO-TRIPS", "T-DUP-1", "卡板", 50),
+            golden_row("TWO-TRIPS", "T-DUP-2", "卡板", 50),
+            golden_row("INVALID", "T-INVALID", "卡板", 50, 批次数据是否有效=False),
+        ])
+
+        result = delivery_match_adapter.build_golden_standard_batch_report(rows)
+
+        self.assertEqual(
+            result["批次号"].tolist(),
+            ["FLOOR-80", "FLOOR-120", "PALLET-40", "PALLET-80"],
+        )
+        self.assertEqual(result["同车次有效批次数"].tolist(), [1, 1, 1, 1])
+        self.assertEqual(result["黄金标准类型"].tolist(), ["大车地板", "大车地板", "大车卡板", "大车卡板"])
+        self.assertTrue(result["黄金标准成本判定值"].gt(0).all())
+
     def test_monthly_price_reference_does_not_merge_june_and_july(self):
         cost_ftl = pd.DataFrame([
             {
@@ -990,8 +1045,13 @@ class MultiUnloadAverageTests(unittest.TestCase):
 
         self.assertIn("每方价格参考", metrics)
         self.assertIn("分类型价格参考", metrics)
+        self.assertIn("黄金标准数据", metrics)
         self.assertNotIn("成本FTL", metrics)
         self.assertNotIn("成本LTL", metrics)
+
+        golden = metrics["黄金标准数据"]
+        self.assertEqual(golden["批次号"].tolist(), ["FTL-FBA-1"])
+        self.assertEqual(golden.iloc[0]["黄金标准类型"], "大车卡板")
 
         price_reference = metrics["每方价格参考"]
         self.assertEqual(price_reference["仓点代码"].tolist(), ["ONT8", "16号仓"])
@@ -1034,6 +1094,9 @@ class MultiUnloadAverageTests(unittest.TestCase):
         xls = pd.ExcelFile(workbook)
         self.assertIn("每方价格参考", xls.sheet_names)
         self.assertIn("分类型价格参考", xls.sheet_names)
+        self.assertIn("黄金标准数据", xls.sheet_names)
+        workbook_golden = pd.read_excel(workbook, sheet_name="黄金标准数据")
+        self.assertEqual(workbook_golden["批次号"].tolist(), ["FTL-FBA-1"])
         self.assertIn("派送二_匹配后批次数据", xls.sheet_names)
         self.assertIn("派送二_车次汇总核对", xls.sheet_names)
         self.assertNotIn("成本FTL", xls.sheet_names)
