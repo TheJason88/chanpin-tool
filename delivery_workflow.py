@@ -508,7 +508,7 @@ def build_cleaned_batches_from_detail(valid_detail):
         if col not in df.columns:
             df[col] = 0
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    for col in ["出库时间", "签收时间"]:
+    for col in ["创建时间", "出库时间", "签收时间"]:
         if col not in df.columns:
             df[col] = pd.NaT
         df[col] = pd.to_datetime(df[col], errors="coerce")
@@ -557,6 +557,7 @@ def build_cleaned_batches_from_detail(valid_detail):
         elif ("53" in vehicle or "大车" in vehicle) and loading not in {"卡板", "地板"}:
             loading = "卡板"
 
+        create_time = group["创建时间"].min()
         start_time = group["出库时间"].min()
         end_time = group["签收时间"].max()
         duration = (
@@ -600,6 +601,7 @@ def build_cleaned_batches_from_detail(valid_detail):
             "调入仓库": first_nonblank(group["调入仓库"]),
             "调拨目标仓代码": first_nonblank(group["调拨目标仓代码"]),
             tool_common.TRANSFER_AUDIT_COLUMN: first_nonblank(group[tool_common.TRANSFER_AUDIT_COLUMN]),
+            "批次创建时间": create_time,
             "批次出库时间": start_time,
             "批次签收时间": end_time,
             "派送时效": duration,
@@ -677,6 +679,7 @@ def build_cleaned_batches_from_detail(valid_detail):
             result.loc[indexes, "车次份额合计"] = float(shares.sum())
 
     result = tool_common.apply_floor_loading_fee(result)
+    result["批次创建时间"] = pd.to_datetime(result["批次创建时间"], errors="coerce")
     result["批次出库时间"] = pd.to_datetime(result["批次出库时间"], errors="coerce")
     result["批次签收时间"] = pd.to_datetime(result["批次签收时间"], errors="coerce")
     result["派送时效"] = pd.to_numeric(result["派送时效"], errors="coerce")
