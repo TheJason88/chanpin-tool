@@ -1111,15 +1111,23 @@ def build_cost_price_reference_reports(cost_ftl, cost_ltl):
     return station[station_columns], cost_type[type_columns]
 
 
-GOLDEN_STANDARD_PREFERRED_COLUMNS = [
-    "黄金标准类型", "黄金标准判定依据", "同车次有效批次数", "黄金标准成本判定值",
-    "仓库", "统计周期", "分析批次ID", "批次号", "批次号集合", "车次号",
-    "标准运输类型", "车型标准值", "装车类型标准值", "出库体积", "出库卡板数",
-    tool_common.BASE_DELIVERY_COST_COLUMN, tool_common.FLOOR_LOADING_FEE_COLUMN, "派送成本",
-    "批次车份额", "整车批次数", "整车出库体积", "整车出库卡板数",
-    "创建时间", "批次创建时间", "批次出库时间", "批次签收时间",
-    "主产品类型", "批次目的仓点", "派送卡车",
+GOLDEN_STANDARD_OUTPUT_SOURCES = [
+    ("批次号", ["批次号", "批次号集合", "分析批次ID"]),
+    ("车次号", ["车次号"]),
+    ("目的地", ["批次目的仓点", "实际目的地", "修正后目的地", "目的地"]),
+    ("调拨属于", ["调拨目标仓代码", "调入仓库"]),
+    ("干线属于", ["专线线路"]),
+    ("区域属于", ["派送区域"]),
+    ("车型", ["车型标准值", "车型"]),
+    ("装车类型", ["装车类型标准值", "装车类型"]),
+    ("派送卡车", ["派送卡车"]),
+    ("出库体积", ["出库体积"]),
+    ("出库卡板", ["出库卡板数"]),
+    ("派送成本", ["派送成本"]),
+    ("出库时间", ["批次出库时间", "出库时间"]),
+    ("创建时间", ["批次创建时间", "创建时间"]),
 ]
+GOLDEN_STANDARD_OUTPUT_COLUMNS = [column for column, _ in GOLDEN_STANDARD_OUTPUT_SOURCES]
 
 
 def _golden_batch_tokens(row):
@@ -1132,6 +1140,17 @@ def _golden_batch_tokens(row):
             return list(dict.fromkeys(values))
     analysis_id = row.get("分析批次ID", "")
     return [str(analysis_id).strip()] if not _is_blank(analysis_id) else []
+
+
+def _golden_first_available_series(df, candidates):
+    values = pd.Series(pd.NA, index=df.index, dtype=object)
+    for column in candidates:
+        if column not in df.columns:
+            continue
+        candidate = df[column]
+        missing = values.apply(_is_blank)
+        values.loc[missing] = candidate.loc[missing]
+    return values
 
 
 def build_golden_standard_batch_report(matched):
@@ -1147,15 +1166,15 @@ def build_golden_standard_batch_report(matched):
       column treat their only delivery-cost column as the source cost.
     """
     if matched is None:
-        return pd.DataFrame(columns=GOLDEN_STANDARD_PREFERRED_COLUMNS)
+        return pd.DataFrame(columns=GOLDEN_STANDARD_OUTPUT_COLUMNS)
     source = matched.copy()
     if source.empty:
-        return pd.DataFrame(columns=list(dict.fromkeys([*GOLDEN_STANDARD_PREFERRED_COLUMNS, *source.columns])))
+        return pd.DataFrame(columns=GOLDEN_STANDARD_OUTPUT_COLUMNS)
 
     if "批次数据是否有效" in source.columns:
         source = source[tool_common.normalize_boolean_series(source["批次数据是否有效"])].copy()
     if source.empty:
-        return pd.DataFrame(columns=list(dict.fromkeys([*GOLDEN_STANDARD_PREFERRED_COLUMNS, *matched.columns])))
+        return pd.DataFrame(columns=GOLDEN_STANDARD_OUTPUT_COLUMNS)
 
     source["_黄金车次号"] = source.get("车次号", pd.Series("", index=source.index)).fillna("").astype(str).str.strip()
     source["_黄金仓库"] = source.get("仓库", pd.Series("", index=source.index)).fillna("").astype(str).str.upper().str.strip()
@@ -1197,8 +1216,6 @@ def build_golden_standard_batch_report(matched):
         source_cost = pd.to_numeric(source[tool_common.BASE_DELIVERY_COST_COLUMN], errors="coerce")
     else:
         source_cost = final_cost
-    source["黄金标准成本判定值"] = source_cost
-
     single_batch_trip = (
         source["_黄金本行批次数"].eq(1)
         & source["同车次有效批次数"].eq(1)
@@ -1226,17 +1243,6 @@ def build_golden_standard_batch_report(matched):
         & source_cost.gt(0)
     )
     result = source.loc[eligible].copy()
-    result["黄金标准类型"] = result["装车类型标准值"].astype(str).apply(
-        lambda value: "大车地板" if "地板" in value else "大车卡板"
-    )
-    result["黄金标准判定依据"] = result.apply(
-        lambda row: (
-            "一批次一真实车次；大车；地板；80≤出库体积≤120；原始派送成本>0"
-            if row["黄金标准类型"] == "大车地板"
-            else "一批次一真实车次；大车；卡板；40≤出库体积≤80；原始派送成本>0"
-        ),
-        axis=1,
-    )
     result = result.drop(
         columns=[
             "_黄金车次号", "_黄金仓库", "_黄金批次Tokens", "_黄金本行批次数",
@@ -1250,9 +1256,10 @@ def build_golden_standard_batch_report(matched):
     ]
     if dedup_columns:
         result = result.drop_duplicates(subset=dedup_columns, keep="first")
-    columns = [col for col in GOLDEN_STANDARD_PREFERRED_COLUMNS if col in result.columns]
-    columns += [col for col in result.columns if col not in columns]
-    return result[columns].reset_index(drop=True)
+    output = pd.DataFrame(index=result.index)
+    for output_column, source_columns in GOLDEN_STANDARD_OUTPUT_SOURCES:
+        output[output_column] = _golden_first_available_series(result, source_columns)
+    return output[GOLDEN_STANDARD_OUTPUT_COLUMNS].reset_index(drop=True)
 
 
 def _safe_round(df, sheet_type):

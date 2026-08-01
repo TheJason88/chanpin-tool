@@ -1,9 +1,11 @@
+import colorsys
 import json
 import re
 from datetime import datetime
 from io import BytesIO
 
 import pandas as pd
+from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
 
 import processors
@@ -57,7 +59,7 @@ TRANSFER_WAREHOUSE_INFO = {
     },
 }
 
-INTEGER_OUTPUT_COLUMNS = ["排名", "发车数", "派送数", "出库卡板数"]
+INTEGER_OUTPUT_COLUMNS = ["排名", "发车数", "派送数", "出库卡板数", "出库卡板"]
 DECIMAL_OUTPUT_COLUMNS = [
     "数值", "占比", "出库体积", "FBA出库体积", "FBX出库体积",
     "原始派送成本", "大车地板装车费", "派送成本", "派送时效",
@@ -789,6 +791,51 @@ def _format_excel_ws(ws):
         ws.column_dimensions[get_column_letter(col_idx)].width = min(max(max_len + 2, 10), 40)
 
 
+def _force_literal_text_cells(ws):
+    """Static report workbooks must never reinterpret source text as formulas."""
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.data_type == "f":
+                cell.data_type = "s"
+
+
+def _format_golden_standard_supplier_colors(ws):
+    headers = {
+        str(cell.value).strip(): cell.column
+        for cell in ws[1]
+        if cell.value is not None
+    }
+    supplier_col = headers.get("派送卡车")
+    if supplier_col is None or ws.max_row < 2:
+        return
+
+    supplier_keys = []
+    row_keys = {}
+    for row_idx in range(2, ws.max_row + 1):
+        value = ws.cell(row=row_idx, column=supplier_col).value
+        display = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not display:
+            continue
+        key = display.casefold()
+        row_keys[row_idx] = key
+        if key not in supplier_keys:
+            supplier_keys.append(key)
+
+    supplier_keys = sorted(supplier_keys)
+    total = len(supplier_keys)
+    colors = {}
+    for index, key in enumerate(supplier_keys):
+        hue = (0.03 + (index / max(total, 1))) % 1.0
+        red, green, blue = colorsys.hls_to_rgb(hue, 0.88, 0.38)
+        colors[key] = f"FF{round(red * 255):02X}{round(green * 255):02X}{round(blue * 255):02X}"
+
+    for row_idx, key in row_keys.items():
+        ws.cell(row=row_idx, column=supplier_col).fill = PatternFill(
+            fill_type="solid",
+            fgColor=colors[key],
+        )
+
+
 def write_sheets_to_excel(sheets):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -796,7 +843,11 @@ def write_sheets_to_excel(sheets):
             safe_name = str(sheet_name)[:31]
             cleaned = clean_for_excel_output(df, sheet_type=safe_name)
             cleaned.to_excel(writer, index=False, sheet_name=safe_name)
-            _format_excel_ws(writer.book[safe_name])
+            ws = writer.book[safe_name]
+            _force_literal_text_cells(ws)
+            _format_excel_ws(ws)
+            if safe_name == "黄金标准数据":
+                _format_golden_standard_supplier_colors(ws)
     output.seek(0)
     return output
 

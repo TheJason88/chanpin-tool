@@ -2,6 +2,7 @@ import json
 import unittest
 
 import pandas as pd
+from openpyxl import load_workbook
 
 import delivery_audit_backfill
 import delivery_match_adapter
@@ -947,6 +948,13 @@ class MultiUnloadAverageTests(unittest.TestCase):
                 "批次车份额": 1,
                 "整车批次数": 1,
                 "整车出库体积": volume,
+                "批次目的仓点": "ONT8",
+                "调拨目标仓代码": "",
+                "专线线路": "LA-CHI",
+                "派送区域": "CHI区域",
+                "派送卡车": "Carrier A",
+                "批次出库时间": pd.Timestamp("2026-07-20 10:00:00"),
+                "批次创建时间": pd.Timestamp("2026-07-18 09:00:00"),
             }
             row.update(overrides)
             return row
@@ -978,9 +986,45 @@ class MultiUnloadAverageTests(unittest.TestCase):
             result["批次号"].tolist(),
             ["FLOOR-80", "FLOOR-120", "PALLET-40", "PALLET-80"],
         )
-        self.assertEqual(result["同车次有效批次数"].tolist(), [1, 1, 1, 1])
-        self.assertEqual(result["黄金标准类型"].tolist(), ["大车地板", "大车地板", "大车卡板", "大车卡板"])
-        self.assertTrue(result["黄金标准成本判定值"].gt(0).all())
+        self.assertEqual(
+            result.columns.tolist(),
+            [
+                "批次号", "车次号", "目的地", "调拨属于", "干线属于", "区域属于",
+                "车型", "装车类型", "派送卡车", "出库体积", "出库卡板", "派送成本",
+                "出库时间", "创建时间",
+            ],
+        )
+        self.assertEqual(result["装车类型"].tolist(), ["地板", "地板", "卡板", "卡板"])
+        self.assertEqual(result["干线属于"].tolist(), ["LA-CHI"] * 4)
+        self.assertEqual(result["区域属于"].tolist(), ["CHI区域"] * 4)
+        self.assertTrue(result["派送成本"].gt(0).all())
+
+    def test_excel_export_preserves_leading_equals_and_colors_suppliers(self):
+        golden = pd.DataFrame([
+            {"批次号": "A", "派送卡车": "Carrier A", "派送成本": 500},
+            {"批次号": "B", "派送卡车": "Carrier B", "派送成本": 600},
+            {"批次号": "C", "派送卡车": "carrier a", "派送成本": 700},
+        ])
+        detail = pd.DataFrame([
+            {"批次号": "A", "同车次备注集合": "=10758801=349件；按PO打板"},
+        ])
+
+        output = tool_common.write_sheets_to_excel({
+            "黄金标准数据": golden,
+            "派送二_匹配后批次数据": detail,
+        })
+        workbook = load_workbook(output, data_only=False)
+        detail_ws = workbook["派送二_匹配后批次数据"]
+        self.assertEqual(detail_ws["B2"].data_type, "s")
+        self.assertEqual(detail_ws["B2"].value, "=10758801=349件；按PO打板")
+
+        golden_ws = workbook["黄金标准数据"]
+        supplier_col = next(cell.column for cell in golden_ws[1] if cell.value == "派送卡车")
+        fills = [golden_ws.cell(row=row, column=supplier_col).fill.fgColor.rgb for row in [2, 3, 4]]
+        self.assertEqual(fills[0], fills[2])
+        self.assertNotEqual(fills[0], fills[1])
+        self.assertEqual(golden_ws.cell(row=2, column=supplier_col).fill.fill_type, "solid")
+        workbook.close()
 
     def test_monthly_price_reference_does_not_merge_june_and_july(self):
         cost_ftl = pd.DataFrame([
@@ -1017,18 +1061,21 @@ class MultiUnloadAverageTests(unittest.TestCase):
                 "仓库": "LA", "出库时间": "2026-07-20", "签收时间": "2026-07-22",
                 "目的地": "Amazon-ONT8", "派送方式": "卡车派送", "运输类型": "LTL",
                 "车次号": "LTL-FBA-T1",
+                "创建时间": "2026-07-18",
                 "批次号": "LTL-FBA-1", "出库体积": 8, "出库卡板数": 2, "派送成本": 120,
             },
             {
                 "仓库": "LA", "出库时间": "2026-07-20", "签收时间": "2026-07-22",
                 "目的地": "谷仓16号仓", "派送方式": "卡车派送", "运输类型": "LTL",
                 "车次号": "LTL-FBX-T1",
+                "创建时间": "2026-07-18",
                 "批次号": "LTL-FBX-1", "出库体积": 6, "出库卡板数": 1, "派送成本": 90,
             },
             {
                 "仓库": "LA", "出库时间": "2026-07-20", "签收时间": "2026-07-22",
                 "目的地": "Amazon-ONT8", "派送方式": "卡车派送", "运输类型": "FTL",
                 "车型": "53尺大车", "装车类型": "卡板", "车次号": "FTL-1",
+                "创建时间": "2026-07-18", "派送卡车": "Carrier A",
                 "批次号": "FTL-FBA-1", "出库体积": 40, "出库卡板数": 10, "派送成本": 300,
             },
         ])
@@ -1051,7 +1098,8 @@ class MultiUnloadAverageTests(unittest.TestCase):
 
         golden = metrics["黄金标准数据"]
         self.assertEqual(golden["批次号"].tolist(), ["FTL-FBA-1"])
-        self.assertEqual(golden.iloc[0]["黄金标准类型"], "大车卡板")
+        self.assertEqual(golden.iloc[0]["装车类型"], "卡板")
+        self.assertEqual(golden.iloc[0]["创建时间"], pd.Timestamp("2026-07-18"))
 
         price_reference = metrics["每方价格参考"]
         self.assertEqual(price_reference["仓点代码"].tolist(), ["ONT8", "16号仓"])
