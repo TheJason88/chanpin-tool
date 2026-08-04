@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-07-31-golden-standard-layout-v19"
+RUNTIME_SCHEMA_VERSION = "2026-08-04-delivery-cost-creation-time-v20"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
@@ -21,7 +21,7 @@ TRANSFER_KEYWORDS = ["调拨", "仓间", "调入"]
 ADDITIONAL_INVALID_BATCH_KEYWORDS = ["废单", "快递", "公共单", "清除", "自提"]
 
 # 明细阶段的LTL优先识别词；车次合并后的最终运输类型仍由
-# apply_trip_transport_type_rules决定，其中AMAZON FREIGHT可最高优先级重判为FTL。
+# apply_trip_transport_type_rules只按真实车次及原始运输证据判定，不用承运商名称推断FTL/LTL。
 LTL_PRIORITY_KEYWORDS = ["LTL", "散货", "散板"]
 LTL_REMARK_COLUMNS = ["备注", "备注信息", "MEMO", "跟进记录", "内部备注", "派送区域"]
 START_TIME_CANDIDATES = ["批次出库时间", "出库时间", "实际出库时间"]
@@ -375,7 +375,7 @@ def _original_file_period_label(df, date_col="批次出库时间"):
 
 
 def _patch_stage2_original_file_period(delivery_workflow_module):
-    """派送功能二支持按原文件时间范围：不拆月/周，按批次出库时间最小值到最大值汇总。"""
+    """派送二原文件范围：运营按出库时间，成本按创建时间各自归期。"""
     current_func = delivery_workflow_module.add_analysis_period
     if getattr(current_func, "_supports_original_file_period", False):
         return delivery_workflow_module
@@ -388,7 +388,11 @@ def _patch_stage2_original_file_period(delivery_workflow_module):
             return original_func(df, period_type)
         out = df.copy()
         out["批次出库时间"] = pd.to_datetime(out["批次出库时间"], errors="coerce")
+        if "批次创建时间" not in out.columns:
+            out["批次创建时间"] = pd.NaT
+        out["批次创建时间"] = pd.to_datetime(out["批次创建时间"], errors="coerce")
         out["统计周期"] = _original_file_period_label(out, "批次出库时间")
+        out["成本统计周期"] = _original_file_period_label(out, "批次创建时间")
         return out
 
     add_analysis_period_with_original_file_range._supports_original_file_period = True
@@ -471,14 +475,17 @@ def _transfer_rows(matched, ftl_only=True):
 
 
 def _filter_positive_cost_rows(df):
-    """成本测算只纳入派送成本大于0的车次；0成本车不计车次数、不参与平均价。"""
+    """成本测算只纳入原始派送成本大于0的批次；追加费用不能把0成本批次转为样本。"""
     if df is None or df.empty:
         return df
     out = df.copy()
-    if "派送成本" not in out.columns:
+    if "派送成本" not in out.columns and tool_common.BASE_DELIVERY_COST_COLUMN not in out.columns:
         return out.iloc[0:0].copy()
-    out["派送成本"] = pd.to_numeric(out["派送成本"], errors="coerce").fillna(0)
-    return out[out["派送成本"] > 0].copy()
+    cost_source = out.get(tool_common.BASE_DELIVERY_COST_COLUMN, out.get("派送成本"))
+    cost_source = pd.to_numeric(cost_source, errors="coerce").fillna(0)
+    if "派送成本" in out.columns:
+        out["派送成本"] = pd.to_numeric(out["派送成本"], errors="coerce").fillna(0)
+    return out[cost_source > 0].copy()
 
 
 def _business_round_vehicle_count(value):
@@ -529,6 +536,8 @@ def _build_transfer_cost_report(matched):
     ]
     if transfer.empty:
         return pd.DataFrame(columns=columns)
+    if "成本统计周期" in transfer.columns:
+        transfer["统计周期"] = transfer["成本统计周期"].fillna("未知周期")
 
     rows = []
     for (warehouse, period, target, target_name), group in transfer.groupby(["仓库", "统计周期", "调拨目标仓", "调拨目标仓名称"], dropna=False):
@@ -581,6 +590,8 @@ def _build_transfer_report(matched):
     ]
     if transfer.empty:
         return pd.DataFrame(columns=columns)
+    if "成本统计周期" in transfer.columns:
+        transfer["统计周期"] = transfer["成本统计周期"].fillna("未知周期")
 
     rows = []
     for (warehouse, period, target_name, line), group in transfer.groupby(["仓库", "统计周期", "调拨目标仓名称", "专线线路"], dropna=False):

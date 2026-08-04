@@ -610,14 +610,14 @@ class MultiUnloadAverageTests(unittest.TestCase):
 
         self.assertEqual(source["批次号集合"].tolist(), ["A", "B", "C"])
 
-    def test_station_cost_reference_keeps_fba_linehaul_and_zero_cost_volume(self):
+    def test_station_cost_reference_excludes_zero_cost_volume_from_denominator(self):
         rows = pd.DataFrame([
             {
                 "仓库": "LA", "统计周期": "2026-06", "专线线路": "LA-DAL",
                 "是否FTL发车": True, "标准运输类型": "FTL", "车次号": "FTW1-T1",
                 "车型标准值": "53尺大车", "装车类型标准值": "地板",
                 "主产品类型": "FBA", "FBA仓点代码集合": "FTW1",
-                "出库体积": 80, "出库卡板数": 40, "派送成本": 5000,
+                "出库体积": 80, "出库卡板数": 40, "原始派送成本": 5000, "派送成本": 5000,
                 "批次车份额": 1, "整车出库体积": 80, "整车出库卡板数": 40,
             },
             {
@@ -625,7 +625,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
                 "是否FTL发车": True, "标准运输类型": "FTL", "车次号": "FTW1-T2",
                 "车型标准值": "53尺大车", "装车类型标准值": "地板",
                 "主产品类型": "FBA", "FBA仓点代码集合": "FTW1",
-                "出库体积": 20, "出库卡板数": 10, "派送成本": 0,
+                "出库体积": 20, "出库卡板数": 10, "原始派送成本": 0, "派送成本": 200,
                 "批次车份额": 1, "整车出库体积": 20, "整车出库卡板数": 10,
             },
         ])
@@ -638,14 +638,14 @@ class MultiUnloadAverageTests(unittest.TestCase):
         )
 
         station = price_reference[price_reference["仓点代码"] == "FTW1"].iloc[0]
-        self.assertEqual(station["总出库体积"], 100)
+        self.assertEqual(station["总出库体积"], 80)
         self.assertEqual(station["总派送成本"], 5000)
-        self.assertEqual(station["每方价格参考"], 50)
+        self.assertEqual(station["每方价格参考"], 62.5)
 
         detail = type_reference[type_reference["仓点代码"] == "FTW1"].iloc[0]
         self.assertEqual(detail["成本计算类型"], "大车地板")
-        self.assertEqual(detail["细分货量方数"], 100)
-        self.assertEqual(detail["每方成本"], 50)
+        self.assertEqual(detail["细分货量方数"], 80)
+        self.assertEqual(detail["每方成本"], 62.5)
 
     def test_trip_level_transport_rules_reclassify_mixed_and_over_60_ltl_into_ftl_cost(self):
         def detail_row(
@@ -720,11 +720,10 @@ class MultiUnloadAverageTests(unittest.TestCase):
 
         amazon_freight = cleaned.loc[cleaned["车次号"] == "AMZ-1"]
         self.assertEqual(len(amazon_freight), 2)
-        self.assertTrue(amazon_freight["标准运输类型"].eq("FTL").all())
+        self.assertTrue(amazon_freight["标准运输类型"].eq("LTL").all())
         self.assertEqual(amazon_freight["出库体积"].sum(), 15)
         self.assertEqual(set(amazon_freight["批次号集合"]), {"AMZ-A", "AMZ-B"})
-        self.assertTrue(amazon_freight["运输类型重判原因"].str.contains("AMAZON FREIGHT").all())
-        self.assertTrue(amazon_freight["运输类型重判原因"].str.contains("最高优先级").all())
+        self.assertTrue(amazon_freight["运输类型重判原因"].fillna("").eq("").all())
 
         delivery_runtime.bootstrap(delivery_workflow)
         metrics = delivery_workflow.process_stage2_analysis(
@@ -744,11 +743,11 @@ class MultiUnloadAverageTests(unittest.TestCase):
             ["大车地板", "大车卡板", "LTL"],
         )
         ltl = type_price_reference.loc[type_price_reference["成本计算类型"] == "LTL"].iloc[0]
-        self.assertEqual(ltl["总出库体积"], 60)
-        self.assertEqual(ltl["总派送成本"], 300)
+        self.assertEqual(ltl["总出库体积"], 75)
+        self.assertEqual(ltl["总派送成本"], 450)
         self.assertEqual(ltl["目的地总出库体积"], 166)
-        self.assertEqual(ltl["细分货量方数"], 60)
-        self.assertEqual(ltl["每方成本"], 5)
+        self.assertEqual(ltl["细分货量方数"], 75)
+        self.assertEqual(ltl["每方成本"], 6)
         self.assertTrue(pd.isna(ltl["整车价格"]))
         floor = type_price_reference.loc[
             type_price_reference["成本计算类型"] == "大车地板"
@@ -759,7 +758,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertTrue(pd.isna(floor["整车价格"]))
         self.assertEqual(floor["每方成本"], 13.28)
 
-    def test_amazon_freight_carrier_rows_are_ftl_without_false_trip_merge(self):
+    def test_amazon_freight_carrier_does_not_reclassify_or_fabricate_trip(self):
         raw = pd.DataFrame([
             {
                 "仓库": "LA", "出库时间": "2026-07-20", "签收时间": "2026-07-22",
@@ -781,11 +780,11 @@ class MultiUnloadAverageTests(unittest.TestCase):
 
         self.assertEqual(detail["派送卡车"].str.upper().unique().tolist(), ["AMAZON FREIGHT"])
         self.assertEqual(len(cleaned), 2)
-        self.assertTrue(cleaned["标准运输类型"].eq("FTL").all())
+        self.assertTrue(cleaned["标准运输类型"].eq("LTL").all())
         self.assertTrue(cleaned["车次号"].fillna("").eq("").all())
         self.assertTrue(cleaned["批次车份额"].isna().all())
         self.assertEqual(set(cleaned["批次号集合"]), {"AF-1", "AF-2"})
-        self.assertTrue(cleaned["运输类型重判原因"].str.contains("AMAZON FREIGHT").all())
+        self.assertTrue(cleaned["运输类型重判原因"].fillna("").eq("").all())
 
     def test_ltl_cost_report_groups_fba_and_fbx_platform_by_station(self):
         rows = pd.DataFrame([
@@ -1434,17 +1433,26 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(fbx.iloc[0]["派送卡车使用比例（>10%）"], "JTeam INC 60.00%")
         self.assertEqual(fbx.columns[-1], "派送卡车使用比例（>10%）")
 
-    def test_missing_trip_keeps_volume_but_excludes_dispatch_time_and_cost(self):
-        detail = pd.DataFrame([{
-            "原始行号": 2, "仓库": "LA", "标准运输类型": "FTL", "车次号": "",
-            "批次号": "NO-TRIP", "出库时间": "2026-07-01", "签收时间": "2026-07-02",
-            "出库体积": 20, "出库卡板数": 4, "派送成本": 200,
-            "FBA/FBX": "FBA", "FBA仓点代码": "ONT8", "标准邮编": "92551",
-            "车型": "53尺大车", "装车类型": "卡板",
-        }])
+    def test_missing_trip_keeps_batch_cost_but_excludes_dispatch_time_and_truck_price(self):
+        detail = pd.DataFrame([
+            {
+                "原始行号": 2, "仓库": "LA", "标准运输类型": "FTL", "车次号": "",
+                "批次号": "NO-TRIP-FTL", "创建时间": "2026-06-30", "出库时间": "2026-07-01", "签收时间": "2026-07-02",
+                "出库体积": 20, "出库卡板数": 4, "派送成本": 200,
+                "FBA/FBX": "FBA", "FBA仓点代码": "ONT8", "标准邮编": "92551",
+                "车型": "53尺大车", "装车类型": "卡板",
+            },
+            {
+                "原始行号": 3, "仓库": "LA", "标准运输类型": "LTL", "车次号": "",
+                "批次号": "NO-TRIP-LTL", "创建时间": "2026-06-29", "出库时间": "2026-07-01", "签收时间": "2026-07-02",
+                "出库体积": 10, "出库卡板数": 2, "派送成本": 120,
+                "FBA/FBX": "FBA", "FBA仓点代码": "ONT8", "标准邮编": "92551",
+                "车型": "", "装车类型": "散板",
+            },
+        ])
         cleaned = delivery_workflow.build_cleaned_batches_from_detail(detail)
         self.assertEqual(cleaned.iloc[0]["出库体积"], 20)
-        self.assertTrue(pd.isna(cleaned.iloc[0]["批次车份额"]))
+        self.assertTrue(cleaned["批次车份额"].isna().all())
 
         delivery_runtime.bootstrap(delivery_workflow)
         metrics = delivery_workflow.process_stage2_analysis(
@@ -1452,12 +1460,35 @@ class MultiUnloadAverageTests(unittest.TestCase):
             pd.DataFrame(columns=["批次号", "标准邮编"]),
             "按月统计",
         )
-        self.assertEqual(metrics["FBA货量排行"].iloc[0]["出库体积"], 20)
-        self.assertTrue(metrics["分类型价格参考"].empty)
+        volume = metrics["FBA货量排行"].iloc[0]
+        self.assertEqual(volume["统计周期"], "2026-07")
+        self.assertEqual(volume["出库体积"], 30)
+        cost_rows = metrics["分类型价格参考"].set_index("成本计算类型")
+        self.assertEqual(set(cost_rows.index), {"大车卡板", "LTL"})
+        self.assertTrue(cost_rows["统计周期"].eq("2026-06").all())
+        self.assertEqual(cost_rows.loc["大车卡板", "细分货量方数"], 20)
+        self.assertEqual(cost_rows.loc["大车卡板", "总派送成本"], 200)
+        self.assertTrue(pd.isna(cost_rows.loc["大车卡板", "整车价格"]))
+        self.assertEqual(cost_rows.loc["大车卡板", "车次数"], 0)
+        self.assertEqual(cost_rows.loc["LTL", "细分货量方数"], 10)
+        self.assertEqual(cost_rows.loc["LTL", "总派送成本"], 120)
+        self.assertTrue(pd.isna(cost_rows.loc["LTL", "整车价格"]))
         self.assertFalse((metrics["发车量"]["指标名称"] == "目的仓点发车数").any())
         timing = metrics["派送时效"]
         self.assertTrue(timing.empty or "平均派送时效" not in timing.columns or timing["平均派送时效"].isna().all())
         self.assertTrue(timing.empty or "P80派送时效" not in timing.columns or timing["P80派送时效"].isna().all())
+
+    def test_original_file_period_uses_creation_range_for_cost_only(self):
+        delivery_runtime.bootstrap(delivery_workflow)
+        rows = pd.DataFrame([
+            {"批次出库时间": "2026-07-01", "批次创建时间": "2026-06-05"},
+            {"批次出库时间": "2026-07-20", "批次创建时间": "2026-06-18"},
+        ])
+
+        result = delivery_workflow.add_analysis_period(rows, "按原文件时间范围")
+
+        self.assertTrue(result["统计周期"].eq("2026-07-01 ~ 2026-07-20").all())
+        self.assertTrue(result["成本统计周期"].eq("2026-06-05 ~ 2026-06-18").all())
 
     def test_same_trip_batches_keep_their_own_month_period(self):
         detail = pd.DataFrame([

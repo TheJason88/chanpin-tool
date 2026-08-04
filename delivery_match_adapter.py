@@ -711,7 +711,7 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
             if len(allocations) != 1:
                 continue
             item = allocations[0]
-            if vehicle_group_override == "LTL":
+            if vehicle_group_override == "LTL" or not trip_no:
                 vehicle_share = pd.NA
             elif pd.notna(exact_share) and float(exact_share) > 0:
                 vehicle_share = float(exact_share)
@@ -735,7 +735,7 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
             if len(objects) != 1:
                 continue
             platform, code = objects[0]
-            if vehicle_group_override == "LTL":
+            if vehicle_group_override == "LTL" or not trip_no:
                 vehicle_share = pd.NA
             elif pd.notna(exact_share) and float(exact_share) > 0:
                 vehicle_share = float(exact_share)
@@ -824,11 +824,23 @@ def build_fbx_platform_warehouse_sheet(matched):
 def build_station_cost_report(matched):
     if matched.empty:
         return pd.DataFrame()
-    ftl = matched[matched.get("是否FTL发车", False)].copy()
+    source = matched.copy()
+    if "成本统计周期" in source.columns:
+        source["统计周期"] = source["成本统计周期"].fillna("未知周期")
+    if "标准运输类型" in source.columns:
+        ftl = source[source["标准运输类型"].astype(str).str.upper().eq("FTL")].copy()
+    else:
+        ftl_mask = tool_common.normalize_boolean_series(
+            source.get("是否FTL发车", pd.Series(False, index=source.index))
+        )
+        ftl = source[ftl_mask].copy()
     if ftl.empty:
         return pd.DataFrame()
     rows = []
-    full_load = ftl[(ftl["车型标准值"] == "53尺大车") & (ftl["装车类型标准值"] == "地板")].copy()
+    dispatch_mask = tool_common.normalize_boolean_series(
+        ftl.get("是否FTL发车", pd.Series(False, index=ftl.index))
+    )
+    full_load = ftl[dispatch_mask & (ftl["车型标准值"] == "53尺大车") & (ftl["装车类型标准值"] == "地板")].copy()
     for (warehouse, period), group in full_load.groupby(["仓库", "统计周期"], dropna=False):
         if "批次车份额" in group.columns:
             full_load_count = pd.to_numeric(group["批次车份额"], errors="coerce").fillna(0).sum()
@@ -851,7 +863,15 @@ def build_station_cost_report(matched):
             "平均每车出库体积": trip_volume.mean(),
             "P80每车出库体积": processors.safe_p80(trip_volume),
         })
-    cost_source = ftl[ftl["主产品类型"].isin(["FBA", "FBX"])].copy()
+    ftl["派送成本"] = pd.to_numeric(ftl.get("派送成本", 0), errors="coerce").fillna(0)
+    positive_cost_source = pd.to_numeric(
+        ftl.get(tool_common.BASE_DELIVERY_COST_COLUMN, ftl["派送成本"]),
+        errors="coerce",
+    ).fillna(0)
+    cost_source = ftl[
+        ftl["主产品类型"].isin(["FBA", "FBX"])
+        & positive_cost_source.gt(0)
+    ].copy()
     expanded = pd.concat([
         _expand_cost_by_station(cost_source[cost_source["主产品类型"] == "FBA"], "FBA"),
         _expand_cost_by_station(cost_source[cost_source["主产品类型"] == "FBX"], "FBX平台仓"),
@@ -922,6 +942,8 @@ def build_ltl_station_cost_report(matched):
         return pd.DataFrame(columns=columns)
 
     source = matched.copy()
+    if "成本统计周期" in source.columns:
+        source["统计周期"] = source["成本统计周期"].fillna("未知周期")
     if "标准运输类型" in source.columns:
         source = source[source["标准运输类型"].astype(str).str.upper().eq("LTL")].copy()
     elif "是否FTL发车" in source.columns:
@@ -937,15 +959,14 @@ def build_ltl_station_cost_report(matched):
     if "主产品类型" not in source.columns:
         return pd.DataFrame(columns=columns)
 
+    positive_cost_source = pd.to_numeric(
+        source.get(tool_common.BASE_DELIVERY_COST_COLUMN, source["派送成本"]),
+        errors="coerce",
+    ).fillna(0)
     source = source[
         source["主产品类型"].isin(["FBA", "FBX"])
-        & source["派送成本"].gt(0)
+        & positive_cost_source.gt(0)
     ].copy()
-    # 缺车次号只计货量，不进入LTL成本。
-    if "是否有真实车次号" in source.columns:
-        source = source[tool_common.normalize_boolean_series(source["是否有真实车次号"])].copy()
-    elif "车次号" in source.columns:
-        source = source[source["车次号"].fillna("").astype(str).str.strip().ne("")].copy()
     expanded = pd.concat([
         _expand_cost_by_station(
             source[source["主产品类型"] == "FBA"],
