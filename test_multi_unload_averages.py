@@ -35,6 +35,26 @@ class MultiUnloadAverageTests(unittest.TestCase):
             ]
         )
 
+    def test_slc3_fba_reference_uses_confirmed_shipping_address(self):
+        reference_df, reference_map = delivery_reference.load_fba_reference()
+
+        self.assertIn("SLC3", reference_map)
+        slc3 = reference_map["SLC3"]
+        self.assertEqual(slc3["目的地示例"], "Amazon-SLC3")
+        self.assertEqual(
+            slc3["地址"],
+            "355 N John Glenn Rd, Salt Lake City, UT 84116-4413",
+        )
+        self.assertEqual(slc3["邮编"], "84116")
+        self.assertEqual(slc3["邮编前三位"], "841")
+        self.assertEqual(slc3["州"], "UT")
+        self.assertEqual(slc3["站点名称"], "Amazon/SLC3")
+
+        matched = delivery_reference.match_fba_reference("Amazon SLC3")
+        self.assertEqual(matched["代码"], "SLC3")
+        self.assertEqual(matched["邮编"], "84116")
+        self.assertEqual(matched["州"], "UT")
+
     def test_linehaul_totals_include_both_but_averages_exclude_marked_row(self):
         report = delivery_audit_backfill._build_linehaul_sheet(self.rows)
         row = report.loc[report["专线线路"] == "LA-NJ"].iloc[0]
