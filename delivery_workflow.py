@@ -843,14 +843,12 @@ def add_analysis_period(df, period_type):
     out["批次创建时间"] = pd.to_datetime(out["批次创建时间"], errors="coerce")
     if period_type == "按月统计":
         out["统计周期"] = out["批次出库时间"].dt.strftime("%Y-%m")
-        out["成本统计周期"] = out["批次创建时间"].dt.strftime("%Y-%m")
+        out["成本统计周期"] = out["统计周期"]
     else:
         week_start = out["批次出库时间"] - pd.to_timedelta(out["批次出库时间"].dt.weekday, unit="D")
         week_end = week_start + pd.Timedelta(days=6)
         out["统计周期"] = week_start.dt.strftime("%Y-%m-%d") + " ~ " + week_end.dt.strftime("%Y-%m-%d")
-        cost_week_start = out["批次创建时间"] - pd.to_timedelta(out["批次创建时间"].dt.weekday, unit="D")
-        cost_week_end = cost_week_start + pd.Timedelta(days=6)
-        out["成本统计周期"] = cost_week_start.dt.strftime("%Y-%m-%d") + " ~ " + cost_week_end.dt.strftime("%Y-%m-%d")
+        out["成本统计周期"] = out["统计周期"]
     out["统计周期"] = out["统计周期"].fillna("未知周期")
     out["成本统计周期"] = out["成本统计周期"].fillna("未知周期")
     return out

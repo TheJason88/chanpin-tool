@@ -1485,7 +1485,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(volume["出库体积"], 30)
         cost_rows = metrics["分类型价格参考"].set_index("成本计算类型")
         self.assertEqual(set(cost_rows.index), {"大车卡板", "LTL"})
-        self.assertTrue(cost_rows["统计周期"].eq("2026-06").all())
+        self.assertTrue(cost_rows["统计周期"].eq("2026-07").all())
         self.assertEqual(cost_rows.loc["大车卡板", "细分货量方数"], 20)
         self.assertEqual(cost_rows.loc["大车卡板", "总派送成本"], 200)
         self.assertTrue(pd.isna(cost_rows.loc["大车卡板", "整车价格"]))
@@ -1498,7 +1498,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertTrue(timing.empty or "平均派送时效" not in timing.columns or timing["平均派送时效"].isna().all())
         self.assertTrue(timing.empty or "P80派送时效" not in timing.columns or timing["P80派送时效"].isna().all())
 
-    def test_original_file_period_uses_creation_range_for_cost_only(self):
+    def test_original_file_period_uses_outbound_range_for_operations_and_cost(self):
         delivery_runtime.bootstrap(delivery_workflow)
         rows = pd.DataFrame([
             {"批次出库时间": "2026-07-01", "批次创建时间": "2026-06-05"},
@@ -1508,7 +1508,19 @@ class MultiUnloadAverageTests(unittest.TestCase):
         result = delivery_workflow.add_analysis_period(rows, "按原文件时间范围")
 
         self.assertTrue(result["统计周期"].eq("2026-07-01 ~ 2026-07-20").all())
-        self.assertTrue(result["成本统计周期"].eq("2026-06-05 ~ 2026-06-18").all())
+        self.assertTrue(result["成本统计周期"].eq("2026-07-01 ~ 2026-07-20").all())
+
+    def test_weekly_cost_period_uses_outbound_time_not_creation_time(self):
+        rows = pd.DataFrame([{
+            "批次出库时间": "2026-08-05",
+            "批次创建时间": "2026-07-01",
+        }])
+
+        result = delivery_workflow.add_analysis_period(rows, "按周统计")
+
+        expected_period = "2026-08-03 ~ 2026-08-09"
+        self.assertEqual(result.iloc[0]["统计周期"], expected_period)
+        self.assertEqual(result.iloc[0]["成本统计周期"], expected_period)
 
     def test_same_trip_batches_keep_their_own_month_period(self):
         detail = pd.DataFrame([

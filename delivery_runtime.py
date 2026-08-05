@@ -375,7 +375,7 @@ def _original_file_period_label(df, date_col="批次出库时间"):
 
 
 def _patch_stage2_original_file_period(delivery_workflow_module):
-    """派送二原文件范围：运营按出库时间，成本按创建时间各自归期。"""
+    """派送二原文件范围：运营和成本统一按批次出库时间归期。"""
     current_func = delivery_workflow_module.add_analysis_period
     if getattr(current_func, "_supports_original_file_period", False):
         return delivery_workflow_module
@@ -392,7 +392,7 @@ def _patch_stage2_original_file_period(delivery_workflow_module):
             out["批次创建时间"] = pd.NaT
         out["批次创建时间"] = pd.to_datetime(out["批次创建时间"], errors="coerce")
         out["统计周期"] = _original_file_period_label(out, "批次出库时间")
-        out["成本统计周期"] = _original_file_period_label(out, "批次创建时间")
+        out["成本统计周期"] = out["统计周期"]
         return out
 
     add_analysis_period_with_original_file_range._supports_original_file_period = True
