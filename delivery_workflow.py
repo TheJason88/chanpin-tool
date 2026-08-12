@@ -905,6 +905,7 @@ def prepare_stage2_for_report(cleaned_batches, match_df, period_type):
         matched["同车次备注集合"] = matched[remark_cols].apply(lambda row: combine_unique(row.tolist()), axis=1)
     else:
         matched["同车次备注集合"] = ""
+    matched = processors.mark_whole_truck_cost_sample_eligibility(matched)
     matched = matched[[col for col in matched.columns if col != "同车次备注集合"] + ["同车次备注集合"]]
     return matched
 
@@ -1143,7 +1144,8 @@ def build_sheet2_cost_report(df):
     rows = []
     if df.empty:
         return pd.DataFrame()
-    ftl = dispatch_rows(df).copy()
+    marked = processors.mark_whole_truck_cost_sample_eligibility(df)
+    ftl = dispatch_rows(marked).copy()
     if ftl.empty:
         return pd.DataFrame()
     ftl["车型装车分组"] = ftl.apply(cost_vehicle_group, axis=1)
@@ -1155,7 +1157,8 @@ def build_sheet2_cost_report(df):
     cost_source = cost_source[cost_source["车型装车分组"].isin(["小车", "大车卡板", "大车地板"])]
     for (warehouse, period, obj_type, obj_name, vehicle_group), group in cost_source.groupby(["仓库", "统计周期", "对象类型", "对象名称", "车型装车分组"], dropna=False):
         total_cost = group["派送成本"].sum(); total_volume = group["出库体积"].sum()
-        rows.append({"报告部分": "4.成本", "指标名称": "FBA及FBX平台仓成本", "仓库": warehouse, "统计周期": period, "对象类型": obj_type, "对象名称": obj_name, "车型装车分组": vehicle_group, "车次数": len(group), "总出库体积": total_volume, "总派送成本": total_cost, "平均整车价": group["派送成本"].mean(), "每方平均价": processors.safe_divide(total_cost, total_volume), "平均每车出库体积": group["出库体积"].mean(), "P80每车出库体积": processors.safe_p80(group["出库体积"]), "备注": "小车不区分卡板/地板；大车区分卡板与地板"})
+        whole_truck_cost_group = processors.whole_truck_cost_sample_rows(group)
+        rows.append({"报告部分": "4.成本", "指标名称": "FBA及FBX平台仓成本", "仓库": warehouse, "统计周期": period, "对象类型": obj_type, "对象名称": obj_name, "车型装车分组": vehicle_group, "车次数": len(group), "总出库体积": total_volume, "总派送成本": total_cost, "平均整车价": whole_truck_cost_group["派送成本"].mean(), "每方平均价": processors.safe_divide(total_cost, total_volume), "平均每车出库体积": group["出库体积"].mean(), "P80每车出库体积": processors.safe_p80(group["出库体积"]), "备注": "小车不区分卡板/地板；大车区分卡板与地板；多批次车次不计整车成本"})
     return pd.DataFrame(rows)
 
 

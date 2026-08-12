@@ -26,9 +26,10 @@ LINEHAUL_TARGET_NAMES = {
     "LA-SAV": "SAV干线商圈",
 }
 LINEHAUL_SHEET_COLUMNS = [
-    "指标名称", "发货仓", "干线目标区域", "专线线路", "统计周期", "车次数",
+    "发货仓", "干线目标区域", "专线线路", "统计周期", "车次数",
     "总出库体积", "总出库卡板数", "总派送成本", "平均整车价", "每方平均价",
-    "平均每车出库体积", "平均派送时效", "P80派送时效", "批次号集合", "车次号集合",
+    "平均每车出库体积", "平均派送时效", "P80派送时效",
+    "供应商平均整车成本", "供应商使用比例",
 ]
 
 # 干线商圈口径：NJ/DAL维持原规则；CHI/SAV按实际物流商圈扩大。
@@ -231,7 +232,7 @@ def _build_linehaul_sheet(matched):
     if any(col not in matched.columns for col in required):
         return pd.DataFrame(columns=LINEHAUL_SHEET_COLUMNS)
 
-    source = matched.copy()
+    source = processors.mark_whole_truck_cost_sample_eligibility(matched)
     source = source[source["仓库"].astype(str).str.strip().isin(["LA", "美西仓", "美西二号仓", "CA"])].copy()
     if source.empty:
         return pd.DataFrame(columns=LINEHAUL_SHEET_COLUMNS)
@@ -278,17 +279,18 @@ def _build_linehaul_sheet(matched):
                 average_source["批次出库体积"] = average_source["出库体积"]
                 average_source["出库体积"] = pd.to_numeric(average_source["整车出库体积"], errors="coerce")
             average_group = processors.average_sample_rows(average_source)
+            cost_group = processors.whole_truck_cost_sample_rows(average_group)
             timing_group = delivery_workflow.timing_sample_rows(average_group)
             trip_loads = average_group.drop_duplicates(["仓库", "车次号"]).copy()
             average_share = (
-                pd.to_numeric(average_group["批次车份额"], errors="coerce").fillna(0).sum()
-                if "批次车份额" in average_group.columns
-                else float(len(average_group))
+                pd.to_numeric(cost_group["批次车份额"], errors="coerce").fillna(0).sum()
+                if "批次车份额" in cost_group.columns
+                else float(len(cost_group))
             )
-            average_cost = pd.to_numeric(average_group["派送成本"], errors="coerce").fillna(0).sum()
+            average_cost = pd.to_numeric(cost_group["派送成本"], errors="coerce").fillna(0).sum()
+            supplier_costs, supplier_usage = processors.supplier_whole_truck_cost_summary(cost_group)
 
             rows.append({
-                "指标名称": "LA干线数据",
                 "发货仓": "LA",
                 "干线目标区域": LINEHAUL_TARGET_NAMES[line],
                 "专线线路": line,
@@ -309,8 +311,8 @@ def _build_linehaul_sheet(matched):
                 ).mean(),
                 "平均派送时效": delivery_workflow.volume_weighted_average(timing_group),
                 "P80派送时效": delivery_workflow.volume_weighted_p80(timing_group),
-                "批次号集合": _combine_unique_text(group["批次号集合"]) if not group.empty else "",
-                "车次号集合": _combine_unique_text(group["车次号"]) if not group.empty else "",
+                "供应商平均整车成本": supplier_costs,
+                "供应商使用比例": supplier_usage,
             })
 
     result = pd.DataFrame(rows, columns=LINEHAUL_SHEET_COLUMNS)

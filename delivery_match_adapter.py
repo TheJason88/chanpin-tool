@@ -703,6 +703,9 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
         trip_pallets = pd.to_numeric(row.get("整车出库卡板数", pallets), errors="coerce")
         trip_volume = volume if pd.isna(trip_volume) else float(trip_volume)
         trip_pallets = pallets if pd.isna(trip_pallets) else float(trip_pallets)
+        whole_truck_cost_eligible = bool(
+            row.get(processors.WHOLE_TRUCK_COST_ELIGIBLE_COLUMN, False)
+        )
 
         allocations = _parse_destination_allocation_details(row, object_type)
         expanded_objects = []
@@ -758,6 +761,7 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
             full_truck_equivalent = (
                 float(item["派送成本"]) / float(item["车次数"])
                 if vehicle_group_override != "LTL"
+                and whole_truck_cost_eligible
                 and pd.notna(item["车次数"])
                 and float(item["车次数"]) > 0
                 and float(item["派送成本"]) > 0
@@ -780,6 +784,11 @@ def _expand_cost_by_station(df, object_type, vehicle_group_override=None):
                 "整车派送成本": pd.NA,
                 "整车记录ID": trip_record_id,
                 "仓点分摊口径": item["仓点分摊口径"],
+                processors.WHOLE_TRUCK_COST_ELIGIBLE_COLUMN: whole_truck_cost_eligible,
+                processors.WHOLE_TRUCK_COST_EXCLUSION_REASON_COLUMN: row.get(
+                    processors.WHOLE_TRUCK_COST_EXCLUSION_REASON_COLUMN,
+                    "",
+                ),
             })
     return pd.DataFrame(rows)
 
@@ -824,7 +833,7 @@ def build_fbx_platform_warehouse_sheet(matched):
 def build_station_cost_report(matched):
     if matched.empty:
         return pd.DataFrame()
-    source = matched.copy()
+    source = processors.mark_whole_truck_cost_sample_eligibility(matched)
     if "成本统计周期" in source.columns:
         source["统计周期"] = source["成本统计周期"].fillna("未知周期")
     if "标准运输类型" in source.columns:
@@ -894,6 +903,7 @@ def build_station_cost_report(matched):
             cost_sample_source["批次出库体积"] = cost_sample_source["出库体积"]
             cost_sample_source["出库体积"] = cost_sample_source["整车出库体积"]
             cost_sample = processors.regular_delivery_average_sample_rows(cost_sample_source)
+            whole_truck_cost_sample = processors.whole_truck_cost_sample_rows(cost_sample)
 
             trip_sample_source = group[group["整车记录ID"].astype(str).str.strip().ne("")].drop_duplicates("整车记录ID").copy()
             trip_sample_source["出库体积"] = trip_sample_source["整车出库体积"]
@@ -906,7 +916,8 @@ def build_station_cost_report(matched):
                 )
             )
             row = dict(zip(group_cols, keys))
-            exact_vehicle_count = pd.to_numeric(cost_sample["车次数"], errors="coerce").sum() if not cost_sample.empty else 0
+            exact_vehicle_count = pd.to_numeric(whole_truck_cost_sample["车次数"], errors="coerce").sum() if not whole_truck_cost_sample.empty else 0
+            whole_truck_cost = pd.to_numeric(whole_truck_cost_sample["派送成本"], errors="coerce").sum() if not whole_truck_cost_sample.empty else 0
             positive_cost = pd.to_numeric(cost_sample["派送成本"], errors="coerce").sum() if not cost_sample.empty else 0
             positive_volume = pd.to_numeric(cost_sample["批次出库体积"], errors="coerce").sum() if not cost_sample.empty else 0
             row.update({
@@ -915,8 +926,8 @@ def build_station_cost_report(matched):
                 "总出库体积": total_volume,
                 "总出库卡板数": total_pallets,
                 "总派送成本": total_cost,
-                "平均整车价": processors.safe_divide(positive_cost, exact_vehicle_count),
-                "P80整车价": processors.safe_p80(cost_sample["批次整车等价价"]),
+                "平均整车价": processors.safe_divide(whole_truck_cost, exact_vehicle_count),
+                "P80整车价": processors.safe_p80(whole_truck_cost_sample["批次整车等价价"]),
                 "每方平均价": processors.safe_divide(positive_cost, positive_volume),
                 "平均每车出库体积": trip_sample["出库体积"].mean() if not trip_sample.empty else pd.NA,
                 "P80每车出库体积": processors.safe_p80(trip_sample["出库体积"]),

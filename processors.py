@@ -181,6 +181,160 @@ REGULAR_DELIVERY_MIN_AVERAGE_VOLUME = {
     "大车地板": 80,
     "大车卡板": 40,
 }
+WHOLE_TRUCK_COST_ELIGIBLE_COLUMN = "是否纳入整车成本样本"
+WHOLE_TRUCK_COST_EXCLUSION_REASON_COLUMN = "整车成本样本排除原因"
+
+
+def _whole_truck_batch_tokens(row):
+    """Return the authoritative batch ids represented by one cleaned row."""
+    for col in ["批次号集合", "批次号"]:
+        if col not in row.index or is_blank(row.get(col, "")):
+            continue
+        values = [
+            value.strip()
+            for value in re.split(r"[,，;；/|、\s]+", str(row.get(col, "")))
+            if value.strip() and value.strip().lower() not in {"nan", "none", "null", "false", "0"}
+        ]
+        if values:
+            return list(dict.fromkeys(values))
+    analysis_id = row.get("分析批次ID", "")
+    return [str(analysis_id).strip()] if not is_blank(analysis_id) else []
+
+
+def _whole_truck_truthy(value):
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    return str(value).strip().lower() in {"true", "1", "是", "yes", "y"}
+
+
+def mark_whole_truck_cost_sample_eligibility(df):
+    """Mark whether each row belongs to a comparable single-batch FTL trip.
+
+    The decision is made on the complete cleaned dataset by warehouse + real
+    trip number, before destination, transfer, or linehaul filtering. A trip is
+    excluded from whole-truck cost samples when any reliable signal shows that
+    it contains two or more batches: distinct batch ids on the trip, a declared
+    ``整车批次数`` above one, a non-unit ``批次车份额``, or multiple token-less
+    cleaned rows on the same trip. Totals and non-cost metrics remain untouched.
+    """
+    if df is None:
+        return None
+    out = df.copy()
+    if out.empty:
+        out[WHOLE_TRUCK_COST_ELIGIBLE_COLUMN] = pd.Series(dtype=bool)
+        out[WHOLE_TRUCK_COST_EXCLUSION_REASON_COLUMN] = pd.Series(dtype=object)
+        return out
+
+    warehouse = out.get("仓库", pd.Series("", index=out.index)).fillna("").astype(str).str.upper().str.strip()
+    trip_no = out.get("车次号", pd.Series("", index=out.index)).fillna("").astype(str).str.strip()
+    if "是否有真实车次号" in out.columns:
+        has_real_trip = out["是否有真实车次号"].apply(_whole_truck_truthy) & trip_no.ne("")
+    else:
+        has_real_trip = trip_no.ne("")
+
+    out["_整车成本车次键"] = warehouse + "||" + trip_no
+    out["_整车成本批次Tokens"] = out.apply(_whole_truck_batch_tokens, axis=1)
+    declared_count = pd.to_numeric(
+        out.get("整车批次数", pd.Series(pd.NA, index=out.index)),
+        errors="coerce",
+    )
+    exact_share = pd.to_numeric(
+        out.get("批次车份额", pd.Series(pd.NA, index=out.index)),
+        errors="coerce",
+    )
+
+    multi_batch_trip_keys = set()
+    real_trip_rows = out.loc[has_real_trip]
+    for trip_key, group in real_trip_rows.groupby("_整车成本车次键", sort=False, dropna=False):
+        tokens = {
+            token
+            for token_list in group["_整车成本批次Tokens"]
+            for token in token_list
+            if token
+        }
+        indexes = group.index
+        declared_multi = declared_count.loc[indexes].gt(1).any()
+        share_values = exact_share.loc[indexes].dropna()
+        non_unit_share = share_values.sub(1).abs().gt(1e-6).any()
+        tokenless_multiple_rows = not tokens and len(group) > 1
+        if len(tokens) > 1 or declared_multi or non_unit_share or tokenless_multiple_rows:
+            multi_batch_trip_keys.add(trip_key)
+
+    is_multi_batch_trip = has_real_trip & out["_整车成本车次键"].isin(multi_batch_trip_keys)
+    eligible = has_real_trip & ~is_multi_batch_trip
+    out[WHOLE_TRUCK_COST_ELIGIBLE_COLUMN] = eligible.astype(bool)
+    out[WHOLE_TRUCK_COST_EXCLUSION_REASON_COLUMN] = ""
+    out.loc[~has_real_trip, WHOLE_TRUCK_COST_EXCLUSION_REASON_COLUMN] = "缺少真实车次号"
+    out.loc[is_multi_batch_trip, WHOLE_TRUCK_COST_EXCLUSION_REASON_COLUMN] = "同车次含多个批次（多卸）"
+    return out.drop(columns=["_整车成本车次键", "_整车成本批次Tokens"], errors="ignore")
+
+
+def whole_truck_cost_sample_rows(df):
+    """Return only single-batch trips eligible for whole-truck cost metrics."""
+    if df is None or df.empty:
+        return df.copy() if df is not None else None
+    out = df.copy()
+    if WHOLE_TRUCK_COST_ELIGIBLE_COLUMN not in out.columns:
+        out = mark_whole_truck_cost_sample_eligibility(out)
+    eligible = out[WHOLE_TRUCK_COST_ELIGIBLE_COLUMN].apply(_whole_truck_truthy)
+    return out.loc[eligible].copy()
+
+
+def supplier_whole_truck_cost_summary(df):
+    """Return compact supplier cost and usage text for whole-truck samples.
+
+    ``df`` is expected to have already passed the business sample filters
+    (single-batch trip, volume threshold, remark rule). Only rows with a
+    positive delivery cost participate. Supplier usage is based on unique real
+    trips; blank/ambiguous suppliers remain in the denominator but are not
+    displayed, so known suppliers are never overstated.
+    """
+    if df is None or df.empty:
+        return "", ""
+    source = df.copy()
+    source["_供应商成本"] = pd.to_numeric(
+        source.get("派送成本", pd.Series(pd.NA, index=source.index)),
+        errors="coerce",
+    )
+    source = source[source["_供应商成本"].gt(0)].copy()
+    if source.empty:
+        return "", ""
+
+    warehouse = source.get("仓库", pd.Series("", index=source.index)).fillna("").astype(str).str.upper().str.strip()
+    trip_no = source.get("车次号", pd.Series("", index=source.index)).fillna("").astype(str).str.strip()
+    source["_供应商车次键"] = warehouse + "||" + trip_no
+    source = source[trip_no.ne("")].drop_duplicates("_供应商车次键", keep="first").copy()
+    if source.empty:
+        return "", ""
+
+    supplier_display = source.get("派送卡车", pd.Series("", index=source.index)).fillna("").astype(str)
+    supplier_display = supplier_display.str.replace(r"\s+", " ", regex=True).str.strip()
+    source["_供应商显示名"] = supplier_display
+    source["_供应商键"] = supplier_display.str.casefold()
+    denominator = len(source)
+    named = source[source["_供应商键"].ne("")].copy()
+    if named.empty or denominator <= 0:
+        return "", ""
+
+    rows = []
+    for supplier_key, group in named.groupby("_供应商键", sort=False, dropna=False):
+        display = group["_供应商显示名"].iloc[0]
+        rows.append({
+            "key": supplier_key,
+            "display": display,
+            "trip_count": len(group),
+            "average_cost": group["_供应商成本"].mean(),
+        })
+    rows.sort(key=lambda item: (-item["trip_count"], item["key"]))
+    cost_text = "；".join(
+        f'{item["display"]} ${item["average_cost"]:.2f}'
+        for item in rows
+    )
+    usage_text = "；".join(
+        f'{item["display"]} {item["trip_count"] / denominator:.2%}'
+        for item in rows
+    )
+    return cost_text, usage_text
 
 
 def average_sample_rows(df):

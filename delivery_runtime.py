@@ -511,7 +511,11 @@ def _station_cost_source_rows(matched):
 
 # 兼容旧测试或外部调用；旧函数名不再代表排除干线/调拨。
 _filter_regular_trips_for_cost = _station_cost_source_rows
-_filter_regular_single_batch_trips_for_cost = _station_cost_source_rows
+
+
+def _filter_regular_single_batch_trips_for_cost(matched):
+    marked = processors.mark_whole_truck_cost_sample_eligibility(matched)
+    return processors.whole_truck_cost_sample_rows(marked)
 
 
 def _combine_series_text(series):
@@ -528,7 +532,8 @@ def _combine_series_text(series):
 
 
 def _build_transfer_cost_report(matched):
-    transfer = _filter_positive_cost_rows(_transfer_rows(matched, ftl_only=True))
+    marked = processors.mark_whole_truck_cost_sample_eligibility(matched)
+    transfer = _filter_positive_cost_rows(_transfer_rows(marked, ftl_only=True))
     columns = [
         "指标名称", "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组",
         "车次数", "总出库体积", "总派送成本", "平均整车价", "每方平均价",
@@ -550,8 +555,9 @@ def _build_transfer_cost_report(matched):
             average_source["批次出库体积"] = average_source["出库体积"]
             average_source["出库体积"] = pd.to_numeric(average_source["整车出库体积"], errors="coerce")
         average_group = processors.average_sample_rows(average_source)
-        average_share = _exact_vehicle_share_series(average_group).sum()
-        average_cost = pd.to_numeric(average_group["派送成本"], errors="coerce").fillna(0).sum()
+        cost_group = processors.whole_truck_cost_sample_rows(average_group)
+        average_share = _exact_vehicle_share_series(cost_group).sum()
+        average_cost = pd.to_numeric(cost_group["派送成本"], errors="coerce").fillna(0).sum()
         trip_loads = average_group.drop_duplicates(["仓库", "车次号"]).copy()
         rows.append({
             "指标名称": "调拨成本",
@@ -582,11 +588,12 @@ def _build_transfer_cost_report(matched):
 
 
 def _build_transfer_report(matched):
-    transfer = _transfer_rows(matched, ftl_only=True)
+    marked = processors.mark_whole_truck_cost_sample_eligibility(matched)
+    transfer = _transfer_rows(marked, ftl_only=True)
     columns = [
-        "指标名称", "发货仓", "调拨目标仓", "专线线路", "统计周期", "车次数",
+        "发货仓", "调拨目标仓", "专线线路", "统计周期", "车次数",
         "总出库体积", "总出库卡板数", "总派送成本", "平均整车价", "每方平均价",
-        "平均每车出库体积", "批次号集合", "车次号集合",
+        "平均每车出库体积", "供应商平均整车成本", "供应商使用比例",
     ]
     if transfer.empty:
         return pd.DataFrame(columns=columns)
@@ -605,11 +612,12 @@ def _build_transfer_report(matched):
             average_source["批次出库体积"] = average_source["出库体积"]
             average_source["出库体积"] = pd.to_numeric(average_source["整车出库体积"], errors="coerce")
         average_group = processors.average_sample_rows(average_source)
-        average_share = _exact_vehicle_share_series(average_group).sum()
-        average_cost = pd.to_numeric(average_group["派送成本"], errors="coerce").fillna(0).sum()
+        cost_group = processors.whole_truck_cost_sample_rows(average_group)
+        average_share = _exact_vehicle_share_series(cost_group).sum()
+        average_cost = pd.to_numeric(cost_group["派送成本"], errors="coerce").fillna(0).sum()
         trip_loads = average_group.drop_duplicates(["仓库", "车次号"]).copy()
+        supplier_costs, supplier_usage = processors.supplier_whole_truck_cost_summary(cost_group)
         rows.append({
-            "指标名称": "LA仓间调拨",
             "发货仓": warehouse,
             "调拨目标仓": target_name,
             "专线线路": line,
@@ -628,8 +636,8 @@ def _build_transfer_report(matched):
                 trip_loads.get("整车出库体积", trip_loads.get("出库体积", pd.Series(dtype=float))),
                 errors="coerce",
             ).mean(),
-            "批次号集合": _combine_series_text(group.get("批次号集合")),
-            "车次号集合": _combine_series_text(group.get("车次号")),
+            "供应商平均整车成本": supplier_costs,
+            "供应商使用比例": supplier_usage,
         })
     return pd.DataFrame(rows)[columns]
 
