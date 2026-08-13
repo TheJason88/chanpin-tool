@@ -436,15 +436,28 @@ def _transfer_target_from_row(row):
     if not _is_la_source(row):
         return ""
 
-    text_fields = ["出库类型", "业务场景", "调入仓库", "邮编来源", "匹配备注集合", "车次号", "批次号集合"]
-    text = " ".join(str(row.get(c, "")) for c in text_fields if c in row.index)
+    def clean_text(column):
+        value = row.get(column, "")
+        return "" if processors.is_blank(value) else str(value).strip()
+
+    explicit_target = clean_text("调拨目标仓代码").upper()
+    if explicit_target in TRANSFER_TARGETS:
+        return explicit_target
+
+    # 仅业务语义字段可以证明“这是一条调拨数据”。专线线路只能在已确认
+    # 调拨后帮助确定目标仓，不能反过来把普通 LA-NJ/LA-SAV/LA-DAL 干线判成调拨。
+    text_fields = [
+        "出库类型", "业务场景", "调入仓库", "邮编来源", "匹配备注集合",
+        "系统产品类型", "主产品类型", "批次目的地类型", "调拨覆盖审核",
+    ]
+    text = " ".join(clean_text(c) for c in text_fields if c in row.index)
     upper_text = text.upper()
-    line = str(row.get("专线线路", "")).strip()
+    line = clean_text("专线线路")
 
     has_transfer_semantics = (
         any(keyword in text for keyword in TRANSFER_KEYWORDS)
         or "仓间调拨目标仓地址" in text
-        or bool(str(row.get("调入仓库", "")).strip())
+        or bool(clean_text("调入仓库"))
     )
     if not has_transfer_semantics:
         return ""

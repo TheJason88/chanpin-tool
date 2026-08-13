@@ -77,6 +77,36 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(row["每方平均价"], 10)
         self.assertEqual(row["平均每车出库体积"], 50)
 
+    def test_blank_transfer_fields_do_not_turn_ordinary_linehaul_into_transfer(self):
+        rows = pd.DataFrame([
+            {
+                "仓库": "LA", "统计周期": "2026-07", "专线线路": "LA-NJ",
+                "是否FTL发车": True, "车次号": "T-NORMAL", "批次号集合": "NORMAL",
+                "批次车份额": 1, "出库体积": 60, "出库卡板数": 10, "派送成本": 9500,
+                "出库类型": "派送", "业务场景": "普通派送", "调入仓库": float("nan"),
+                "调拨目标仓代码": float("nan"), "调拨覆盖审核": float("nan"),
+                "系统产品类型": "FBA", "主产品类型": "FBA", "批次目的地类型": "FBA",
+                "邮编来源": "内置FBA仓点邮编表",
+            },
+            {
+                "仓库": "LA", "统计周期": "2026-07", "专线线路": "LA-NJ",
+                "是否FTL发车": True, "车次号": "T-TRANSFER", "批次号集合": "TRANSFER",
+                "批次车份额": 1, "出库体积": 80, "出库卡板数": 20, "派送成本": 9700,
+                "出库类型": "调拨", "业务场景": "仓间调拨", "调入仓库": "新泽西盈仓",
+                "调拨目标仓代码": "NJ", "调拨覆盖审核": "同批次调拨统一覆盖:新泽西盈仓",
+                "系统产品类型": "仓间调拨", "主产品类型": "仓间调拨", "批次目的地类型": "其他",
+                "邮编来源": "仓间调拨目标仓地址",
+            },
+        ])
+
+        report = delivery_runtime._build_transfer_report(rows)
+
+        self.assertEqual(len(report), 1)
+        self.assertEqual(report.iloc[0]["调拨目标仓"], "NJ盈仓")
+        self.assertEqual(report.iloc[0]["车次数"], 1)
+        self.assertEqual(report.iloc[0]["总出库体积"], 80)
+        self.assertEqual(report.iloc[0]["总派送成本"], 9700)
+
     def test_either_marker_is_sufficient(self):
         for marker in ("里", "外", "里外"):
             rows = self.rows.copy()
