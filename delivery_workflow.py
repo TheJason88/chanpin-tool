@@ -512,7 +512,7 @@ def build_cleaned_batches_from_detail(valid_detail):
         if col not in df.columns:
             df[col] = pd.NaT
         df[col] = pd.to_datetime(df[col], errors="coerce")
-    for col in ["标准运输类型", "车次号", "派送卡车", "批次号", "仓库", "出库类型", "业务场景", "系统产品类型", "主产品类型", "FBA/FBX", "平台名称", "FBX代码", "标准邮编", "邮编前三位", "目的州", "FBA仓点代码", "装车类型", "车型", "装车类型标准值", "车型标准值", "调入仓库", "调拨目标仓代码", tool_common.TRANSFER_AUDIT_COLUMN, "邮编来源", "备注", "目的地", "标准地址"]:
+    for col in ["标准运输类型", "车次号", "派送卡车", "批次号", "仓库", "出库类型", "业务场景", "系统产品类型", "主产品类型", "FBA/FBX", "平台名称", "FBX代码", "标准邮编", "邮编前三位", "目的州", "FBA仓点代码", "装车类型", "车型", "装车类型标准值", "车型标准值", "调入仓库", "调拨目标仓代码", tool_common.TRANSFER_AUDIT_COLUMN, "邮编来源", "备注", "目的地", "标准地址", "创建人"]:
         if col not in df.columns:
             df[col] = ""
     if "原始行号" not in df.columns:
@@ -596,6 +596,9 @@ def build_cleaned_batches_from_detail(valid_detail):
             "批次号": batch_no,
             "批次号集合": batch_no,
             "原始行号集合": combine_unique(group["原始行号"]),
+            # 创建人只作为原文件审计字段保留，不参与筛选、分类、成本或指标计算。
+            # 同一批次若来源明细出现多个创建人，则完整保留去重后的原值，避免静默丢失。
+            "创建人": combine_unique(group["创建人"]),
             "出库类型": first_nonblank(group["出库类型"]),
             "业务场景": first_nonblank(group["业务场景"]),
             "调入仓库": first_nonblank(group["调入仓库"]),

@@ -142,6 +142,60 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(exported.columns[-1], "同车次备注集合")
         self.assertEqual(set(exported["同车次备注集合"]), {"正常批次", "里仓两卸"})
 
+    def test_creator_is_preserved_as_audit_field_through_stage1_and_stage2(self):
+        raw = pd.DataFrame([
+            {
+                "仓库": "LA", "派送方式": "卡车派送", "运输类型": "FTL",
+                "车次号": "T-CREATOR", "批次号": "B-CREATOR",
+                "创建时间": "2026-07-01", "Creator": "Alice",
+                "出库时间": "2026-07-02", "签收时间": "2026-07-03",
+                "出库体积": 20, "出库卡板数": 4, "派送成本": 200,
+                "目的地": "Amazon-ONT8", "车型": "53尺大车", "装车类型": "卡板",
+            },
+            {
+                "仓库": "LA", "派送方式": "卡车派送", "运输类型": "FTL",
+                "车次号": "T-CREATOR", "批次号": "B-CREATOR",
+                "创建时间": "2026-07-01", "Creator": "Bob",
+                "出库时间": "2026-07-02", "签收时间": "2026-07-03",
+                "出库体积": 20, "出库卡板数": 4, "派送成本": 200,
+                "目的地": "Amazon-ONT8", "车型": "53尺大车", "装车类型": "卡板",
+            },
+        ])
+
+        detail, _, _ = processors.process_delivery_stage1_from_df(raw, "LA")
+        self.assertIn("创建人", detail.columns)
+        self.assertEqual(detail["创建人"].tolist(), ["Alice", "Bob"])
+
+        detail = delivery_stage1_adapter.repair_delivery_stage1_numeric_columns(detail)
+        stage1 = delivery_workflow.build_cleaned_batches_from_detail(detail)
+        self.assertEqual(stage1.iloc[0]["创建人"], "Alice,Bob")
+
+        delivery_runtime.bootstrap(delivery_workflow)
+        stage2 = delivery_workflow.prepare_stage2_for_report(stage1, pd.DataFrame(), "按月统计")
+        self.assertEqual(stage2.iloc[0]["创建人"], "Alice,Bob")
+
+        exported = delivery_match_adapter._finalize_sheet(stage2, "明细")
+        self.assertIn("创建人", exported.columns)
+        self.assertEqual(exported.iloc[0]["创建人"], "Alice,Bob")
+        self.assertEqual(exported.columns[-1], "同车次备注集合")
+
+    def test_creator_column_is_kept_in_detail_export_when_source_values_are_blank(self):
+        detail = pd.DataFrame([{
+            "原始行号": 2, "仓库": "LA", "标准运输类型": "FTL",
+            "车次号": "T-BLANK-CREATOR", "批次号": "B-BLANK-CREATOR", "创建人": "",
+            "出库时间": "2026-07-01", "签收时间": "2026-07-02",
+            "出库体积": 40, "出库卡板数": 10, "派送成本": 300,
+            "FBA/FBX": "FBA", "FBA仓点代码": "ONT8", "备注": "",
+        }])
+
+        stage1 = delivery_workflow.build_cleaned_batches_from_detail(detail)
+        delivery_runtime.bootstrap(delivery_workflow)
+        stage2 = delivery_workflow.prepare_stage2_for_report(stage1, pd.DataFrame(), "按月统计")
+        exported = delivery_match_adapter._finalize_sheet(stage2, "明细")
+
+        self.assertIn("创建人", exported.columns)
+        self.assertEqual(exported.iloc[0]["创建人"], "")
+
     def test_transfer_and_fba_batches_in_same_trip_keep_individual_destinations(self):
         detail = pd.DataFrame([
             {

@@ -197,7 +197,8 @@ def _finalize_sheet(df, sheet_type=""):
         remarks = out.get("同车次备注集合", pd.Series("", index=out.index)).copy()
         out = _strip_remark_columns(out)
         out["同车次备注集合"] = remarks
-        out = _drop_empty_columns(out, preserve=["同车次备注集合"])
+        # 创建人是原文件审计字段；即使该批数据整列为空，也保留固定表结构。
+        out = _drop_empty_columns(out, preserve=["创建人", "同车次备注集合"])
         out = out[[col for col in out.columns if col != "同车次备注集合"] + ["同车次备注集合"]]
         return _format_numbers(out, sheet_type=sheet_type)
     preserve = []
