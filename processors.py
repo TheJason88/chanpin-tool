@@ -285,17 +285,29 @@ def supplier_whole_truck_cost_summary(df):
 
     ``df`` is expected to have already passed the business sample filters
     (single-batch trip, volume threshold, remark rule). Only rows with a
-    positive delivery cost participate. Supplier usage is based on unique real
+    positive carrier cost participate. Prefer the original delivery cost,
+    excluding warehouse floor-loading fees; fall back to delivery cost only
+    where the original value is missing or nonnumeric. Other cost metrics
+    continue to use delivery cost including loading fees.
+    Supplier usage is based on unique real
     trips; blank/ambiguous suppliers remain in the denominator but are not
     displayed, so known suppliers are never overstated.
     """
     if df is None or df.empty:
         return "", ""
+    # Import locally because tool_common also imports processors.
+    import tool_common
+
     source = df.copy()
-    source["_供应商成本"] = pd.to_numeric(
+    delivery_cost = pd.to_numeric(
         source.get("派送成本", pd.Series(pd.NA, index=source.index)),
         errors="coerce",
     )
+    base_cost = pd.to_numeric(
+        source.get(tool_common.BASE_DELIVERY_COST_COLUMN, pd.Series(pd.NA, index=source.index)),
+        errors="coerce",
+    )
+    source["_供应商成本"] = base_cost.fillna(delivery_cost)
     source = source[source["_供应商成本"].gt(0)].copy()
     if source.empty:
         return "", ""
