@@ -691,6 +691,8 @@ def build_cleaned_batches_from_detail(valid_detail):
     result["目的地邮编待补充"] = result["标准邮编集合"].apply(lambda x: len(split_values(x)) == 0)
     result = result.drop(columns=["_车次聚合键"], errors="ignore")
     result = result[[col for col in result.columns if col != "备注"] + ["备注"]]
+    from delivery_destination_analysis import annotate_trip_context
+    result = annotate_trip_context(result)
     result = sort_unmatched_zip_bottom(result)
     result.attrs["batch_invalid_records"] = invalid_batches.to_dict("records")
     return result
@@ -910,7 +912,8 @@ def prepare_stage2_for_report(cleaned_batches, match_df, period_type):
         matched["同车次备注集合"] = ""
     matched = processors.mark_whole_truck_cost_sample_eligibility(matched)
     matched = matched[[col for col in matched.columns if col != "同车次备注集合"] + ["同车次备注集合"]]
-    return matched
+    from delivery_destination_analysis import annotate_trip_context
+    return annotate_trip_context(matched)
 
 
 def dispatch_rows(df):

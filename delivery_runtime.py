@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-08-04-delivery-cost-creation-time-v20"
+RUNTIME_SCHEMA_VERSION = "2026-09-09-fba-destination-analysis-v21"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
@@ -690,6 +690,8 @@ def _patch_stage2_transfer_sheet():
         return
 
     def build_split_stage2_report_with_transfer(delivery_workflow_module, cleaned_batches, match_df, period_type="按周统计"):
+        import delivery_destination_analysis
+
         matched = delivery_workflow_module.prepare_stage2_for_report(cleaned_batches, match_df, period_type)
         matched = _clean_delivery_time_columns(matched)
         combined = delivery_workflow_module.build_sheet1_volume_dispatch_time_report(matched)
@@ -701,6 +703,8 @@ def _patch_stage2_transfer_sheet():
             dispatch = combined[combined["报告部分"].astype(str).str.startswith("2.")].copy()
             timing = combined[combined["报告部分"].astype(str).str.startswith("3.")].copy()
 
+        timing = delivery_destination_analysis.build_station_timing_report(matched)
+        fba_summary, fba_methods = delivery_destination_analysis.build_fba_destination_reports(matched)
         cost_ftl = delivery_match_adapter.build_station_cost_report(matched)
         cost_ltl = delivery_match_adapter.build_ltl_station_cost_report(matched)
         price_reference, type_price_reference = delivery_match_adapter.build_cost_price_reference_reports(
@@ -715,6 +719,8 @@ def _patch_stage2_transfer_sheet():
             zip_audit = pd.DataFrame()
 
         return {
+            "FBA仓点分析": delivery_match_adapter._safe_round(fba_summary, "成本"),
+            "FBA派送方式分析": delivery_match_adapter._safe_round(fba_methods, "成本"),
             "货量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(volume, "货量"), "货量"),
             "FBA货量排行": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(delivery_match_adapter.build_fba_rank_sheet(matched), "FBA货量排行"), "FBA货量排行"),
             "FBX平台仓货量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(delivery_match_adapter.build_fbx_platform_warehouse_sheet(matched), "FBX平台仓货量"), "FBX平台仓货量"),
@@ -759,6 +765,8 @@ def _wrap_stage1_no_time_filter_and_dominant_destination(delivery_workflow_modul
             # 以支持一车多卸。车次仍只提供运输类型、车型装车和批次车份额上下文。
             cleaned_batches = _apply_trip_cost_rule(cleaned_batches, raw_detail)
             cleaned_batches = _clean_delivery_time_columns(cleaned_batches)
+            from delivery_destination_analysis import annotate_trip_context
+            cleaned_batches = annotate_trip_context(cleaned_batches)
             if cleaned_batches is not None and not cleaned_batches.empty:
                 if "备注" not in cleaned_batches.columns:
                     cleaned_batches["备注"] = ""

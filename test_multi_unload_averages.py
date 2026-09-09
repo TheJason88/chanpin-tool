@@ -518,8 +518,8 @@ class MultiUnloadAverageTests(unittest.TestCase):
 
     def test_regular_delivery_floor_and_pallet_thresholds_filter_only_average_samples(self):
         rows = pd.DataFrame([
-            {"车型装车分组": "大车地板", "出库体积": 80, "出库卡板数": 16, "派送成本": 800},
-            {"车型装车分组": "大车地板", "出库体积": 79.99, "出库卡板数": 99, "派送成本": 999},
+            {"车型装车分组": "大车地板", "出库体积": 60, "出库卡板数": 16, "派送成本": 800},
+            {"车型装车分组": "大车地板", "出库体积": 59.99, "出库卡板数": 99, "派送成本": 999},
             {"车型装车分组": "大车卡板", "出库体积": 40, "出库卡板数": 12, "派送成本": 400},
             {"车型装车分组": "大车卡板", "出库体积": 39.99, "出库卡板数": 88, "派送成本": 888},
             {"车型装车分组": "小车", "出库体积": 10, "出库卡板数": 2, "派送成本": 100},
@@ -528,7 +528,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         eligible = processors.regular_delivery_average_sample_rows(rows)
 
         self.assertEqual(eligible.index.tolist(), [0, 2, 4])
-        self.assertAlmostEqual(rows["出库体积"].sum(), 249.98, places=2)
+        self.assertAlmostEqual(rows["出库体积"].sum(), 209.98, places=2)
 
     def test_regular_cost_report_uses_filtered_detail_for_all_average_and_p80_metrics(self):
         rows = pd.DataFrame([
@@ -544,7 +544,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
                 "车次号": "COST-T2",
                 "车型标准值": "53尺大车", "装车类型标准值": "地板",
                 "主产品类型": "FBA", "FBA仓点代码集合": "ONT8",
-                "出库体积": 79, "出库卡板数": 99, "派送成本": 999,
+                "出库体积": 59, "出库卡板数": 99, "派送成本": 999,
             },
         ])
 
@@ -552,7 +552,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         row = report.loc[report["指标名称"] == "FBA及FBX平台仓成本"].iloc[0]
 
         self.assertEqual(row["车次数"], 2)
-        self.assertEqual(row["总出库体积"], 159)
+        self.assertEqual(row["总出库体积"], 139)
         self.assertEqual(row["总出库卡板数"], 115)
         self.assertEqual(row["总派送成本"], 1799)
         self.assertEqual(row["平均整车价"], 800)
@@ -565,7 +565,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
 
         full_load_row = report.loc[report["指标名称"] == "满载情况"].iloc[0]
         self.assertEqual(full_load_row["车次数"], 2)
-        self.assertEqual(full_load_row["总出库体积"], 159)
+        self.assertEqual(full_load_row["总出库体积"], 139)
         self.assertEqual(full_load_row["平均每车出库体积"], 80)
         self.assertEqual(full_load_row["P80每车出库体积"], 80)
 
@@ -1012,7 +1012,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         ].iloc[0]
         self.assertTrue(pd.isna(floor["平均整车价"]))
         self.assertTrue(pd.isna(floor["P80整车价"]))
-        self.assertTrue(pd.isna(floor["每方平均价"]))
+        self.assertEqual(floor["每方平均价"], 13.28)
         self.assertTrue(pd.isna(floor["整车价格"]))
         self.assertEqual(floor["每方成本"], 13.28)
 
@@ -1673,23 +1673,23 @@ class MultiUnloadAverageTests(unittest.TestCase):
             & (fba["FBA仓点"] == "ONT8")
         ].iloc[0]
         self.assertEqual(
-            fba_june_la["派送卡车使用比例（>10%）"],
-            "JTeam INC 55.00%；GN Trucking 25.00%",
+            fba_june_la["派送卡车使用比例"],
+            "JTeam INC 55.00%；GN Trucking 25.00%；供应商未知/冲突 10.00%；AMAZON FREIGHT 10.00%",
         )
-        self.assertNotIn("AMAZON FREIGHT", fba_june_la["派送卡车使用比例（>10%）"])
+        self.assertIn("AMAZON FREIGHT", fba_june_la["派送卡车使用比例"])
         self.assertEqual(
-            fba[(fba["仓库"] == "LA") & (fba["统计周期"] == "2026-07")].iloc[0]["派送卡车使用比例（>10%）"],
+            fba[(fba["仓库"] == "LA") & (fba["统计周期"] == "2026-07")].iloc[0]["派送卡车使用比例"],
             "July Carrier 100.00%",
         )
         self.assertEqual(
-            fba[(fba["仓库"] == "NJ") & (fba["统计周期"] == "2026-06")].iloc[0]["派送卡车使用比例（>10%）"],
+            fba[(fba["仓库"] == "NJ") & (fba["统计周期"] == "2026-06")].iloc[0]["派送卡车使用比例"],
             "NJ Carrier 100.00%",
         )
-        self.assertEqual(fba.columns[-1], "派送卡车使用比例（>10%）")
+        self.assertEqual(fba.columns[-1], "派送卡车使用比例")
 
         fbx = delivery_match_adapter.build_fbx_platform_warehouse_sheet(rows)
-        self.assertEqual(fbx.iloc[0]["派送卡车使用比例（>10%）"], "JTeam INC 60.00%")
-        self.assertEqual(fbx.columns[-1], "派送卡车使用比例（>10%）")
+        self.assertEqual(fbx.iloc[0]["派送卡车使用比例"], "JTeam INC 60.00%；供应商未知/冲突 40.00%")
+        self.assertEqual(fbx.columns[-1], "派送卡车使用比例")
 
     def test_missing_trip_keeps_batch_cost_but_excludes_dispatch_time_and_truck_price(self):
         detail = pd.DataFrame([
