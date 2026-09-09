@@ -30,8 +30,7 @@ DECIMAL_COLUMNS = [
     "平均派送时效", "P80派送时效", "每方价格参考", "目的地总出库体积",
     "细分货量方数", "整车价格", "每方成本",
 ]
-DELIVERY_TRUCK_SHARE_COLUMN = "派送卡车使用比例（>10%）"
-DELIVERY_TRUCK_SHARE_THRESHOLD = 0.10
+DELIVERY_TRUCK_SHARE_COLUMN = "派送卡车使用比例"
 
 # 仓间调拨目标仓地址：用于功能二补邮编、识别干线，避免调拨行长期留在邮编异常审核。
 TRANSFER_WAREHOUSE_INFO = {
@@ -576,8 +575,10 @@ def _delivery_truck_share_summary(group):
     suppliers = {}
     for (_, row), volume in zip(group.iterrows(), volumes):
         key, display = _normalize_delivery_truck(row.get("派送卡车", ""))
-        if not key or float(volume) <= 0:
+        if float(volume) <= 0:
             continue
+        if not key:
+            key, display = "", "供应商未知/冲突"
         if key not in suppliers:
             suppliers[key] = {"display": display, "volume": 0.0}
         suppliers[key]["volume"] += float(volume)
@@ -585,7 +586,7 @@ def _delivery_truck_share_summary(group):
     visible = []
     for key, item in suppliers.items():
         share = item["volume"] / denominator
-        if share > DELIVERY_TRUCK_SHARE_THRESHOLD:
+        if share > 0:
             visible.append((share, key, item["display"]))
     visible.sort(key=lambda item: (-item[0], item[1]))
     return "；".join(f"{display} {share:.2%}" for share, _, display in visible)
@@ -1302,6 +1303,8 @@ def _safe_round(df, sheet_type):
 
 
 def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_df, period_type="按周统计"):
+    import delivery_destination_analysis
+
     matched = delivery_workflow_module.prepare_stage2_for_report(cleaned_batches, match_df, period_type)
     combined = delivery_workflow_module.build_sheet1_volume_dispatch_time_report(matched)
     if combined.empty:
@@ -1311,12 +1314,16 @@ def build_split_stage2_report(delivery_workflow_module, cleaned_batches, match_d
         volume = volume[~volume["指标名称"].astype(str).isin(["FBA仓点货量排行", "FBX平台仓货量排行"])]
         dispatch = combined[combined["报告部分"].astype(str).str.startswith("2.")].copy()
         timing = combined[combined["报告部分"].astype(str).str.startswith("3.")].copy()
+    timing = delivery_destination_analysis.build_station_timing_report(matched)
+    fba_summary, fba_methods = delivery_destination_analysis.build_fba_destination_reports(matched)
     cost_ftl = build_station_cost_report(matched)
     cost_ltl = build_ltl_station_cost_report(matched)
     price_reference, type_price_reference = build_cost_price_reference_reports(cost_ftl, cost_ltl)
     golden_standard = build_golden_standard_batch_report(matched)
     zip_audit = matched[matched["目的地邮编待补充"]].copy() if "目的地邮编待补充" in matched.columns else pd.DataFrame()
     return {
+        "FBA仓点分析": _safe_round(fba_summary, "成本"),
+        "FBA派送方式分析": _safe_round(fba_methods, "成本"),
         "货量": _safe_round(_finalize_sheet(volume, "货量"), "货量"),
         "FBA货量排行": _safe_round(_finalize_sheet(build_fba_rank_sheet(matched), "FBA货量排行"), "FBA货量排行"),
         "FBX平台仓货量": _safe_round(_finalize_sheet(build_fbx_platform_warehouse_sheet(matched), "FBX平台仓货量"), "FBX平台仓货量"),

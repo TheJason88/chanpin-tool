@@ -19,10 +19,11 @@ try:
     import delivery_stage1_adapter
     import tool_common
     import delivery_runtime
+    import delivery_destination_analysis
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-08-04-delivery-cost-creation-time-v20"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-09-09-fba-destination-analysis-v21"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
@@ -32,6 +33,7 @@ if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSI
         delivery_match_adapter = importlib.reload(delivery_match_adapter)
         delivery_workflow = importlib.reload(delivery_workflow)
         delivery_runtime = importlib.reload(delivery_runtime)
+        delivery_destination_analysis = importlib.reload(delivery_destination_analysis)
     except Exception as exc:
         _dependency_error = exc
 
@@ -133,10 +135,10 @@ def rebuild_zip_audit_from_cleaned(cleaned_batches):
 
 def get_stage2_report_sheet_names(destination_type="全部"):
     if destination_type == "FBA":
-        return ["货量", "FBA货量排行", "发车量", "派送时效", "调拨数据", "每方价格参考", "分类型价格参考", "黄金标准数据", "派送二_匹配后批次数据", "派送二_车次汇总核对", "邮编异常审核", "区域识别规则", "干线识别规则"]
+        return ["FBA仓点分析", "FBA派送方式分析", "货量", "FBA货量排行", "发车量", "派送时效", "调拨数据", "每方价格参考", "分类型价格参考", "黄金标准数据", "派送二_匹配后批次数据", "派送二_车次汇总核对", "邮编异常审核", "区域识别规则", "干线识别规则"]
     if destination_type == "FBX":
         return ["货量", "FBX平台仓货量", "发车量", "派送时效", "调拨数据", "每方价格参考", "分类型价格参考", "黄金标准数据", "派送二_匹配后批次数据", "派送二_车次汇总核对", "邮编异常审核", "区域识别规则", "干线识别规则"]
-    return ["货量", "FBA货量排行", "FBX平台仓货量", "发车量", "派送时效", "调拨数据", "每方价格参考", "分类型价格参考", "黄金标准数据", "派送二_匹配后批次数据", "派送二_车次汇总核对", "邮编异常审核", "区域识别规则", "干线识别规则"]
+    return ["FBA仓点分析", "FBA派送方式分析", "货量", "FBA货量排行", "FBX平台仓货量", "发车量", "派送时效", "调拨数据", "每方价格参考", "分类型价格参考", "黄金标准数据", "派送二_匹配后批次数据", "派送二_车次汇总核对", "邮编异常审核", "区域识别规则", "干线识别规则"]
 
 
 def _split_combined_report(combined):
@@ -156,6 +158,8 @@ def build_stage2_report_for_destination(cleaned_batches, match_df=None, period_t
 
     combined = delivery_workflow.build_sheet1_volume_dispatch_time_report(matched)
     volume, dispatch, timing = _split_combined_report(combined)
+    timing = delivery_destination_analysis.build_station_timing_report(matched)
+    fba_summary, fba_methods = delivery_destination_analysis.build_fba_destination_reports(matched)
     cost_ftl = delivery_match_adapter.build_station_cost_report(matched)
     cost_ltl = delivery_match_adapter.build_ltl_station_cost_report(matched)
     price_reference, type_price_reference = delivery_match_adapter.build_cost_price_reference_reports(
@@ -171,6 +175,8 @@ def build_stage2_report_for_destination(cleaned_batches, match_df=None, period_t
 
     report = {"货量": delivery_match_adapter._safe_round(delivery_match_adapter._finalize_sheet(volume, "货量"), "货量")}
     if destination_type in ["全部", "FBA"]:
+        report["FBA仓点分析"] = delivery_match_adapter._safe_round(fba_summary, "成本")
+        report["FBA派送方式分析"] = delivery_match_adapter._safe_round(fba_methods, "成本")
         report["FBA货量排行"] = delivery_match_adapter._safe_round(
             delivery_match_adapter._finalize_sheet(delivery_match_adapter.build_fba_rank_sheet(matched), "FBA货量排行"),
             "FBA货量排行",
@@ -312,11 +318,11 @@ st.caption(
     "派送二支持：按月统计 / 按周统计 / 按原文件时间范围；并单独输出LA至NJ/SAV/DAL盈仓调拨数据。"
     "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
     "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
-    "派送二的FBA货量排行和FBX平台仓货量在末列显示派送卡车使用比例：按仓库、统计周期、目的仓点汇总批次方数，空白或同批次供应商冲突的方数只进入分母，仅罗列占比严格大于10%的已识别供应商。"
+    "派送二的供应商货量比例按方数计算，全部供应商集中在同一单元格展示，空白或冲突供应商单列为未知/冲突。新增FBA仓点分析和FBA派送方式分析：货量全量累积；每方均价先计算有效批次单价再取平均，并展示有效成本方数与覆盖率。FTL多卸按同车次不同目的地识别，同目的地多批次合车计算整车均价；LTL始终单列。普通派送均值门槛统一为大车地板至少60方、大车卡板至少40方。供应商价格优先使用原始承运商成本，其他运营成本含装车费。派送时效只保留已识别FBA/FBX仓点，沿用有效FTL批次方数加权。调拨、干线、黄金批次保持原规则。"
     "仓点成本、干线和调拨均从清洗后有效数据集并行独立取数；干线或调拨标签不会把有效FBA/FBX批次从每方价格参考和分类型价格参考中排除。"
     "调拨目的地优先于本批次的普通目的仓识别，但只在该批次内覆盖；同一车次的其他FBA/FBX批次保留各自目的地，支持一车多卸。调拨批次目标仓缺失或同批次目标冲突时转入无效审核，不回退为FBA/FBX。"
     "派送一按批次输出：目的仓、区域、方数、成本、出库时间和签收时间均保留批次原值；真实车次只用于整车统一FTL/LTL、计算整车总量和批次车份额。有批次号但缺车次号时，仍按该批次原始运输类型、车型和装车类型正常分类，但不计发车、整车价或时效。"
-    "派送二的货量、发车、时效和全部派送成本统一按批次出库时间归期。成本输出为每方价格参考和分类型价格参考；前者按FBA/FBX目的地仓点汇总，后者合并大车地板、大车卡板、小车和LTL。只有原始派送成本大于0的批次进入成本的方数分母和成本分子；零成本批次不稀释每方价格。FTL整车价格只使用有真实车次和精确车份额的单批次整车；同车次含两个或以上批次的多卸车次不计入平均整车价、P80整车价及整车价格，但仍保留其他原有统计。LTL及缺车次批次的整车价格留空。批次基础派送成本不按整车总成本二次分摊；FTL大车地板另按批次精确车份额×$200增加装车费。"
+    "派送二的货量、发车、时效和全部派送成本统一按批次出库时间归期。既有价格参考仍输出为每方价格参考和分类型价格参考；前者按FBA/FBX目的地仓点汇总，后者合并大车地板、大车卡板、小车和LTL。只有原始派送成本大于0的批次进入成本的方数分母和成本分子；零成本批次不稀释每方价格。既有价格参考的FTL整车价格保留单批次整车样本；新增FBA分析按不同目的地判定多卸，同目的地多批次允许合车计算。既有参考价中的总成本/总方数与新表有效批次单价的算术平均分开展示。LTL及缺车次批次的整车价格留空。批次基础派送成本不按整车总成本二次分摊；FTL大车地板另按批次精确车份额×$200增加装车费。"
     "调拨数据和干线数据在右侧集中列示各供应商平均整车成本及使用比例，供应商沿用单批次整车样本筛选，但成本优先使用原始派送成本（缺失时回退派送成本），不含仓内装车费；其他每车、平均整车价、P80整车价和每方成本仍使用含装车费的派送成本。空白或冲突供应商计入使用比例分母但不强行归属。结果表不再重复输出批次号、车次号等可在清洗明细中查询的审计列。"
     "派送二另输出黄金标准数据：仅保留一批次对应一真实车次、最终FTL大车且原始派送成本大于0的完整批次；地板装车要求80至120CBM，卡板装车要求40至80CBM，边界值均计入。该表仅输出批次、车次、目的地及归属、车辆装载、成本和时间等核心字段，并按派送卡车供应商使用不同浅色。"
     "目的仓点、区域和干线发车数先汇总批次精确车份额，再按四舍五入显示整数；派送时效按批次出库至批次签收计算，并按有效批次方数加权求平均和P80。LTL、缺车次、缺失/异常时间以及备注含‘里’或‘外’的批次不参与时效。"
