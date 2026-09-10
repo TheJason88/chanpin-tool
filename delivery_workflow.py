@@ -252,6 +252,9 @@ def line_from_zip(zip_code):
 
 
 def identify_linehaul_second_part(row):
+    transfer_line = tool_common.transfer_route_from_row(row)
+    if transfer_line:
+        return transfer_line, "调拨数据：实际发货仓至调入仓库"
     if str(row.get("仓库", "")).strip() not in ["LA", "美西仓", "美西二号仓", "CA"]:
         return "非LA干线", "非LA仓暂不识别LA干线"
     outbound_type = str(row.get("出库类型", ""))

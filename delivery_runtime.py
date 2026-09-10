@@ -8,14 +8,14 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-09-09-fba-destination-analysis-v21"
+RUNTIME_SCHEMA_VERSION = "2026-09-10-transfer-origin-routes-v22"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
-    "NJ": {"name": "NJ盈仓", "line": "LA-NJ"},
-    "SAV": {"name": "SAV盈仓", "line": "LA-SAV"},
-    "DAL": {"name": "DAL盈仓", "line": "LA-DAL"},
+    "LA": {"name": "LA盈仓"},
+    "NJ": {"name": "NJ盈仓"},
+    "SAV": {"name": "SAV盈仓"},
+    "DAL": {"name": "DAL盈仓"},
 }
-TRANSFER_KEYWORDS = ["调拨", "仓间", "调入"]
 
 # 原始代码已有：取消、作废、废单、无效、删除、关闭。这里补足历史备注删除关键词和新增关键词。
 ADDITIONAL_INVALID_BATCH_KEYWORDS = ["废单", "快递", "公共单", "清除", "自提"]
@@ -424,66 +424,33 @@ def _unique_batch_keys_from_row(row):
     return list(dict.fromkeys([x for x in batch_keys if x]))
 
 
-def _is_la_source(row):
-    return str(row.get("仓库", "")).strip() in ["LA", "美西仓", "美西二号仓", "CA"]
-
-
 def _transfer_target_from_row(row):
-    """
-    识别LA调拨至 NJ / SAV / DAL 盈仓的数据。
-    必须先具备调拨语义，再按调入仓库、备注、车次/批次、专线线路识别目标仓，避免把普通LA干线派送误判为调拨。
-    """
-    if not _is_la_source(row):
-        return ""
-
-    def clean_text(column):
-        value = row.get(column, "")
-        return "" if processors.is_blank(value) else str(value).strip()
-
-    explicit_target = clean_text("调拨目标仓代码").upper()
-    if explicit_target in TRANSFER_TARGETS:
-        return explicit_target
-
-    # 仅业务语义字段可以证明“这是一条调拨数据”。专线线路只能在已确认
-    # 调拨后帮助确定目标仓，不能反过来把普通 LA-NJ/LA-SAV/LA-DAL 干线判成调拨。
-    text_fields = [
-        "出库类型", "业务场景", "调入仓库", "邮编来源", "匹配备注集合",
-        "系统产品类型", "主产品类型", "批次目的地类型", "调拨覆盖审核",
-    ]
-    text = " ".join(clean_text(c) for c in text_fields if c in row.index)
-    upper_text = text.upper()
-    line = clean_text("专线线路")
-
-    has_transfer_semantics = (
-        any(keyword in text for keyword in TRANSFER_KEYWORDS)
-        or "仓间调拨目标仓地址" in text
-        or bool(clean_text("调入仓库"))
-    )
-    if not has_transfer_semantics:
-        return ""
-
-    for target, target_info in TRANSFER_TARGETS.items():
-        info = tool_common.TRANSFER_WAREHOUSE_INFO.get(target, {})
-        keywords = [target, target_info["name"], target_info["line"]] + list(info.get("keywords", []))
-        if line == target_info["line"] or any(str(keyword).upper() in upper_text for keyword in keywords if keyword):
-            return target
-    return ""
+    """识别明确的仓间调拨，按实际发货仓生成线路，包括NJ至SAV。"""
+    route = tool_common.transfer_route_from_row(row)
+    return route.rsplit("-", 1)[-1] if route else ""
 
 
-def _transfer_rows(matched, ftl_only=True):
+def _transfer_rows(matched, ftl_only=True, include_missing_trip=False):
     if matched is None or matched.empty:
         return pd.DataFrame()
     out = matched.copy()
     out["调拨目标仓"] = out.apply(_transfer_target_from_row, axis=1)
     out = out[out["调拨目标仓"].isin(TRANSFER_TARGETS.keys())].copy()
-    if ftl_only and "是否FTL发车" in out.columns:
-        out = out[out["是否FTL发车"]].copy()
+    if ftl_only:
+        if include_missing_trip and "标准运输类型" in out.columns:
+            out = out[out["标准运输类型"].astype(str).str.upper().eq("FTL")].copy()
+        elif "是否FTL发车" in out.columns:
+            out = out[tool_common.normalize_boolean_series(out["是否FTL发车"])].copy()
     for col in ["出库体积", "出库卡板数", "派送成本"]:
         if col not in out.columns:
             out[col] = 0
         out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
     out["调拨目标仓名称"] = out["调拨目标仓"].map(lambda x: TRANSFER_TARGETS.get(x, {}).get("name", x))
-    out["专线线路"] = out["调拨目标仓"].map(lambda x: TRANSFER_TARGETS.get(x, {}).get("line", ""))
+    out["仓库"] = out["仓库"].map(processors.standardize_warehouse)
+    out["专线线路"] = pd.Series(
+        [tool_common.transfer_route(source, target) for source, target in zip(out["仓库"], out["调拨目标仓"])],
+        index=out.index, dtype="object",
+    )
     return out
 
 
@@ -602,7 +569,7 @@ def _build_transfer_cost_report(matched):
 
 def _build_transfer_report(matched):
     marked = processors.mark_whole_truck_cost_sample_eligibility(matched)
-    transfer = _transfer_rows(marked, ftl_only=True)
+    transfer = _transfer_rows(marked, ftl_only=True, include_missing_trip=True)
     columns = [
         "发货仓", "调拨目标仓", "专线线路", "统计周期", "车次数",
         "总出库体积", "总出库卡板数", "总派送成本", "平均整车价", "每方平均价",
@@ -615,12 +582,16 @@ def _build_transfer_report(matched):
 
     rows = []
     for (warehouse, period, target_name, line), group in transfer.groupby(["仓库", "统计周期", "调拨目标仓名称", "专线线路"], dropna=False):
-        exact_trip_count = _exact_vehicle_share_series(group).sum()
+        if "是否FTL发车" in group.columns:
+            dispatched = group[tool_common.normalize_boolean_series(group["是否FTL发车"])].copy()
+        else:
+            dispatched = group[group["车次号"].fillna("").astype(str).str.strip().ne("")].copy()
+        exact_trip_count = _exact_vehicle_share_series(dispatched).sum()
         trip_count = _business_round_vehicle_count(exact_trip_count)
         total_volume = group["出库体积"].sum()
         total_pallets = group["出库卡板数"].sum()
         total_cost = group["派送成本"].sum()
-        average_source = group.copy()
+        average_source = _filter_positive_cost_rows(dispatched)
         if "整车出库体积" in average_source.columns:
             average_source["批次出库体积"] = average_source["出库体积"]
             average_source["出库体积"] = pd.to_numeric(average_source["整车出库体积"], errors="coerce")
