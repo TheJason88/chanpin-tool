@@ -282,6 +282,41 @@ def transfer_row_has_semantics(row):
     return any(keyword in text for keyword in ["调拨", "仓间", "调入"])
 
 
+def transfer_route(source, target):
+    """Build a warehouse transfer route from its actual origin, never a fixed LA prefix."""
+    source = processors.standardize_warehouse(_clean_transfer_text(source))
+    target = _clean_transfer_text(target).upper()
+    if source not in TRANSFER_WAREHOUSE_INFO or target not in TRANSFER_WAREHOUSE_INFO or source == target:
+        return ""
+    return f"{source}-{target}"
+
+
+def transfer_route_from_row(row):
+    """Require explicit transfer evidence; a destination/ZIP/route alone is insufficient."""
+    source = processors.standardize_warehouse(_clean_transfer_text(row.get("仓库", "")))
+    explicit = _clean_transfer_text(row.get("调拨目标仓代码", "")).upper()
+    semantic_text = " ".join(_clean_transfer_text(row.get(col, "")) for col in [
+        "系统产品类型", "主产品类型", "批次目的地类型", TRANSFER_AUDIT_COLUMN,
+        "邮编来源", "匹配备注集合",
+    ])
+    if not (transfer_row_has_semantics(row) or explicit in TRANSFER_WAREHOUSE_INFO
+            or any(word in semantic_text for word in ["调拨", "仓间", "调入"])):
+        return ""
+    if explicit in TRANSFER_WAREHOUSE_INFO:
+        return transfer_route(source, explicit)
+    targets = infer_transfer_targets_from_row(row)
+    if targets:
+        return transfer_route(source, targets[0]) if len(targets) == 1 else ""
+    # Legacy cleaned files may only retain a route or matching/audit text.
+    targets = infer_transfer_targets_from_text(semantic_text)
+    if len(targets) == 1:
+        return transfer_route(source, targets[0])
+    line = _clean_transfer_text(row.get("专线线路", "")).upper().split("-")
+    if not targets and len(line) == 2 and line[0] in TRANSFER_WAREHOUSE_INFO:
+        return transfer_route(source, line[1])
+    return ""
+
+
 def _transfer_group_key(row, index):
     warehouse = _clean_transfer_text(row.get("仓库", "")).upper()
     batch_no = _clean_transfer_text(
@@ -400,7 +435,9 @@ def _apply_transfer_target(out, indexes, target, info, scope):
     out.loc[indexes, "FBX出库体积"] = 0.0
     out.loc[indexes, "批次目的地类型"] = "其他"
     out.loc[indexes, "批次目的仓点"] = display
-    out.loc[indexes, "专线线路"] = info["line"]
+    out.loc[indexes, "专线线路"] = out.get("仓库", pd.Series("", index=out.index)).loc[indexes].map(
+        lambda source: transfer_route(source, target)
+    )
     out.loc[indexes, "专线识别方式"] = "调拨目标仓优先覆盖"
     for index in indexes:
         out.at[index, "目的仓点分配明细"] = _transfer_allocation_json(

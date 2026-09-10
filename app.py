@@ -23,12 +23,13 @@ try:
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-09-09-fba-destination-analysis-v21"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-09-10-transfer-origin-routes-v22"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
         # 仅当运行时版本不一致时重新加载，保证新表结构与新统计规则同步生效。
         processors = importlib.reload(processors)
+        tool_common = importlib.reload(tool_common)
         delivery_stage1_adapter = importlib.reload(delivery_stage1_adapter)
         delivery_match_adapter = importlib.reload(delivery_match_adapter)
         delivery_workflow = importlib.reload(delivery_workflow)
@@ -315,10 +316,10 @@ st.caption(
     "派送方式=直送时仅输出总柜量、联宇柜量和非联宇柜量，不计算时效；派送方式=拆柜/拆送时继续输出原柜量、提柜时效和拆柜时效。"
     "直送和拆送的联宇/非联宇判定完全一致；无法识别的派送方式仅保留在清洗明细中待确认。"
     "提柜时效：LA/NJ/SAV按Available时间到实际抵仓时间，DAL按提柜时间到实际抵仓时间；拆柜时效按实际抵仓时间到拆柜完成时间。"
-    "派送二支持：按月统计 / 按周统计 / 按原文件时间范围；并单独输出LA至NJ/SAV/DAL盈仓调拨数据。"
+    "派送二支持：按月统计 / 按周统计 / 按原文件时间范围；调拨数据按实际发货仓至调入盈仓汇总，包括LA至NJ/SAV/DAL及NJ至SAV。仅明确调拨业务进入该表，目的地名称含萨凡纳或盈仓的普通派送不自动视为调拨。FTL调拨缺车次的有效货量仍保留，但不计发车数及整车/每方价格样本；缺失或无效方数继续进入清洗审核。"
     "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
     "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
-    "派送二的供应商货量比例按方数计算，全部供应商集中在同一单元格展示，空白或冲突供应商单列为未知/冲突。新增FBA仓点分析和FBA派送方式分析：货量全量累积；每方均价先计算有效批次单价再取平均，并展示有效成本方数与覆盖率。FTL多卸按同车次不同目的地识别，同目的地多批次合车计算整车均价；LTL始终单列。普通派送均值门槛统一为大车地板至少60方、大车卡板至少40方。供应商价格优先使用原始承运商成本，其他运营成本含装车费。派送时效只保留已识别FBA/FBX仓点，沿用有效FTL批次方数加权。调拨、干线、黄金批次保持原规则。"
+    "派送二的供应商货量比例按方数计算，全部供应商集中在同一单元格展示，空白或冲突供应商单列为未知/冲突。新增FBA仓点分析和FBA派送方式分析：货量全量累积；每方均价先计算有效批次单价再取平均，并展示有效成本方数与覆盖率。FTL多卸按同车次不同目的地识别，同目的地多批次合车计算整车均价；LTL始终单列。普通派送均值门槛统一为大车地板至少60方、大车卡板至少40方。供应商价格优先使用原始承运商成本，其他运营成本含装车费。派送时效只保留已识别FBA/FBX仓点，沿用有效FTL批次方数加权。调拨、干线的原有价格样本门槛及黄金批次规则保持不变。"
     "仓点成本、干线和调拨均从清洗后有效数据集并行独立取数；干线或调拨标签不会把有效FBA/FBX批次从每方价格参考和分类型价格参考中排除。"
     "调拨目的地优先于本批次的普通目的仓识别，但只在该批次内覆盖；同一车次的其他FBA/FBX批次保留各自目的地，支持一车多卸。调拨批次目标仓缺失或同批次目标冲突时转入无效审核，不回退为FBA/FBX。"
     "派送一按批次输出：目的仓、区域、方数、成本、出库时间和签收时间均保留批次原值；真实车次只用于整车统一FTL/LTL、计算整车总量和批次车份额。有批次号但缺车次号时，仍按该批次原始运输类型、车型和装车类型正常分类，但不计发车、整车价或时效。"

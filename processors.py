@@ -903,6 +903,11 @@ def build_standard_delivery_method(transport_type, vehicle_type, loading_type):
 
 
 def identify_delivery_line(row):
+    import tool_common
+
+    transfer_line = tool_common.transfer_route_from_row(row)
+    if transfer_line:
+        return transfer_line, "调入仓库映射"
     warehouse = str(row.get("仓库", ""))
     outbound_type = str(row.get("出库类型", ""))
     transfer_to = str(row.get("调入仓库", ""))
