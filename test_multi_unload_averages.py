@@ -812,7 +812,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         expected_columns = [
             "发货仓", "调拨目标仓", "专线线路", "统计周期", "车次数",
             "总出库体积", "总出库卡板数", "总派送成本", "平均整车价", "每方平均价",
-            "平均每车出库体积", "供应商平均整车成本", "供应商使用比例",
+            "平均每车出库体积", "供应商平均整车价", "供应商平均整车成本", "供应商使用比例",
         ]
         transfer = delivery_runtime._build_transfer_report(rows)
         self.assertEqual(transfer.columns.tolist(), expected_columns)
@@ -826,6 +826,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
             "Carrier A 50.00%；Carrier B 25.00%",
         )
         self.assertEqual(transfer_row["平均整车价"], 725)
+        self.assertEqual(transfer_row["供应商平均整车价"], 725)
 
         linehaul = delivery_audit_backfill._build_linehaul_sheet(rows)
         nj = linehaul.loc[linehaul["专线线路"] == "LA-NJ"].iloc[0]

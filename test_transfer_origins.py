@@ -75,6 +75,7 @@ class TransferOriginTests(unittest.TestCase):
         self.assertEqual(transfer["总出库体积"], 50)
         self.assertTrue(pd.isna(transfer["平均整车价"]))
         self.assertEqual(transfer["供应商平均整车成本"], "")
+        self.assertTrue(pd.isna(transfer["供应商平均整车价"]))
         self.assertTrue(delivery_audit_backfill._build_linehaul_sheet(matched).empty)
 
     def test_monthly_pipeline_keeps_missing_trip_volume_and_excludes_zero_cost(self):
@@ -100,6 +101,7 @@ class TransferOriginTests(unittest.TestCase):
         self.assertEqual(transfer.loc["2026-08", "总派送成本"], 15000)
         self.assertEqual(transfer.loc["2026-08", "平均整车价"], 3000)
         self.assertEqual(transfer.loc["2026-08", "供应商平均整车成本"], "Carrier $2800.00")
+        self.assertEqual(transfer.loc["2026-08", "供应商平均整车价"], 2800)
         self.assertEqual(transfer.loc["2026-09", "车次数"], 1)
         self.assertEqual(transfer.loc["2026-09", "总出库体积"], 158.37)
         self.assertEqual(transfer.loc["2026-09", "每方平均价"], round(3000 / 72.36, 2))
@@ -125,6 +127,31 @@ class TransferOriginTests(unittest.TestCase):
         self.assertEqual(row["总出库体积"], 70)
         self.assertTrue(pd.isna(row["平均整车价"]))
         self.assertTrue(pd.isna(row["每方平均价"]))
+        self.assertTrue(pd.isna(row["供应商平均整车价"]))
+
+    def test_supplier_average_combines_loading_types_through_excel_export(self):
+        suppliers = [("A", 9700)] * 5 + [("B", 9500)] * 2 + [("C", 9000)] * 2 + [("D", 9300)]
+        raw = pd.DataFrame([
+            source_row(f"B{i}", volume=100, trip=f"T{i}", cost=cost,
+                       仓库="LA", 调入仓库="新泽西盈仓", 目的地="新泽西盈仓",
+                       派送卡车=supplier, 装车类型="地板" if i % 2 == 0 else "卡板")
+            for i, (supplier, cost) in enumerate(suppliers)
+        ])
+        cleaned, _, _, _ = delivery_workflow.process_stage1_raw_files_to_cleaned_batches(
+            [("input.xlsx", raw)], "LA")
+        reports = delivery_match_adapter.build_split_stage2_report(
+            delivery_workflow, cleaned, pd.DataFrame(), "按月统计")
+        exported = pd.read_excel(tool_common.write_sheets_to_excel(reports), sheet_name="调拨数据")
+        self.assertEqual(len(exported), 1)
+        row = exported.iloc[0]
+        self.assertEqual(row["专线线路"], "LA-NJ")
+        self.assertEqual(row["车次数"], 10)
+        self.assertEqual(row["供应商平均整车价"], 9480)
+        self.assertEqual(row["平均整车价"], 9580)
+        self.assertEqual(row["总派送成本"], 95800)
+        self.assertEqual(row["供应商使用比例"], "A 50.00%；B 20.00%；C 20.00%；D 10.00%")
+        self.assertEqual(row["供应商平均整车成本"],
+                         "A $9700.00；B $9500.00；C $9000.00；D $9300.00")
 
 
 if __name__ == "__main__":

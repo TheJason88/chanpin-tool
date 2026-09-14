@@ -280,8 +280,8 @@ def whole_truck_cost_sample_rows(df):
     return out.loc[eligible].copy()
 
 
-def supplier_whole_truck_cost_summary(df):
-    """Return compact supplier cost and usage text for whole-truck samples.
+def _supplier_whole_truck_cost_rows(df):
+    """Prepare the shared carrier-cost samples for supplier prices and usage.
 
     ``df`` is expected to have already passed the business sample filters
     (single-batch trip, volume threshold, remark rule). Only rows with a
@@ -294,7 +294,7 @@ def supplier_whole_truck_cost_summary(df):
     displayed, so known suppliers are never overstated.
     """
     if df is None or df.empty:
-        return "", ""
+        return pd.DataFrame()
     # Import locally because tool_common also imports processors.
     import tool_common
 
@@ -310,19 +310,39 @@ def supplier_whole_truck_cost_summary(df):
     source["_供应商成本"] = base_cost.fillna(delivery_cost)
     source = source[source["_供应商成本"].gt(0)].copy()
     if source.empty:
-        return "", ""
+        return source
 
     warehouse = source.get("仓库", pd.Series("", index=source.index)).fillna("").astype(str).str.upper().str.strip()
     trip_no = source.get("车次号", pd.Series("", index=source.index)).fillna("").astype(str).str.strip()
     source["_供应商车次键"] = warehouse + "||" + trip_no
     source = source[trip_no.ne("")].drop_duplicates("_供应商车次键", keep="first").copy()
     if source.empty:
-        return "", ""
+        return source
 
     supplier_display = source.get("派送卡车", pd.Series("", index=source.index)).fillna("").astype(str)
     supplier_display = supplier_display.str.replace(r"\s+", " ", regex=True).str.strip()
     source["_供应商显示名"] = supplier_display
     source["_供应商键"] = supplier_display.str.casefold()
+    return source
+
+
+def supplier_whole_truck_average_cost(df):
+    """Average original carrier cost per valid unique trip across loading types.
+
+    This equals supplier mean prices weighted by their exact trip counts,
+    without rounding the displayed prices/percentages. Unnamed suppliers with
+    valid costs participate, matching the supplier-usage denominator.
+    Callers apply the same business sample filters used for supplier details.
+    """
+    source = _supplier_whole_truck_cost_rows(df)
+    return source["_供应商成本"].mean() if not source.empty else np.nan
+
+
+def supplier_whole_truck_cost_summary(df):
+    """Return supplier original-cost means and unique-trip usage as compact text."""
+    source = _supplier_whole_truck_cost_rows(df)
+    if source.empty:
+        return "", ""
     denominator = len(source)
     named = source[source["_供应商键"].ne("")].copy()
     if named.empty or denominator <= 0:
