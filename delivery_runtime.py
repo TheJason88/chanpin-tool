@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-09-10-transfer-origin-routes-v22"
+RUNTIME_SCHEMA_VERSION = "2026-09-14-transfer-supplier-average-v23"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "LA": {"name": "LA盈仓"},
@@ -573,7 +573,7 @@ def _build_transfer_report(matched):
     columns = [
         "发货仓", "调拨目标仓", "专线线路", "统计周期", "车次数",
         "总出库体积", "总出库卡板数", "总派送成本", "平均整车价", "每方平均价",
-        "平均每车出库体积", "供应商平均整车成本", "供应商使用比例",
+        "平均每车出库体积", "供应商平均整车价", "供应商平均整车成本", "供应商使用比例",
     ]
     if transfer.empty:
         return pd.DataFrame(columns=columns)
@@ -622,6 +622,7 @@ def _build_transfer_report(matched):
             ).mean(),
             "供应商平均整车成本": supplier_costs,
             "供应商使用比例": supplier_usage,
+            "供应商平均整车价": processors.supplier_whole_truck_average_cost(cost_group),
         })
     return pd.DataFrame(rows)[columns]
 

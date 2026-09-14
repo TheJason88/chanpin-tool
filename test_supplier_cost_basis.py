@@ -23,6 +23,11 @@ class SupplierCostBasisTests(unittest.TestCase):
                 result = processors.supplier_whole_truck_cost_summary(rows)
                 self.assertEqual(result, ("", "") if expected is None else
                                  (f"Carrier ${expected:.2f}", "Carrier 100.00%"))
+                average = processors.supplier_whole_truck_average_cost(rows)
+                if expected is None:
+                    self.assertTrue(pd.isna(average))
+                else:
+                    self.assertEqual(average, expected)
                 pd.testing.assert_frame_equal(rows, snapshot)
 
         rows = pd.DataFrame([
@@ -36,6 +41,27 @@ class SupplierCostBasisTests(unittest.TestCase):
             rows.drop(columns=tool_common.BASE_DELIVERY_COST_COLUMN))[0], "Carrier $9850.00")
         self.assertEqual(processors.supplier_whole_truck_cost_summary(
             rows.iloc[:1].drop(columns="派送成本"))[0], "Carrier $9500.00")
+        self.assertEqual(processors.supplier_whole_truck_average_cost(
+            rows.drop(columns=tool_common.BASE_DELIVERY_COST_COLUMN)), 9850)
+
+    def test_average_uses_unique_trips_and_includes_unnamed_suppliers(self):
+        rows = pd.DataFrame([
+            {"仓库": warehouse, "车次号": trip, "派送卡车": supplier,
+             "原始派送成本": cost, "派送成本": cost + 200}
+            for warehouse, trip, supplier, cost in [
+                ("LA", "T1", "A", 100), ("LA", "T1", "A", 100),
+                ("LA", "T2", "B", 200), ("NJ", "T1", "", 300),
+                ("LA", "", "C", 9999),
+            ]
+        ])
+        self.assertEqual(processors.supplier_whole_truck_average_cost(rows), 200)
+        self.assertEqual(processors.supplier_whole_truck_cost_summary(rows),
+                         ("A $100.00；B $200.00", "A 33.33%；B 33.33%"))
+        rows["派送卡车"] = ""
+        self.assertEqual(processors.supplier_whole_truck_average_cost(rows), 200)
+        self.assertEqual(processors.supplier_whole_truck_cost_summary(rows), ("", ""))
+        for empty in [None, pd.DataFrame(), rows.iloc[:0]]:
+            self.assertTrue(pd.isna(processors.supplier_whole_truck_average_cost(empty)))
 
     def test_reports_separate_supplier_cost_from_loaded_cost(self):
         rows = pd.DataFrame([{
@@ -54,6 +80,8 @@ class SupplierCostBasisTests(unittest.TestCase):
         transfer = delivery_runtime._build_transfer_report(loaded).iloc[0]
         linehaul = delivery_audit_backfill._build_linehaul_sheet(loaded)
         linehaul = linehaul.loc[linehaul["专线线路"] == "LA-NJ"].iloc[0]
+        self.assertEqual(transfer["供应商平均整车价"], 9750)
+        self.assertNotIn("供应商平均整车价", linehaul.index)
         for report in [transfer, linehaul]:
             self.assertEqual(report["供应商平均整车成本"], "Carrier $9750.00")
             self.assertEqual(report["供应商使用比例"], "Carrier 100.00%")
