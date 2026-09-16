@@ -25,6 +25,11 @@ FIELD_ALIASES = {
 }
 
 TRANSFER_WAREHOUSE_INFO = {
+    "IL": {
+        "display": "IL合作仓", "zip": "60106", "zip3": "601", "state": "IL",
+        "address": "610 Supreme Dr, Bensenville, IL 60106, USA",
+        "line": "LA-IL", "keywords": ["IL合作仓"], "product": "FBX",
+    },
     "LA": {
         "display": "LA盈仓",
         "zip": "91708",
@@ -203,6 +208,8 @@ def _transfer_keyword_matches(upper_text, keyword):
 
 
 def infer_transfer_target_from_text(text):
+    if is_il_partner_text(text):
+        return "IL", TRANSFER_WAREHOUSE_INFO["IL"]
     upper = str(text).upper()
     for target, info in TRANSFER_WAREHOUSE_INFO.items():
         for keyword in info["keywords"]:
@@ -214,8 +221,10 @@ def infer_transfer_target_from_text(text):
 def infer_transfer_targets_from_text(text):
     """返回文本中命中的全部调拨目标仓，供同车次目标冲突审核使用。"""
     upper = str(text).upper()
-    targets = []
+    targets = ["IL"] if is_il_partner_text(text) else []
     for target, info in TRANSFER_WAREHOUSE_INFO.items():
+        if target == "IL":
+            continue
         if any(
             _transfer_keyword_matches(upper, keyword)
             for keyword in info["keywords"]
@@ -228,12 +237,19 @@ def infer_transfer_targets_from_row(row):
     """调入仓库优先；当前字段命中后不再让低优先级旧目的地制造冲突。"""
     preferred_cols = [
         "调入仓库", "出库类型", "业务场景", "实际目的地", "修正后目的地",
-        "目的地", "备注", "车次号", "批次号集合",
+        "目的地", "标准地址", "批次目的仓点", "备注", "车次号", "批次号集合",
     ]
     for col in preferred_cols:
         if col not in row.index:
             continue
         targets = infer_transfer_targets_from_text(row.get(col, ""))
+        if col in ["标准地址", "批次目的仓点"]:
+            targets = [target for target in targets if target == "IL"]
+        if "IL" in targets:
+            origin = processors.standardize_warehouse(_clean_transfer_text(row.get("仓库", "")))
+            targets = [target for target in targets if target != origin]
+        if col in ["车次号", "批次号集合"]:
+            targets = [target for target in targets if target != "IL"]
         if targets:
             return targets
     return []
@@ -270,9 +286,32 @@ def _clean_transfer_text(value):
     return "" if text.lower() in {"nan", "none", "null", "<na>"} else text
 
 
+def is_il_partner_text(value):
+    """Only a named partner or the specific street plus locality identifies this site."""
+    text = _clean_transfer_text(value).upper()
+    if re.search(r"(?<![A-Z0-9])IL\s*合作仓", text):
+        return True
+    street = re.search(r"(?<!\d)610\s+SUPREME\s+(?:DRIVE|DR)(?![A-Z])", text)
+    if not street:
+        return False
+    zips = re.findall(r"(?<!\d)\d{5}(?!\d)", text)
+    if zips and any(zipcode != "60106" for zipcode in zips):
+        return False
+    return bool("60106" in zips or re.search(r"\bBENSENVILLE\b", text))
+
+
+def is_il_partner_row(row):
+    if processors.standardize_warehouse(_clean_transfer_text(row.get("仓库", ""))) != "LA":
+        return False
+    # Never use shared trip remarks or trip/batch IDs as destination evidence.
+    return any(is_il_partner_text(row.get(col, "")) for col in [
+        "调入仓库", "实际目的地", "修正后目的地", "目的地", "标准地址", "批次目的仓点", "备注",
+    ])
+
+
 def transfer_row_has_semantics(row):
-    """调入仓库非空，或业务字段明确含调拨/仓间/调入，即视为调拨。"""
-    if _clean_transfer_text(row.get("调入仓库", "")):
+    """调拨业务证据；LA 的指定 IL 合作仓名称/地址也构成明确证据。"""
+    if is_il_partner_row(row) or _clean_transfer_text(row.get("调入仓库", "")):
         return True
     text = " ".join(
         _clean_transfer_text(row.get(col, ""))
@@ -288,11 +327,16 @@ def transfer_route(source, target):
     target = _clean_transfer_text(target).upper()
     if source not in TRANSFER_WAREHOUSE_INFO or target not in TRANSFER_WAREHOUSE_INFO or source == target:
         return ""
+    if source == "IL" or (target == "IL" and source != "LA"):
+        return ""
     return f"{source}-{target}"
 
 
 def transfer_route_from_row(row):
-    """Require explicit transfer evidence; a destination/ZIP/route alone is insufficient."""
+    """Require transfer evidence, including the specifically designated LA partner site.
+
+    Generic state/ZIP/route matches never establish partner-transfer membership.
+    """
     source = processors.standardize_warehouse(_clean_transfer_text(row.get("仓库", "")))
     explicit = _clean_transfer_text(row.get("调拨目标仓代码", "")).upper()
     semantic_text = " ".join(_clean_transfer_text(row.get(col, "")) for col in [
@@ -365,13 +409,15 @@ def _transfer_allocation_json(row, display):
     )
     return json.dumps(
         [{
-            "对象类型": "其他",
-            "平台": "盈仓",
+            "对象类型": "FBX平台仓" if row.get("调拨目标仓代码") == "IL" else "其他",
+            "平台": "IL合作仓" if row.get("调拨目标仓代码") == "IL" else "盈仓",
             "仓点代码": display,
             "批次号": batch_no,
             "出库体积": numeric("出库体积"),
             "出库卡板数": numeric("出库卡板数"),
             "派送成本": numeric("派送成本"),
+            BASE_DELIVERY_COST_COLUMN: numeric(BASE_DELIVERY_COST_COLUMN) if BASE_DELIVERY_COST_COLUMN in row else numeric("派送成本"),
+            FLOOR_LOADING_FEE_COLUMN: numeric(FLOOR_LOADING_FEE_COLUMN),
         }],
         ensure_ascii=False,
         separators=(",", ":"),
@@ -439,6 +485,18 @@ def _apply_transfer_target(out, indexes, target, info, scope):
         lambda source: transfer_route(source, target)
     )
     out.loc[indexes, "专线识别方式"] = "调拨目标仓优先覆盖"
+    if info.get("product") == "FBX":
+        out.loc[indexes, "标准地址"] = info["address"]
+        out.loc[indexes, "业务场景"] = "合作仓调拨"
+        out.loc[indexes, "FBA/FBX"] = "FBX"
+        out.loc[indexes, "系统产品类型"] = "FBX"
+        out.loc[indexes, "主产品类型"] = "FBX"
+        out.loc[indexes, "平台名称"] = display
+        out.loc[indexes, "批次目的地类型"] = "FBX平台仓"
+        for col in ["FBX代码", "平台仓代码", "FBX代码集合", "平台仓代码集合"]:
+            out.loc[indexes, col] = display
+        out.loc[indexes, "平台仓配对集合"] = f"{display}||{display}"
+        out.loc[indexes, "FBX出库体积"] = pd.to_numeric(out.loc[indexes, "出库体积"], errors="coerce").fillna(0)
     for index in indexes:
         out.at[index, "目的仓点分配明细"] = _transfer_allocation_json(
             out.loc[index],
@@ -494,6 +552,11 @@ def apply_batch_transfer_destination_rules(df):
             else "单行"
         )
         target = targets[0]
+        if target == "IL" and any(
+            processors.standardize_warehouse(_clean_transfer_text(row.get("仓库", ""))) != "LA"
+            for _, row in group.iterrows()
+        ):
+            continue
         _apply_transfer_target(
             out,
             indexes,
