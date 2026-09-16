@@ -28,7 +28,7 @@ TRANSFER_WAREHOUSE_INFO = {
     "IL": {
         "display": "IL合作仓", "zip": "60106", "zip3": "601", "state": "IL",
         "address": "610 Supreme Dr, Bensenville, IL 60106, USA",
-        "line": "LA-IL", "keywords": ["IL合作仓"], "product": "FBX",
+        "line": "LA-IL", "keywords": ["IL合作仓"],
     },
     "LA": {
         "display": "LA盈仓",
@@ -417,8 +417,8 @@ def _transfer_allocation_json(row, display):
     )
     return json.dumps(
         [{
-            "对象类型": "FBX平台仓" if row.get("调拨目标仓代码") == "IL" else "其他",
-            "平台": "IL合作仓" if row.get("调拨目标仓代码") == "IL" else "盈仓",
+            "对象类型": "其他",
+            "平台": "盈仓",
             "仓点代码": display,
             "批次号": batch_no,
             "出库体积": numeric("出库体积"),
@@ -493,18 +493,8 @@ def _apply_transfer_target(out, indexes, target, info, scope):
         lambda source: transfer_route(source, target)
     )
     out.loc[indexes, "专线识别方式"] = "调拨目标仓优先覆盖"
-    if info.get("product") == "FBX":
+    if info.get("address"):
         out.loc[indexes, "标准地址"] = info["address"]
-        out.loc[indexes, "业务场景"] = "合作仓调拨"
-        out.loc[indexes, "FBA/FBX"] = "FBX"
-        out.loc[indexes, "系统产品类型"] = "FBX"
-        out.loc[indexes, "主产品类型"] = "FBX"
-        out.loc[indexes, "平台名称"] = display
-        out.loc[indexes, "批次目的地类型"] = "FBX平台仓"
-        for col in ["FBX代码", "平台仓代码", "FBX代码集合", "平台仓代码集合"]:
-            out.loc[indexes, col] = display
-        out.loc[indexes, "平台仓配对集合"] = f"{display}||{display}"
-        out.loc[indexes, "FBX出库体积"] = pd.to_numeric(out.loc[indexes, "出库体积"], errors="coerce").fillna(0)
     for index in indexes:
         out.at[index, "目的仓点分配明细"] = _transfer_allocation_json(
             out.loc[index],
