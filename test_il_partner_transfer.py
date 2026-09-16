@@ -42,16 +42,18 @@ class IlPartnerTransferTests(unittest.TestCase):
                       {"仓库": "NJ"}]:
             self.assertNotEqual(tool_common.transfer_route_from_row(pd.Series(partner_row("B", **extra))), "LA-IL")
 
-    def test_pipeline_keeps_fbx_and_transfer_costs_separate(self):
+    def test_pipeline_keeps_internal_transfer_out_of_fba_fbx_and_costs_separate(self):
         raw = pd.DataFrame([
             partner_row("FLOOR"),
             partner_row("PALLET", trip="T2", cost=4200, 装车类型="卡板", 目的地="商业地址-示例", 备注="IL合作仓"),
         ])
         clean, invalid, _, _ = delivery_workflow.process_stage1_raw_files_to_cleaned_batches([("input.xlsx", raw)], "LA")
         self.assertTrue(invalid.empty)
-        self.assertTrue(clean["主产品类型"].eq("FBX").all())
-        self.assertTrue(clean["批次目的地类型"].eq("FBX平台仓").all())
-        self.assertEqual(clean["FBX出库体积"].sum(), 160)
+        self.assertTrue(clean["主产品类型"].eq("仓间调拨").all())
+        self.assertTrue(clean["系统产品类型"].eq("仓间调拨").all())
+        self.assertTrue(clean["批次目的地类型"].eq("其他").all())
+        self.assertEqual(clean["FBX出库体积"].sum(), 0)
+        self.assertEqual(clean["FBA出库体积"].sum(), 0)
         reports = delivery_match_adapter.build_split_stage2_report(delivery_workflow, clean, pd.DataFrame(), "按月统计")
         transfer = reports["调拨数据"]
         self.assertEqual(len(transfer), 1)
@@ -62,7 +64,7 @@ class IlPartnerTransferTests(unittest.TestCase):
         self.assertEqual(row["总派送成本"], 8400)
         self.assertEqual(row["平均整车价"], 4200)
         self.assertEqual(row["供应商平均整车价"], 4100)
-        self.assertEqual(reports["FBX平台仓货量"]["出库体积"].sum(), 160)
+        self.assertTrue(reports["FBX平台仓货量"].empty)
         self.assertTrue(reports["FBA仓点分析"].empty)
         self.assertTrue(reports["邮编异常审核"].empty)
         matched = reports["派送二_匹配后批次数据"]
@@ -73,7 +75,8 @@ class IlPartnerTransferTests(unittest.TestCase):
         rerun = delivery_workflow.prepare_stage2_for_report(matched, pd.DataFrame(), "按月统计")
         self.assertEqual(rerun["派送成本"].sum(), 8400)
         self.assertEqual(rerun["原始派送成本"].sum(), 8200)
-        self.assertEqual(rerun["FBX出库体积"].sum(), 160)
+        self.assertEqual(rerun["FBX出库体积"].sum(), 0)
+        self.assertEqual(rerun["FBA出库体积"].sum(), 0)
         exported = pd.read_excel(tool_common.write_sheets_to_excel(reports), sheet_name="调拨数据")
         self.assertEqual(exported.iloc[0]["供应商平均整车价"], 4100)
 
@@ -88,7 +91,7 @@ class IlPartnerTransferTests(unittest.TestCase):
         matched = delivery_workflow.prepare_stage2_for_report(clean, manual, "按周统计")
         partner = matched.loc[matched["批次号"].eq("IL")].iloc[0]
         self.assertEqual(partner["标准邮编集合"], "60106")
-        self.assertEqual(partner["平台名称"], "IL合作仓")
+        self.assertEqual(partner["平台名称"], "盈仓")
         self.assertEqual(partner["批次目的仓点"], "IL合作仓")
         transfer = delivery_runtime._build_transfer_report(matched)
         self.assertEqual(len(transfer), 1)
@@ -118,7 +121,7 @@ class IlPartnerTransferTests(unittest.TestCase):
         self.assertEqual(row["总出库体积"], 80)
         self.assertEqual(row["车次数"], 0)
         self.assertTrue(pd.isna(row.get("供应商平均整车价")))
-        self.assertEqual(reports["FBX平台仓货量"]["出库体积"].sum(), 90)
+        self.assertTrue(reports["FBX平台仓货量"].empty)
 
     def test_two_unloads_resolve_batch_by_address_without_using_so_volume(self):
         remark = "Carrier IL安克(外)+IL合作仓(里)"
@@ -176,6 +179,36 @@ class IlPartnerTransferTests(unittest.TestCase):
         matched = delivery_workflow.prepare_stage2_for_report(clean, match, "按月统计")
         self.assertTrue(matched["调拨目标仓代码"].eq("IL").all())
         self.assertEqual(matched["出库体积"].sum(), 55)
+
+    def test_legacy_fbx_partner_file_is_reclassified_without_losing_quantity_or_cost(self):
+        raw = pd.DataFrame([partner_row("IL"), partner_row("FBA", trip="TF", 目的地="Amazon-ONT8"),
+                            partner_row("FBX", trip="TX", 目的地="TikTok-FC10_ORD2")])
+        clean, _, _, _ = delivery_workflow.process_stage1_raw_files_to_cleaned_batches([("input.xlsx", raw)], "LA")
+        mask = clean["批次号"].eq("IL")
+        for col in ["主产品类型", "系统产品类型", "FBA/FBX"]:
+            clean.loc[mask, col] = "FBX"
+        clean.loc[mask, "批次目的地类型"] = "FBX平台仓"
+        clean.loc[mask, "FBX出库体积"] = clean.loc[mask, "出库体积"]
+        clean.loc[mask, "平台名称"] = "IL合作仓"
+        for idx in clean.index[mask]:
+            items = json.loads(clean.at[idx, "目的仓点分配明细"])
+            for item in items:
+                item.update({"对象类型": "FBX平台仓", "平台": "IL合作仓"})
+            clean.at[idx, "目的仓点分配明细"] = json.dumps(items, ensure_ascii=False)
+        matched = delivery_workflow.prepare_stage2_for_report(clean, pd.DataFrame(), "按月统计")
+        partner = matched.loc[mask].iloc[0]
+        self.assertEqual(partner["主产品类型"], "仓间调拨")
+        self.assertEqual(partner["FBA出库体积"], 0)
+        self.assertEqual(partner["FBX出库体积"], 0)
+        self.assertEqual(partner["出库体积"], 80)
+        self.assertEqual(partner["派送成本"], 4200)
+        self.assertEqual(json.loads(partner["目的仓点分配明细"])[0]["对象类型"], "其他")
+        pd.testing.assert_frame_equal(clean.loc[~mask, ["FBA出库体积", "FBX出库体积"]],
+                                      matched.loc[~mask, ["FBA出库体积", "FBX出库体积"]], check_dtype=False)
+        reports = delivery_match_adapter.build_split_stage2_report(delivery_workflow, clean, pd.DataFrame(), "按月统计")
+        self.assertEqual(reports["FBX平台仓货量"]["出库体积"].sum(), 80)
+        self.assertEqual(reports["FBA仓点分析"]["总出库体积"].sum(), 80)
+        self.assertEqual(reports["调拨数据"].iloc[0]["总出库体积"], 80)
 
 
 if __name__ == "__main__":

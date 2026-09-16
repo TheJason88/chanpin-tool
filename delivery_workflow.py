@@ -422,8 +422,6 @@ def _batch_destination(group):
     )
     if _clean_text(transfer_target) or any(keyword in transfer_text for keyword in ["调拨", "仓间", "调入"]):
         target = _clean_text(transfer_target)
-        if target == "IL合作仓" and group.get("调拨目标仓代码", pd.Series(dtype=object)).eq("IL").all():
-            return {"对象类型": "FBX平台仓", "平台": "IL合作仓", "仓点代码": "IL合作仓"}, ""
         if target:
             return {"对象类型": "其他", "平台": "联宇盈仓", "仓点代码": target}, ""
         return None, "调拨批次缺少可识别目标盈仓"
@@ -879,6 +877,13 @@ def prepare_stage2_for_report(cleaned_batches, match_df, period_type):
         )
     cleaned_input.attrs = {}
     matched = apply_manual_match_to_cleaned_batches(cleaned_input, match_df)
+    # SO matching can supply final-destination platform codes. The confirmed IL
+    # unloading endpoint remains an internal transfer, including for legacy FBX files.
+    il_mask = matched.get("调拨目标仓代码", pd.Series("", index=matched.index)).eq("IL")
+    if il_mask.any():
+        il_transfer = tool_common.apply_batch_transfer_destination_rules(matched.loc[il_mask])
+        for col in il_transfer.columns:
+            matched.loc[il_mask, col] = il_transfer[col]
     matched = apply_linehaul_rules_second_part(matched)
     matched = apply_region_rules_second_part(matched)
     matched = add_analysis_period(matched, period_type)
