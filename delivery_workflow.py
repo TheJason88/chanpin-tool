@@ -422,6 +422,8 @@ def _batch_destination(group):
     )
     if _clean_text(transfer_target) or any(keyword in transfer_text for keyword in ["调拨", "仓间", "调入"]):
         target = _clean_text(transfer_target)
+        if target == "IL合作仓" and group.get("调拨目标仓代码", pd.Series(dtype=object)).eq("IL").all():
+            return {"对象类型": "FBX平台仓", "平台": "IL合作仓", "仓点代码": "IL合作仓"}, ""
         if target:
             return {"对象类型": "其他", "平台": "联宇盈仓", "仓点代码": target}, ""
         return None, "调拨批次缺少可识别目标盈仓"
@@ -863,7 +865,9 @@ def add_analysis_period(df, period_type):
 
 
 def prepare_stage2_for_report(cleaned_batches, match_df, period_type):
-    cleaned_input = tool_common.apply_batch_transfer_destination_rules(cleaned_batches)
+    from il_partner_transfer import resolve_partner_endpoints
+    cleaned_input = resolve_partner_endpoints(cleaned_batches, match_df)
+    cleaned_input = tool_common.apply_batch_transfer_destination_rules(cleaned_input)
     transfer_errors = tool_common.transfer_override_error_rows(cleaned_input)
     if not transfer_errors.empty:
         audit_values = combine_unique(

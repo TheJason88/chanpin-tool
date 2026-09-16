@@ -18,12 +18,13 @@ try:
     import delivery_match_adapter
     import delivery_stage1_adapter
     import tool_common
+    import il_partner_transfer
     import delivery_runtime
     import delivery_destination_analysis
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-09-16-fba-site-aliases-v24"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-09-16-il-partner-endpoints-v26"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
@@ -31,6 +32,7 @@ if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSI
         processors = importlib.reload(processors)
         delivery_reference = importlib.reload(delivery_reference)
         tool_common = importlib.reload(tool_common)
+        il_partner_transfer = importlib.reload(il_partner_transfer)
         delivery_stage1_adapter = importlib.reload(delivery_stage1_adapter)
         delivery_match_adapter = importlib.reload(delivery_match_adapter)
         delivery_workflow = importlib.reload(delivery_workflow)
@@ -318,6 +320,7 @@ st.caption(
     "直送和拆送的联宇/非联宇判定完全一致；无法识别的派送方式仅保留在清洗明细中待确认。"
     "提柜时效：LA/NJ/SAV按Available时间到实际抵仓时间，DAL按提柜时间到实际抵仓时间；拆柜时效按实际抵仓时间到拆柜完成时间。"
     "派送二支持：按月统计 / 按周统计 / 按原文件时间范围；调拨数据按实际发货仓至调入盈仓汇总，包括LA至NJ/SAV/DAL及NJ至SAV。仅明确调拨业务进入该表，目的地名称含萨凡纳或盈仓的普通派送不自动视为调拨。FTL调拨缺车次的有效货量仍保留，但不计发车数及整车/每方价格样本；缺失或无效方数继续进入清洗审核。"
+    "LA至IL合作仓（610 Supreme Dr, Bensenville, IL 60106）按LA-IL列入调拨数据，目的地仍为FBX，按本段实际卸货终点统计。明确单卸/包车合作仓的批次保留全部批次货量，运单最终地址不同不影响。两卸备注需结合批次地址或运单匹配证据确定合作仓批次；仅在同车恰好两批且另一卸货点明确时允许排除确定。证据不足保留原目的地，并在匹配后批次数据的IL合作仓判断列标注待核对。不能仅凭IL州、60106邮编认定。沿用FTL调拨统计和有效整车成本样本规则。"
     "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
     "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
     "派送二的供应商货量比例按方数计算，全部供应商集中在同一单元格展示，空白或冲突供应商单列为未知/冲突。新增FBA仓点分析和FBA派送方式分析：货量全量累积；每方均价先计算有效批次单价再取平均，并展示有效成本方数与覆盖率。FTL多卸按同车次不同目的地识别，同目的地多批次合车计算整车均价；LTL始终单列。普通派送均值门槛统一为大车地板至少60方、大车卡板至少40方。供应商价格优先使用原始承运商成本，其他运营成本含装车费。派送时效只保留已识别FBA/FBX仓点，沿用有效FTL批次方数加权。调拨、干线的原有价格样本门槛及黄金批次规则保持不变。"

@@ -8,9 +8,10 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-09-16-fba-site-aliases-v24"
+RUNTIME_SCHEMA_VERSION = "2026-09-16-il-partner-endpoints-v26"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
+    "IL": {"name": "IL合作仓"},
     "LA": {"name": "LA盈仓"},
     "NJ": {"name": "NJ盈仓"},
     "SAV": {"name": "SAV盈仓"},
@@ -425,7 +426,7 @@ def _unique_batch_keys_from_row(row):
 
 
 def _transfer_target_from_row(row):
-    """识别明确的仓间调拨，按实际发货仓生成线路，包括NJ至SAV。"""
+    """识别明确的调拨，包含 NJ 至 SAV 及 LA 至指定 IL 合作仓。"""
     route = tool_common.transfer_route_from_row(row)
     return route.rsplit("-", 1)[-1] if route else ""
 
