@@ -9,6 +9,7 @@ import processors
 BASE_DIR = Path(__file__).resolve().parent
 REFERENCE_DIR = BASE_DIR / "reference_data"
 FBA_ZIP_PATH = REFERENCE_DIR / "delivery_fba_zip.csv"
+FBA_ALIASES_PATH = REFERENCE_DIR / "delivery_fba_aliases.csv"
 PLATFORM_ZIP_PATH = REFERENCE_DIR / "delivery_platform_zip.csv"
 
 
@@ -57,6 +58,24 @@ def load_fba_reference():
         code = str(row.get("FBA仓点代码", "")).upper().strip()
         if code:
             fba_map[code] = row.to_dict()
+    # Alternate site codes share location data, while retaining their own identity.
+    # Never replace a separately maintained new-site record or invent a missing address.
+    aliases = _read_reference_csv(FBA_ALIASES_PATH)
+    inherited = []
+    for _, alias in aliases.iterrows():
+        new_code = str(alias.get("新仓点代码", "")).upper().strip()
+        old_code = str(alias.get("原仓点代码", "")).upper().strip()
+        if not re.fullmatch(r"[A-Z]{3}[0-9]", new_code) or new_code in fba_map:
+            continue
+        original = fba_map.get(old_code)
+        if original is None:
+            continue
+        record = dict(original, FBA仓点代码=new_code, 目的地示例=f"Amazon-{new_code}",
+                      站点名称=f"Amazon/{new_code}", 原仓点代码=old_code)
+        fba_map[new_code] = record
+        inherited.append(record)
+    if inherited:
+        df = pd.concat([df, pd.DataFrame(inherited)], ignore_index=True).fillna("")
     return df, fba_map
 
 
@@ -97,6 +116,7 @@ def match_fba_reference(destination, existing_code=""):
             "邮编": _zip5(ref.get("邮编", "")),
             "州": str(ref.get("州", "")).upper().strip(),
             "名称": ref.get("站点名称", ""),
+            "地址": ref.get("地址", ""),
             "匹配方式": "内置FBA仓点邮编表",
         }
     return None
