@@ -865,7 +865,9 @@ def add_analysis_period(df, period_type):
 
 
 def prepare_stage2_for_report(cleaned_batches, match_df, period_type):
-    cleaned_input = tool_common.apply_batch_transfer_destination_rules(cleaned_batches)
+    from il_partner_transfer import resolve_partner_endpoints
+    cleaned_input = resolve_partner_endpoints(cleaned_batches, match_df)
+    cleaned_input = tool_common.apply_batch_transfer_destination_rules(cleaned_input)
     transfer_errors = tool_common.transfer_override_error_rows(cleaned_input)
     if not transfer_errors.empty:
         audit_values = combine_unique(

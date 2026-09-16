@@ -243,6 +243,8 @@ def infer_transfer_targets_from_row(row):
         if col not in row.index:
             continue
         targets = infer_transfer_targets_from_text(row.get(col, ""))
+        if col == "备注" and il_partner_remark_has_multiple_stops(row.get(col, "")):
+            targets = [target for target in targets if target != "IL"]
         if col in ["标准地址", "批次目的仓点"]:
             targets = [target for target in targets if target == "IL"]
         if "IL" in targets:
@@ -305,8 +307,14 @@ def is_il_partner_row(row):
         return False
     # Never use shared trip remarks or trip/batch IDs as destination evidence.
     return any(is_il_partner_text(row.get(col, "")) for col in [
-        "调入仓库", "实际目的地", "修正后目的地", "目的地", "标准地址", "批次目的仓点", "备注",
-    ])
+        "调入仓库", "实际目的地", "修正后目的地", "目的地", "标准地址", "批次目的仓点",
+    ]) or (is_il_partner_text(row.get("备注", ""))
+           and not il_partner_remark_has_multiple_stops(row.get("备注", "")))
+
+
+def il_partner_remark_has_multiple_stops(value):
+    text = _clean_transfer_text(value)
+    return is_il_partner_text(text) and bool(re.search(r"[+＋]|两卸|二卸|三卸|多卸|两处|两个目的地|安克|\bMI\b", text, re.I))
 
 
 def transfer_row_has_semantics(row):
@@ -316,7 +324,7 @@ def transfer_row_has_semantics(row):
     text = " ".join(
         _clean_transfer_text(row.get(col, ""))
         for col in TRANSFER_SEMANTIC_COLUMNS
-        if col in row.index
+        if col in row.index and not (col == "备注" and il_partner_remark_has_multiple_stops(row.get(col, "")))
     )
     return any(keyword in text for keyword in ["调拨", "仓间", "调入"])
 

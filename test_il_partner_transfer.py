@@ -7,6 +7,7 @@ import delivery_match_adapter
 import delivery_runtime
 import delivery_workflow
 import tool_common
+from il_partner_transfer import resolve_partner_endpoints, AUDIT_COLUMN
 
 
 def partner_row(batch, trip="T1", volume=80, cost=4000, **extra):
@@ -118,6 +119,63 @@ class IlPartnerTransferTests(unittest.TestCase):
         self.assertEqual(row["车次数"], 0)
         self.assertTrue(pd.isna(row.get("供应商平均整车价")))
         self.assertEqual(reports["FBX平台仓货量"]["出库体积"].sum(), 90)
+
+    def test_two_unloads_resolve_batch_by_address_without_using_so_volume(self):
+        remark = "Carrier IL安克(外)+IL合作仓(里)"
+        raw = pd.DataFrame([partner_row("PARTNER", volume=17, 目的地="商业地址-A", 备注=remark),
+                            partner_row("ANKER", volume=43, 目的地="商业地址-B", 备注=remark)])
+        clean, invalid, _, _ = delivery_workflow.process_stage1_raw_files_to_cleaned_batches([("input.xlsx", raw)], "LA")
+        self.assertTrue(invalid.empty)
+        self.assertFalse(clean["调拨目标仓代码"].eq("IL").any())
+        match = pd.DataFrame([
+            {"批次号": "PARTNER", "地址": "610 Supreme Dr", "城市": "Bensenville", "邮编": "60106", "方数": 12},
+            {"批次号": "PARTNER", "地址": "Another final destination", "邮编": "60487", "方数": 5},
+            {"批次号": "ANKER", "地址": "Other address", "邮编": "60440", "备注": "安克 CHI仓"},
+        ])
+        matched = delivery_workflow.prepare_stage2_for_report(clean, match, "按月统计")
+        il = matched.loc[matched["调拨目标仓代码"].eq("IL")]
+        self.assertEqual(il["批次号"].tolist(), ["PARTNER"])
+        self.assertEqual(il["出库体积"].sum(), 17)
+        self.assertEqual(matched.loc[matched["批次号"].eq("ANKER"), "批次目的仓点"].iloc[0], "商业地址-B")
+        report = delivery_runtime._build_transfer_report(matched)
+        self.assertEqual(report.iloc[0]["总出库体积"], 17)
+        self.assertTrue(pd.isna(report.iloc[0].get("供应商平均整车价")))
+        rerun = delivery_workflow.prepare_stage2_for_report(matched, pd.concat([match, match]), "按月统计")
+        self.assertEqual(rerun.loc[rerun["调拨目标仓代码"].eq("IL"), "出库体积"].sum(), 17)
+
+    def test_two_unloads_can_resolve_opposite_stop_but_never_unrelated_trip(self):
+        for label, evidence in [("安克", {"备注": "安克 CHI仓"}), ("MI", {"省/州": "MI"})]:
+            remark = f"IL合作仓(外)+{label}(里)"
+            raw = pd.DataFrame([partner_row("A", 目的地="普通地址-A", 备注=remark),
+                                partner_row("B", 目的地="普通地址-B", 备注=remark)])
+            match = pd.DataFrame([{"批次号": "B", **evidence}])
+            result = resolve_partner_endpoints(raw, match)
+            self.assertEqual(result.loc[result["调拨目标仓代码"].eq("IL"), "批次号"].tolist(), ["A"])
+            raw.loc[1, "车次号"] = "DIFFERENT"
+            result = resolve_partner_endpoints(raw, match)
+            self.assertTrue(result[AUDIT_COLUMN].str.startswith("待核对").all())
+
+    def test_ambiguous_and_conflicting_two_unloads_stay_unassigned(self):
+        raw = pd.DataFrame([partner_row("A", 目的地="普通地址-A", 备注="安克+IL合作仓"),
+                            partner_row("B", 目的地="普通地址-B", 备注="安克+IL合作仓")])
+        for match in [pd.DataFrame(), pd.DataFrame([
+            {"批次号": "A", "地址": "610 Supreme Dr IL 60106"},
+            {"批次号": "B", "地址": "610 Supreme Dr IL 60106"}])]:
+            result = tool_common.apply_batch_transfer_destination_rules(resolve_partner_endpoints(raw, match))
+            self.assertFalse(result["调拨目标仓代码"].eq("IL").any())
+            self.assertTrue(result[AUDIT_COLUMN].str.startswith("待核对").all())
+        raw.loc[1, "调入仓库"] = "NJ"
+        result = resolve_partner_endpoints(raw, pd.DataFrame([{"批次号": "B", "备注": "安克"}]))
+        self.assertEqual(result.loc[1, "调入仓库"], "NJ")
+
+    def test_partner_full_truck_ignores_final_so_destination_and_keeps_both_batches(self):
+        raw = pd.DataFrame([partner_row("A", volume=20, 目的地="TikTok-FC10_ORD2", 备注="IL合作仓整车卡板"),
+                            partner_row("B", volume=35, 目的地="TikTok-IND3", 备注="IL合作仓整车卡板")])
+        match = pd.DataFrame([{"批次号": "A", "地址": "Other final address", "邮编": "60440"}])
+        clean, _, _, _ = delivery_workflow.process_stage1_raw_files_to_cleaned_batches([("input.xlsx", raw)], "LA")
+        matched = delivery_workflow.prepare_stage2_for_report(clean, match, "按月统计")
+        self.assertTrue(matched["调拨目标仓代码"].eq("IL").all())
+        self.assertEqual(matched["出库体积"].sum(), 55)
 
 
 if __name__ == "__main__":
