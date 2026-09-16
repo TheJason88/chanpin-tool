@@ -23,12 +23,13 @@ try:
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-09-14-transfer-supplier-average-v23"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-09-16-fba-site-aliases-v24"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
         # 仅当运行时版本不一致时重新加载，保证新表结构与新统计规则同步生效。
         processors = importlib.reload(processors)
+        delivery_reference = importlib.reload(delivery_reference)
         tool_common = importlib.reload(tool_common)
         delivery_stage1_adapter = importlib.reload(delivery_stage1_adapter)
         delivery_match_adapter = importlib.reload(delivery_match_adapter)
