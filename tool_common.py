@@ -5,7 +5,8 @@ from datetime import datetime
 from io import BytesIO
 
 import pandas as pd
-from openpyxl.styles import PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.comments import Comment
 from openpyxl.utils import get_column_letter
 
 import processors
@@ -855,7 +856,7 @@ def clean_for_excel_output(df, sheet_type=""):
             out[col] = pd.to_numeric(out[col], errors="coerce").round(0).astype("Int64")
     if "车次数" in out.columns:
         values = pd.to_numeric(out["车次数"], errors="coerce")
-        if sheet_type in ["成本", "成本FTL", "分类型价格参考"]:
+        if sheet_type in ["成本", "成本FTL", "分类型价格参考", "分类价格参考"]:
             out["车次数"] = values.round(2)
         else:
             out["车次数"] = values.round(0).astype("Int64")
@@ -934,6 +935,52 @@ def _format_golden_standard_supplier_colors(ws):
         )
 
 
+def _format_delivery_business_sheet(ws):
+    """Readable headings and units without changing any exported values."""
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.print_title_rows = "1:1"
+    ws.row_dimensions[1].height = 34
+    for cell in ws[1]:
+        cell.fill = PatternFill("solid", fgColor="17365D")
+        cell.font = Font(name="Microsoft YaHei", color="FFFFFF", bold=True, size=10)
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+        header = str(cell.value or "")
+        if "总成本÷总方数" in header:
+            cell.comment = Comment("沿用原价格参考的有效成本样本，按对应总成本÷总方数计算；不等于批次单价的算术平均。", "美盈数据工具")
+        elif "单批次整车" in header:
+            cell.comment = Comment("沿用原分类价格参考的单批次整车样本；FBA派送方式分析允许同目的地多批次合车，两者样本不同。", "美盈数据工具")
+        elif "供应商" in header and "成本" in header:
+            cell.comment = Comment("优先采用原始承运商成本，不含仓内地板装车费。", "美盈数据工具")
+        elif header in {"平均派送时效", "P80派送时效"}:
+            cell.comment = Comment("单位：天。按有效批次方数加权，LTL无需车次号，FTL仍需真实车次号。", "美盈数据工具")
+        col = get_column_letter(cell.column)
+        ws.column_dimensions[col].width = 42 if any(word in header for word in ["供应商", "分布", "派送方式货量", "派送方式占比"]) else min(max(len(header) * 1.6 + 2, 13), 27)
+        for row_idx in range(2, ws.max_row + 1):
+            data = ws.cell(row_idx, cell.column)
+            data.font = Font(name="Microsoft YaHei", size=10, color="243746")
+            data.alignment = Alignment(vertical="top", wrap_text=True)
+            if row_idx % 2 == 0:
+                data.fill = PatternFill("solid", fgColor="F0F5FA")
+            if isinstance(data.value, (int, float)):
+                if "占比" in header or "覆盖率" in header:
+                    data.number_format = "0.00%"
+                elif "时效" in header and "次数" not in header and "方数" not in header:
+                    data.number_format = '0.00" 天"'
+                elif any(word in header for word in ["成本", "价格", "整车价", "每方", "平均价"]) and not any(word in header for word in ["方数", "板数", "批次数"]):
+                    data.number_format = '"$"#,##0.00'
+                elif any(word in header for word in ["排名", "批次数", "样本数", "发车数"]):
+                    data.number_format = "0"
+                else:
+                    data.number_format = "#,##0.00"
+    for row_idx in range(2, ws.max_row + 1):
+        lines = max((sum(2 if ord(ch) > 127 else 1 for ch in str(cell.value or "")) /
+                     max(ws.column_dimensions[get_column_letter(cell.column)].width - 2, 1)
+                     for cell in ws[row_idx]), default=1)
+        ws.row_dimensions[row_idx].height = min(409, max(30, (int(lines) + 1) * 15))
+    ws.freeze_panes = "C2"
+
+
 def write_sheets_to_excel(sheets):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -944,6 +991,8 @@ def write_sheets_to_excel(sheets):
             ws = writer.book[safe_name]
             _force_literal_text_cells(ws)
             _format_excel_ws(ws)
+            if safe_name in {"派送总览", "FBA仓点总览", "FBX仓点总览", "FBA派送方式分析", "分类价格参考", "调拨数据", "干线数据", "黄金标准数据"}:
+                _format_delivery_business_sheet(ws)
             if safe_name == "黄金标准数据":
                 _format_golden_standard_supplier_colors(ws)
     output.seek(0)
