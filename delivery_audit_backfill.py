@@ -419,6 +419,8 @@ def read_stage1_or_stage2_with_audit_updates(excel_file):
 
     excel_file.seek(0)
     xls = pd.ExcelFile(excel_file)
+    if "派送总览" in xls.sheet_names and not any(name in xls.sheet_names for name in MAIN_SHEET_CANDIDATES):
+        raise ValueError("这是精简业务报告，不含批次明细。请上传同次生成的‘审核明细’文件，或原派送一结果。")
     sheet_name = xls.sheet_names[0]
     for candidate in MAIN_SHEET_CANDIDATES:
         if candidate in xls.sheet_names:

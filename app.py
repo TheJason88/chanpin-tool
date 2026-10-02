@@ -21,10 +21,11 @@ try:
     import il_partner_transfer
     import delivery_runtime
     import delivery_destination_analysis
+    import delivery_report_export
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-10-02-ltl-timing-v28"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-10-02-compact-reports-v29"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
@@ -38,6 +39,7 @@ if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSI
         delivery_workflow = importlib.reload(delivery_workflow)
         delivery_runtime = importlib.reload(delivery_runtime)
         delivery_destination_analysis = importlib.reload(delivery_destination_analysis)
+        delivery_report_export = importlib.reload(delivery_report_export)
     except Exception as exc:
         _dependency_error = exc
 
@@ -296,7 +298,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
     if period_type == ORIGINAL_FILE_PERIOD:
         st.info("派送二按原文件时间范围：货量、发车、时效及所有派送成本统一按批次出库时间范围归期。")
     else:
-        st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。货量、发车、时效及所有派送成本统一按批次出库时间归期。成本输出为“每方价格参考”和“分类型价格参考”；其中LTL不显示整车价格。")
+        st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。货量、发车、时效及所有派送成本统一按批次出库时间归期。业务报告最多8张表，仓点货量、价格和时效合并展示；审核明细单独下载。LTL不显示整车价格。")
 elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
     time_dimension = st.selectbox(
         "3. 选择统计时间指标",
@@ -323,11 +325,11 @@ st.caption(
     "LA至IL合作仓（610 Supreme Dr, Bensenville, IL 60106）按LA-IL列入调拨数据，与其他盈仓统一归为仓间调拨，不计入FBA或FBX货量，按本段实际卸货终点统计。明确单卸/包车合作仓的批次保留全部批次货量，运单最终地址不同不影响。两卸备注需结合批次地址或运单匹配证据确定合作仓批次；仅在同车恰好两批且另一卸货点明确时允许排除确定。证据不足保留原目的地，并在匹配后批次数据的IL合作仓判断列标注待核对。不能仅凭IL州、60106邮编认定。沿用FTL调拨统计和有效整车成本样本规则。"
     "派送模块支持目的地类型：全部 / FBA / FBX；FBA=Amazon/FBA仓，FBX=非FBA目的地。"
     "派送二选择FBA时不输出FBX平台仓货量；选择FBX时不输出FBA货量排行；选择全部时两类专项表均输出。"
-    "派送二的供应商货量比例按方数计算，全部供应商集中在同一单元格展示，空白或冲突供应商单列为未知/冲突。新增FBA仓点分析和FBA派送方式分析：货量全量累积；每方均价先计算有效批次单价再取平均，并展示有效成本方数与覆盖率。FTL多卸按同车次不同目的地识别，同目的地多批次合车计算整车均价；LTL始终单列。普通派送均值门槛统一为大车地板至少60方、大车卡板至少40方。供应商价格优先使用原始承运商成本，其他运营成本含装车费。派送时效只保留已识别FBA/FBX仓点，按有效FTL/LTL批次方数加权。调拨、干线的原有价格样本门槛及黄金批次规则保持不变。"
+    "派送二的供应商货量比例按方数计算，全部供应商集中在同一单元格展示，空白或冲突供应商单列为未知/冲突。FBA仓点总览和FBA派送方式分析：货量全量累积；每方均价先计算有效批次单价再取平均，并展示有效成本方数与覆盖率。FTL多卸按同车次不同目的地识别，同目的地多批次合车计算整车均价；LTL始终单列。普通派送均值门槛统一为大车地板至少60方、大车卡板至少40方。供应商价格优先使用原始承运商成本，其他运营成本含装车费。派送时效只保留已识别FBA/FBX仓点，按有效FTL/LTL批次方数加权。调拨、干线的原有价格样本门槛及黄金批次规则保持不变。"
     "仓点成本、干线和调拨均从清洗后有效数据集并行独立取数；干线或调拨标签不会把有效FBA/FBX批次从每方价格参考和分类型价格参考中排除。"
     "调拨目的地优先于本批次的普通目的仓识别，但只在该批次内覆盖；同一车次的其他FBA/FBX批次保留各自目的地，支持一车多卸。调拨批次目标仓缺失或同批次目标冲突时转入无效审核，不回退为FBA/FBX。"
     "派送一按批次输出：目的仓、区域、方数、成本、出库时间和签收时间均保留批次原值；真实车次只用于整车统一FTL/LTL、计算整车总量和批次车份额。有批次号但缺车次号时，仍按该批次原始运输类型、车型和装车类型正常分类，但不计发车或整车价；LTL时效不要求车次号，FTL缺车次号不计时效。"
-    "派送二的货量、发车、时效和全部派送成本统一按批次出库时间归期。既有价格参考仍输出为每方价格参考和分类型价格参考；前者按FBA/FBX目的地仓点汇总，后者合并大车地板、大车卡板、小车和LTL。只有原始派送成本大于0的批次进入成本的方数分母和成本分子；零成本批次不稀释每方价格。既有价格参考的FTL整车价格保留单批次整车样本；新增FBA分析按不同目的地判定多卸，同目的地多批次允许合车计算。既有参考价中的总成本/总方数与新表有效批次单价的算术平均分开展示。LTL及缺车次批次的整车价格留空。批次基础派送成本不按整车总成本二次分摊；FTL大车地板另按批次精确车份额×$200增加装车费。"
+    "派送二的货量、发车、时效和全部派送成本统一按批次出库时间归期。每方价格参考合并至FBA/FBX仓点总览，分类价格参考保留大车地板、大车卡板、小车和LTL的原有有效样本口径。只有原始派送成本大于0的批次进入成本的方数分母和成本分子；零成本批次不稀释每方价格。既有价格参考的FTL整车价格保留单批次整车样本；新增FBA分析按不同目的地判定多卸，同目的地多批次允许合车计算。既有参考价中的总成本/总方数与新表有效批次单价的算术平均分开展示。LTL及缺车次批次的整车价格留空。批次基础派送成本不按整车总成本二次分摊；FTL大车地板另按批次精确车份额×$200增加装车费。"
     "调拨数据和干线数据在右侧集中列示各供应商平均整车成本及使用比例，供应商沿用单批次整车样本筛选，但成本优先使用原始派送成本（缺失时回退派送成本），不含仓内装车费。调拨数据另列数值型供应商平均整车价：合并地板、卡板等有效整车样本，按真实车次去重，对原始供应商成本求平均，等价于按未四舍五入的供应商车次比例加权；供应商名称缺失但成本有效的车次仍参与。其他每车、平均整车价、P80整车价和每方成本仍使用含装车费的派送成本。空白或冲突供应商计入使用比例分母但不强行归属。结果表不再重复输出批次号、车次号等可在清洗明细中查询的审计列。"
     "派送二另输出黄金标准数据：仅保留一批次对应一真实车次、最终FTL大车且原始派送成本大于0的完整批次；地板装车要求80至120CBM，卡板装车要求40至80CBM，边界值均计入。该表仅输出批次、车次、目的地及归属、车辆装载、成本和时间等核心字段，并按派送卡车供应商使用不同浅色。"
     "目的仓点、区域和干线发车数先汇总批次精确车份额，再按四舍五入显示整数；派送时效按批次出库至批次签收计算，并按有效批次方数加权求平均和P80。LTL参与时效且不要求车次号；FTL缺车次、无效方数、缺失/异常时间以及备注含‘里’或‘外’的批次不参与时效。旧版派送一文件中的LTL空白时效会根据出库、签收时间重新计算。"
@@ -403,7 +405,7 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
             st.exception(e)
 
 elif analysis_module == DELIVERY_STAGE2_MODULE:
-    stage1_file = st.file_uploader("5A. 上传派送一结果，或上传已补充邮编异常审核的派送二报告", type=["xlsx", "xls"], key="stage1_result_file")
+    stage1_file = st.file_uploader("5A. 上传派送一结果、派送二审核明细（可补邮编），或旧版派送二完整报告", type=["xlsx", "xls"], key="stage1_result_file")
     match_files = st.file_uploader(
         "5B. 上传人工匹配文件（可选，可多选；鲲运导出列表也可，需含批次号 + 邮编/目的地邮编/标准邮编，可含省/州）",
         type=["xlsx", "xls"],
@@ -413,12 +415,15 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
     if match_files:
         st.success(f"5B已上传 {len(match_files)} 个匹配文件。结构相同会自动按行合并。")
 
+    export_scope = (warehouse, delivery_destination_type, period_type,
+                    getattr(stage1_file, "file_id", None), tuple(getattr(f, "file_id", None) for f in (match_files or [])))
     if st.button("开始匹配并生成派送分析报告", type="primary", key="run_delivery_stage2"):
+        st.session_state.pop("delivery_stage2_exports", None)
         try:
             if not selection_complete:
                 st.warning("请先把仓点、分析模块、统计周期都选择完整。")
             elif not stage1_file:
-                st.warning("请先上传派送一结果或已补充邮编异常审核的派送二报告。")
+                st.warning("请先上传派送一结果、审核明细或旧版派送二完整报告。")
             else:
                 audit_helpers = _load_backfill_helpers()
                 cleaned_batches = audit_helpers.read_stage1_or_stage2_with_audit_updates(stage1_file)
@@ -431,15 +436,27 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
                     metrics = delivery_workflow.process_stage2_analysis(cleaned_batches, match_df, period_type=period_type)
                 else:
                     metrics = build_stage2_report_for_destination(cleaned_batches, match_df=match_df, period_type=period_type, destination_type=delivery_destination_type)
-                report_sheets = list(metrics.keys())
-                st.success("派送分析报告已生成，详细结果请下载Excel查看。")
-                st.write(f"报告结构：{'、'.join(report_sheets)}。当前目的地类型：{delivery_destination_type}")
-                output = tool_common.write_sheets_to_excel(metrics)
+                business, audit = delivery_report_export.build_delivery_exports(metrics)
                 file_name = tool_common.build_output_filename(warehouse, DELIVERY_STAGE2_MODULE, delivery_destination_type, period_type)
-                st.download_button("下载派送分析报告 Excel", output, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_delivery_stage2")
+                st.session_state["delivery_stage2_exports"] = {
+                    "scope": export_scope, "sheets": list(business), "filename": file_name,
+                    "business": tool_common.write_sheets_to_excel(business).getvalue(),
+                    "audit": tool_common.write_sheets_to_excel(audit).getvalue(),
+                }
         except Exception as e:
             st.error("派送数据匹配及分析失败，请检查派送一结果文件、匹配文件字段或批次号是否一致。")
             st.exception(e)
+
+    saved = st.session_state.get("delivery_stage2_exports")
+    if saved and saved["scope"] == export_scope:
+        st.success(f"报告已生成：{len(saved['sheets'])} 张业务表，审核明细单独下载。")
+        st.write(f"业务报告：{'、'.join(saved['sheets'])}")
+        st.download_button("下载派送分析报告 Excel", saved["business"], saved["filename"],
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_delivery_stage2")
+        st.download_button("下载审核明细 Excel（批次、车次、邮编补录）", saved["audit"],
+                           saved["filename"].removesuffix(".xlsx") + "_审核明细.xlsx",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_delivery_stage2_audit")
+        st.caption("日常查看业务报告；核对批次或补邮编时使用审核明细。补录后将审核明细文件上传至5A。")
 
 else:
     uploaded_files = st.file_uploader(

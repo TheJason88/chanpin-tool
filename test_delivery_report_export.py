@@ -1,0 +1,105 @@
+from io import BytesIO
+import unittest
+
+import pandas as pd
+from openpyxl import load_workbook
+
+import delivery_audit_backfill as backfill
+import delivery_match_adapter
+import delivery_report_export as export
+import delivery_runtime
+import delivery_workflow
+import tool_common
+from test_destination_analysis import batch
+
+
+class CompactExportTests(unittest.TestCase):
+    def reports(self):
+        delivery_runtime.bootstrap(delivery_workflow)
+        backfill.apply_linehaul_market_rules()
+        backfill.apply_stage2_linehaul_sheet_patch()
+        rows = pd.DataFrame([
+            batch("A", "T1", 60, 600),
+            batch("B", "", 20, 100, 标准运输类型="LTL", 是否FTL发车=False),
+            batch("C", "T3", 80, 800, kind="FBX平台仓", code="16号仓"),
+            batch("D", "T4", 80, 800, kind="仓间调拨", code="NJ", 调入仓库="NJ", 出库类型="调拨"),
+        ])
+        return delivery_match_adapter.build_split_stage2_report(delivery_workflow, rows, pd.DataFrame(), "按月统计")
+
+    def test_compact_values_and_protected_tables(self):
+        reports = self.reports()
+        snapshots = {k: v.copy(deep=True) for k, v in reports.items()}
+        business, audit = export.build_delivery_exports(reports)
+        self.assertLessEqual(len(business), 8)
+        self.assertEqual(list(audit), list(export.AUDIT_SHEETS) + ["规则说明"])
+        self.assertNotIn("邮编异常审核", business)
+        fba = business["FBA仓点总览"].iloc[0]
+        old = reports["FBA仓点分析"].iloc[0]
+        self.assertEqual(fba["总出库体积"], old["总出库体积"])
+        self.assertEqual(fba["批次平均每方成本"], old["平均每方成本"])
+        reference = reports["每方价格参考"].query("对象类型 == 'FBA'").iloc[0]
+        self.assertEqual(fba["每方参考价（总成本÷总方数）"], reference["每方价格参考"])
+        self.assertNotEqual(fba["每方参考价（总成本÷总方数）"], fba["批次平均每方成本"])
+        timing = reports["派送时效"].query("目的地类型 == 'FBA'").iloc[0]
+        for col in ["平均派送时效", "P80派送时效", "有效时效方数"]:
+            self.assertEqual(fba[col], timing[col])
+        for name in ["FBA派送方式分析", "调拨数据", "干线数据", "黄金标准数据"]:
+            if name in business:
+                pd.testing.assert_frame_equal(business[name], reports[name])
+        for name in export.AUDIT_SHEETS:
+            pd.testing.assert_frame_equal(audit[name], reports[name])
+        for name in reports:
+            pd.testing.assert_frame_equal(reports[name], snapshots[name])
+
+    def test_excel_roundtrip_and_explicit_wrong_file_error(self):
+        business, audit = export.build_delivery_exports(self.reports())
+        out = tool_common.write_sheets_to_excel(business)
+        wb = load_workbook(out)
+        self.assertEqual(wb.sheetnames, list(business))
+        self.assertEqual(wb["FBA仓点总览"].freeze_panes, "C2")
+        self.assertTrue(wb["FBA仓点总览"].auto_filter.ref)
+        out.seek(0)
+        with self.assertRaisesRegex(ValueError, "审核明细"):
+            backfill.read_stage1_or_stage2_with_audit_updates(out)
+        main = audit["派送二_匹配后批次数据"]
+        audit["邮编异常审核"] = pd.DataFrame([{
+            "批次号集合": "A", "补充标准邮编": "07001", "补充目的州": "NJ",
+        }])
+        reread = backfill.read_stage1_or_stage2_with_audit_updates(tool_common.write_sheets_to_excel(audit))
+        self.assertEqual(len(reread), len(main))
+        self.assertIn("07001", str(reread.loc[reread["批次号集合"].eq("A"), "标准邮编集合"].iloc[0]))
+        regenerated = delivery_match_adapter.build_split_stage2_report(delivery_workflow, reread, pd.DataFrame(), "按月统计")
+        next_business, _ = export.build_delivery_exports(regenerated)
+        self.assertEqual(next_business["FBA仓点总览"]["总出库体积"].sum(), business["FBA仓点总览"]["总出库体积"].sum())
+
+    def test_platform_and_period_identity_never_cross_joins(self):
+        rows = pd.DataFrame([{"仓库": "LA", "统计周期": month, "平台仓": platform, "FBX代码": "16号仓",
+                              "出库体积": volume, "排名": 1, "占比": 1}
+                             for month, platform, volume in [("8月", "A", 10), ("8月", "B", 20), ("9月", "A", 30)]])
+        business, _ = export.build_delivery_exports({"FBX平台仓货量": rows})
+        self.assertEqual(len(business["FBX仓点总览"]), 3)
+        self.assertEqual(business["FBX仓点总览"]["总出库体积"].sum(), 60)
+        self.assertNotIn("FBA仓点总览", business)
+        self.assertNotIn("调拨数据", business)
+
+    def test_duplicate_keys_fail_instead_of_multiplying_volume(self):
+        rows = pd.DataFrame([{"仓库": "LA", "统计周期": "8月", "FBA仓点": "ONT8", "出库体积": 10}] * 2)
+        with self.assertRaisesRegex(ValueError, "重复键"):
+            export.build_delivery_exports({"FBA货量排行": rows})
+
+    def test_fractional_truck_count_and_distinct_prices_survive_excel(self):
+        rows = pd.DataFrame([{"仓库": "LA", "统计周期": "8月", "成本计算类型": "大车卡板",
+            "总出库体积": 10, "细分货量方数": 10, "车次数": 0.5,
+            "整车价格": 200, "平均整车价": 200, "P80整车价": 250,
+            "每方成本": 12, "每方平均价": 15}])
+        business, _ = export.build_delivery_exports({"分类型价格参考": rows})
+        result = pd.read_excel(tool_common.write_sheets_to_excel(business), sheet_name="分类价格参考")
+        self.assertEqual(result.iloc[0]["车次数"], 0.5)
+        self.assertEqual(result.iloc[0]["批次平均每方成本"], 15)
+        self.assertEqual(result.iloc[0]["每方参考价（总成本÷总方数）"], 12)
+        self.assertNotIn("整车价格", result)
+        self.assertNotIn("细分货量方数", result)
+
+
+if __name__ == "__main__":
+    unittest.main()
