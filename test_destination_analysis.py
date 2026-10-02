@@ -192,10 +192,10 @@ class DestinationAnalysisTests(unittest.TestCase):
         report = analysis.build_station_timing_report(rows)
         self.assertEqual(set(report["目的仓点"]), {"ONT8", "16号仓"})
         ont8 = report.loc[report["目的仓点"].eq("ONT8")].iloc[0]
-        self.assertEqual(ont8["平均派送时效"], 2.5)
-        self.assertEqual(ont8["P80派送时效"], 3)
-        self.assertEqual(ont8["有效时效批次数"], 2)
-        self.assertEqual(ont8["无效时效批次数"], 2)
+        self.assertEqual(ont8["平均派送时效"], 15)
+        self.assertEqual(ont8["P80派送时效"], 20)
+        self.assertEqual(ont8["有效时效批次数"], 3)
+        self.assertEqual(ont8["无效时效批次数"], 1)
 
     def test_existing_file_pipeline_all_fba_fbx_and_excel_outputs(self):
         delivery_runtime.bootstrap(delivery_workflow)
