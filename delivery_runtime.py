@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-09-16-il-internal-transfer-v27"
+RUNTIME_SCHEMA_VERSION = "2026-10-02-ltl-timing-v28"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "IL": {"name": "IL合作仓"},
@@ -93,6 +93,8 @@ def _standardize_warehouse_value(value):
 def _is_ltl_series(df):
     if df is None or df.empty:
         return pd.Series(False, index=getattr(df, "index", []))
+    if "标准运输类型" in df.columns:
+        return df["标准运输类型"].astype(str).str.strip().str.upper().eq("LTL")
     mask = pd.Series(False, index=df.index)
     for col in ["标准运输类型", "运输类型", "运输方式", "派送方式", "装车类型标准值"]:
         if col not in df.columns:
@@ -146,7 +148,7 @@ def _clean_delivery_time_columns(df):
     派送时效清洗口径：
     - 出库时间/签收时间任一缺失，派送时效留空，不再显示0；
     - 派送时效<=0视为无效，留空；
-    - LTL不参与派送时效统计，时效留空；
+    - LTL按出库至签收重新计算，兼容旧版清洗文件中的空白时效；
     - 有派送区域时，按区域阈值清洗：
       Local>3天；LA中短途>7天、LA美中>10天、LA美东/美南>15天；
       NJ/SAV/DAL中距离>6天、远距离>10天；
@@ -161,14 +163,17 @@ def _clean_delivery_time_columns(df):
     end_col = _find_existing_col(out, END_TIME_CANDIDATES)
 
     duration = pd.to_numeric(out["派送时效"], errors="coerce")
+    start_time = pd.to_datetime(out[start_col], errors="coerce") if start_col else None
+    end_time = pd.to_datetime(out[end_col], errors="coerce") if end_col else None
+    if start_time is not None and end_time is not None:
+        ltl_duration = (end_time - start_time).dt.total_seconds() / 86400
+        duration = duration.where(~_is_ltl_series(out), ltl_duration)
     thresholds = _delivery_time_threshold_series(out)
-    invalid = duration.isna() | (duration <= 0) | duration.gt(thresholds) | _is_ltl_series(out)
+    invalid = duration.isna() | (duration <= 0) | duration.gt(thresholds)
 
     if start_col:
-        start_time = pd.to_datetime(out[start_col], errors="coerce")
         invalid = invalid | start_time.isna()
     if end_col:
-        end_time = pd.to_datetime(out[end_col], errors="coerce")
         invalid = invalid | end_time.isna()
 
     out["派送时效"] = duration.mask(invalid)
@@ -402,7 +407,7 @@ def _patch_stage2_original_file_period(delivery_workflow_module):
 
 
 def _patch_stage2_prepare_time_rules(delivery_workflow_module):
-    """派送二在生成报表前重洗时效：缺日期/0时效/LTL/区域超阈值均不参与均值与P80。"""
+    """派送二恢复LTL日期时效，并排除缺日期、非正时效和区域超阈值。"""
     current_func = delivery_workflow_module.prepare_stage2_for_report
     if getattr(current_func, "_cleans_delivery_time_v2", False):
         return delivery_workflow_module

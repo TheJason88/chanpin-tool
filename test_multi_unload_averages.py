@@ -1487,7 +1487,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(exported_row["平台仓"], "谷仓")
         self.assertEqual(exported_row["FBX代码"], "16号仓")
 
-    def test_batch_volume_weighted_time_and_p80_exclude_ltl_missing_trip_and_marked_rows(self):
+    def test_batch_volume_weighted_time_and_p80_include_ltl_exclude_ftl_missing_trip_and_marked_rows(self):
         rows = pd.DataFrame([
             {
                 "仓库": "LA", "统计周期": "2026-07", "派送区域": "Local",
@@ -1532,10 +1532,10 @@ class MultiUnloadAverageTests(unittest.TestCase):
             (report["指标名称"] == "目的仓点派送时效")
             & (report["维度值"] == "ONT8")
         ].iloc[0]
-        self.assertEqual(timing["平均派送时效"], 2.5)
+        self.assertAlmostEqual(timing["平均派送时效"], 15 / 7)
         self.assertEqual(timing["P80派送时效"], 3)
-        self.assertEqual(timing["有效时效批次数"], 2)
-        self.assertEqual(timing["有效时效方数"], 40)
+        self.assertEqual(timing["有效时效批次数"], 3)
+        self.assertEqual(timing["有效时效方数"], 140)
 
     def test_destination_dispatch_rounds_only_after_exact_share_sum(self):
         rows = []
@@ -1692,7 +1692,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(fbx.iloc[0]["派送卡车使用比例"], "JTeam INC 60.00%；供应商未知/冲突 40.00%")
         self.assertEqual(fbx.columns[-1], "派送卡车使用比例")
 
-    def test_missing_trip_keeps_batch_cost_but_excludes_dispatch_time_and_truck_price(self):
+    def test_missing_trip_keeps_cost_and_ltl_time_but_excludes_dispatch_and_truck_price(self):
         detail = pd.DataFrame([
             {
                 "原始行号": 2, "仓库": "LA", "标准运输类型": "FTL", "车次号": "",
@@ -1734,8 +1734,11 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertTrue(pd.isna(cost_rows.loc["LTL", "整车价格"]))
         self.assertFalse((metrics["发车量"]["指标名称"] == "目的仓点发车数").any())
         timing = metrics["派送时效"]
-        self.assertTrue(timing.empty or "平均派送时效" not in timing.columns or timing["平均派送时效"].isna().all())
-        self.assertTrue(timing.empty or "P80派送时效" not in timing.columns or timing["P80派送时效"].isna().all())
+        self.assertEqual(timing.iloc[0]["平均派送时效"], 1)
+        self.assertEqual(timing.iloc[0]["P80派送时效"], 1)
+        self.assertEqual(timing.iloc[0]["有效时效批次数"], 1)
+        self.assertEqual(timing.iloc[0]["有效时效方数"], 10)
+        self.assertEqual(timing.iloc[0]["无效时效批次数"], 1)
 
     def test_original_file_period_uses_outbound_range_for_operations_and_cost(self):
         delivery_runtime.bootstrap(delivery_workflow)

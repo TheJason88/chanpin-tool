@@ -999,13 +999,16 @@ def volume_weighted_p80(df, value_col="派送时效", weight_col="出库体积")
 
 
 def timing_sample_rows(df):
-    """时效只看有真实车次的最终FTL批次；LTL、缺车次、无效时效及里/外备注均排除。"""
+    """LTL无需车次，FTL须有真实车次；无效时效/方数及里外备注仍排除。"""
     if df is None or df.empty:
         return df.copy()
     out = df.copy()
     if "标准运输类型" in out.columns:
-        mask = out["标准运输类型"].astype(str).str.upper().eq("FTL")
+        transport = out["标准运输类型"].astype(str).str.strip().str.upper()
+        mask = transport.eq("FTL")
+        ltl = transport.eq("LTL")
     else:
+        ltl = pd.Series(False, index=out.index)
         mask = out.get("是否FTL发车", pd.Series(False, index=out.index)).apply(
             lambda value: value is True or str(value).strip().lower() in {"true", "1", "是", "yes"}
         )
@@ -1015,7 +1018,7 @@ def timing_sample_rows(df):
         )
     else:
         has_trip = out.get("车次号", pd.Series("", index=out.index)).apply(lambda value: bool(_clean_text(value)))
-    mask &= has_trip
+    mask = (mask & has_trip) | ltl
     duration = pd.to_numeric(out.get("派送时效", pd.Series(np.nan, index=out.index)), errors="coerce")
     volume = pd.to_numeric(out.get("出库体积", pd.Series(np.nan, index=out.index)), errors="coerce")
     mask &= duration.notna() & duration.gt(0) & volume.gt(0)
@@ -1037,7 +1040,7 @@ def _append_weighted_timing_row(rows, metric_name, warehouse, period, dimension_
         dimension_value,
         avg_time=volume_weighted_average(sample),
         p80_time=volume_weighted_p80(sample),
-        note="按有效FTL批次方数加权；LTL、缺车次、无效时效及备注含‘里/外’批次不参与",
+        note="按有效FTL/LTL批次方数加权；LTL无需车次；FTL缺车次、无效时效/方数及备注含‘里/外’批次不参与",
     )
     row["有效时效批次数"] = int(len(sample))
     row["有效时效方数"] = float(pd.to_numeric(sample.get("出库体积", 0), errors="coerce").fillna(0).sum()) if not sample.empty else 0.0
