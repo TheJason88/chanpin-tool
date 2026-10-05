@@ -1107,12 +1107,24 @@ def build_sheet1_volume_dispatch_time_report(df):
             row["精确车份额"] = exact_count
             row["备注"] = "批次车份额汇总后按四舍五入取整；不逐批次取整"
             rows.append(row)
-        for station, sg in ftl_group.groupby("批次目的仓点", dropna=False):
+        if "平台名称" in ftl_group:
+            ftl_group["_发车平台名称"] = ftl_group.apply(
+                lambda row: str(row.get("平台名称", "")).strip()
+                if row.get("主产品类型") == "FBX"
+                and not processors.is_blank(row.get("平台名称", ""))
+                and str(row.get("平台名称", "")).strip() != "非平台/未知"
+                else "",
+                axis=1,
+            )
+        else:
+            ftl_group["_发车平台名称"] = ""
+        for (station, platform), sg in ftl_group.groupby(["批次目的仓点", "_发车平台名称"], dropna=False):
             if processors.is_blank(station):
                 continue
             exact_count = float(sg["批次车份额"].sum())
             count = business_round_vehicle_count(exact_count)
             row = report_row("2.发车量", "目的仓点发车数", warehouse, period, "目的仓点", station, value=count, unit="车", dispatch=count)
+            row["平台名称"] = platform
             row["精确车份额"] = exact_count
             row["备注"] = "批次车份额汇总后按四舍五入取整；不逐批次取整"
             rows.append(row)

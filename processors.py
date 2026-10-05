@@ -391,6 +391,68 @@ def average_sample_rows(df):
     return df.loc[~excluded].copy()
 
 
+def full_trip_load_sample_rows(df, min_volume=MIN_TRANSFER_LINEHAUL_AVERAGE_VOLUME):
+    """Return one valid full-truck load observation per real trip.
+
+    Transfer and linehaul totals stay at the destination-batch grain.  Load
+    averages must instead use the complete vehicle volume.  A two-stop truck
+    therefore contributes its full ``整车出库体积`` once, never only the volume
+    unloaded at the transfer destination.  If a multi-batch row lacks a full
+    trip volume, it is excluded rather than treating a partial unload as a
+    complete truck.
+    """
+    if df is None or df.empty:
+        return df.copy() if df is not None else None
+    out = df.copy()
+    warehouse = out.get("仓库", pd.Series("", index=out.index)).fillna("").astype(str).str.strip()
+    trip_no = out.get("车次号", pd.Series("", index=out.index)).fillna("").astype(str).str.strip()
+    has_real_trip = trip_no.ne("")
+    if "是否有真实车次号" in out.columns:
+        has_real_trip &= out["是否有真实车次号"].apply(_whole_truck_truthy)
+    out = out.loc[has_real_trip].copy()
+    if out.empty:
+        return out
+
+    out["_完整车次键"] = warehouse.loc[out.index].str.upper() + "||" + trip_no.loc[out.index]
+    full_volume = pd.to_numeric(
+        out.get("整车出库体积", pd.Series(pd.NA, index=out.index)), errors="coerce",
+    )
+    full_pallets = pd.to_numeric(
+        out.get("整车出库卡板数", pd.Series(pd.NA, index=out.index)), errors="coerce",
+    )
+    batch_count = pd.to_numeric(
+        out.get("整车批次数", pd.Series(1, index=out.index)), errors="coerce",
+    ).fillna(1)
+    exact_share = pd.to_numeric(
+        out.get("批次车份额", pd.Series(1, index=out.index)), errors="coerce",
+    ).fillna(1)
+    remark_cols = [col for col in MULTI_UNLOAD_REMARK_COLUMNS if col in out.columns]
+    if remark_cols:
+        combined_remarks = out[remark_cols].fillna("").astype(str).agg(" ".join, axis=1)
+        marked_multi_unload = combined_remarks.str.contains("里|外", regex=True, na=False)
+    else:
+        marked_multi_unload = pd.Series(False, index=out.index)
+    single_batch = batch_count.le(1) & exact_share.sub(1).abs().le(1e-6) & ~marked_multi_unload
+    row_volume = pd.to_numeric(out.get("出库体积", pd.Series(pd.NA, index=out.index)), errors="coerce")
+    row_pallets = pd.to_numeric(out.get("出库卡板数", pd.Series(pd.NA, index=out.index)), errors="coerce")
+    out["完整车次出库体积"] = full_volume.where(full_volume.gt(0)).fillna(row_volume.where(single_batch))
+    out["完整车次出库卡板数"] = full_pallets.where(full_pallets.ge(0)).fillna(row_pallets.where(single_batch))
+    out = out[out["完整车次出库体积"].ge(float(min_volume))].copy()
+    return out.drop_duplicates("_完整车次键", keep="first")
+
+
+def unique_real_trip_count(df):
+    """Count physical vehicles by warehouse and real trip number."""
+    if df is None or df.empty:
+        return 0
+    warehouse = df.get("仓库", pd.Series("", index=df.index)).fillna("").astype(str).str.upper().str.strip()
+    trip_no = df.get("车次号", pd.Series("", index=df.index)).fillna("").astype(str).str.strip()
+    valid = trip_no.ne("")
+    if "是否有真实车次号" in df.columns:
+        valid &= df["是否有真实车次号"].apply(_whole_truck_truthy)
+    return int((warehouse.loc[valid] + "||" + trip_no.loc[valid]).nunique())
+
+
 def regular_delivery_average_sample_rows(df):
     """Return ordinary-trip rows eligible for load/cost averages and P80.
 
@@ -418,13 +480,18 @@ def regular_delivery_average_sample_rows(df):
     return out.loc[~excluded].copy()
 
 
-def mean_detail_ratio(df, numerator_col, denominator_col):
-    """Mean of eligible row-level ratios, never a ratio of aggregate totals."""
+def detail_ratio_values(df, numerator_col, denominator_col):
+    """Return valid row-level ratios for auditable arithmetic means."""
     if df is None or df.empty:
-        return np.nan
+        return pd.Series(dtype=float)
     numerator = pd.to_numeric(df[numerator_col], errors="coerce")
     denominator = pd.to_numeric(df[denominator_col], errors="coerce")
-    ratios = numerator.div(denominator.where(denominator.ne(0))).replace([np.inf, -np.inf], np.nan).dropna()
+    return numerator.div(denominator.where(denominator.gt(0))).replace([np.inf, -np.inf], np.nan).dropna()
+
+
+def mean_detail_ratio(df, numerator_col, denominator_col):
+    """Mean of eligible row-level ratios, never a ratio of aggregate totals."""
+    ratios = detail_ratio_values(df, numerator_col, denominator_col)
     return ratios.mean() if not ratios.empty else np.nan
 
 

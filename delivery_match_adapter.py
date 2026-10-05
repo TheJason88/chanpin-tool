@@ -183,7 +183,7 @@ def _format_numbers(df, sheet_type=""):
 
     if "车次数" in out.columns:
         values = pd.to_numeric(out["车次数"], errors="coerce")
-        if sheet_type == "成本":
+        if sheet_type in ["成本", "调拨数据"]:
             out["车次数"] = values.round(2)
         else:
             out["车次数"] = values.round(0).astype("Int64")
@@ -921,23 +921,27 @@ def build_station_cost_report(matched):
                 )
             )
             row = dict(zip(group_cols, keys))
-            exact_vehicle_count = pd.to_numeric(whole_truck_cost_sample["车次数"], errors="coerce").sum() if not whole_truck_cost_sample.empty else 0
-            whole_truck_cost = pd.to_numeric(whole_truck_cost_sample["派送成本"], errors="coerce").sum() if not whole_truck_cost_sample.empty else 0
-            positive_cost = pd.to_numeric(cost_sample["派送成本"], errors="coerce").sum() if not cost_sample.empty else 0
-            positive_volume = pd.to_numeric(cost_sample["批次出库体积"], errors="coerce").sum() if not cost_sample.empty else 0
+            whole_truck_prices = pd.to_numeric(
+                whole_truck_cost_sample.get("批次整车等价价", pd.Series(dtype=float)), errors="coerce",
+            ).dropna()
+            whole_truck_prices = whole_truck_prices[whole_truck_prices.gt(0)]
+            detail_prices = processors.detail_ratio_values(cost_sample, "派送成本", "批次出库体积")
             row.update({
                 "指标名称": "FBA及FBX平台仓成本",
                 "车次数": group["车次数"].sum(),
                 "总出库体积": total_volume,
                 "总出库卡板数": total_pallets,
                 "总派送成本": total_cost,
-                "平均整车价": processors.safe_divide(whole_truck_cost, exact_vehicle_count),
+                "平均整车价": whole_truck_prices.mean() if not whole_truck_prices.empty else pd.NA,
                 "P80整车价": processors.safe_p80(whole_truck_cost_sample["批次整车等价价"]),
-                "每方平均价": processors.safe_divide(positive_cost, positive_volume),
+                "每方平均价": detail_prices.mean() if not detail_prices.empty else pd.NA,
                 "平均每车出库体积": trip_sample["出库体积"].mean() if not trip_sample.empty else pd.NA,
                 "P80每车出库体积": processors.safe_p80(trip_sample["出库体积"]),
                 "平均每车出库卡板数": trip_sample["出库卡板数"].mean() if not trip_sample.empty else pd.NA,
                 "P80每车出库卡板数": processors.safe_p80(trip_sample["出库卡板数"]),
+                "平均整车价有效车次数": int(len(whole_truck_prices)),
+                "平均每方价有效批次数": int(len(detail_prices)),
+                "平均装载有效车次数": int(len(trip_sample)),
                 "仓点分摊口径": allocation_methods,
             })
             rows.append(row)
