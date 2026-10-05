@@ -856,7 +856,7 @@ def clean_for_excel_output(df, sheet_type=""):
             out[col] = pd.to_numeric(out[col], errors="coerce").round(0).astype("Int64")
     if "车次数" in out.columns:
         values = pd.to_numeric(out["车次数"], errors="coerce")
-        if sheet_type in ["成本", "成本FTL", "分类型价格参考", "分类价格参考"]:
+        if sheet_type in ["成本", "成本FTL", "分类型价格参考", "分类价格参考", "调拨数据"]:
             out["车次数"] = values.round(2)
         else:
             out["车次数"] = values.round(0).astype("Int64")

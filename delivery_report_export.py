@@ -1,4 +1,6 @@
 """Compact presentation of existing stage-two results; no cost/time recalculation."""
+import re
+
 import pandas as pd
 
 
@@ -7,11 +9,115 @@ BUSINESS_SHEETS = (
     "分类价格参考", "调拨数据", "干线数据", "黄金标准数据",
 )
 AUDIT_SHEETS = ("派送二_匹配后批次数据", "派送二_车次汇总核对", "邮编异常审核")
+PLATFORM_ALIASES = {"运去哪仓": "运去哪"}
 
 
 def _frame(reports, name):
     value = reports.get(name)
     return value.copy(deep=True) if isinstance(value, pd.DataFrame) else pd.DataFrame()
+
+
+def _clean_label(value):
+    if pd.isna(value):
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def _canonical_platform(value):
+    label = _clean_label(value)
+    return PLATFORM_ALIASES.get(label, label)
+
+
+def _normalize_keys(frame, keys):
+    out = frame.copy()
+    for key in keys:
+        cleaner = _canonical_platform if key == "平台名称" else _clean_label
+        out[key] = out[key].apply(cleaner)
+    return out
+
+
+def _weighted_supplier_shares(group):
+    weighted = {}
+    denominator = 0.0
+    fallbacks = []
+    for _, row in group.iterrows():
+        volume = pd.to_numeric(row.get("_排行货量"), errors="coerce")
+        text = _clean_label(row.get("供应商货量占比"))
+        if text:
+            fallbacks.append(text)
+        if pd.isna(volume) or float(volume) <= 0:
+            continue
+        denominator += float(volume)
+        for part in re.split(r"[；;]", text):
+            match = re.fullmatch(r"(.+?)\s+([0-9]+(?:\.[0-9]+)?)%", part.strip())
+            if match:
+                supplier = match.group(1).strip()
+                weighted[supplier] = weighted.get(supplier, 0.0) + float(volume) * float(match.group(2)) / 100
+    if denominator > 0 and weighted:
+        ordered = sorted(weighted.items(), key=lambda item: (-item[1], item[0]))
+        return "；".join(f"{supplier} {amount / denominator:.2%}" for supplier, amount in ordered)
+    return "；".join(dict.fromkeys(fallbacks))
+
+
+def _collapse_rank(rank, keys):
+    """Consolidate identical/canonical station rows before assigning rank."""
+    if rank.empty:
+        return rank
+    rank = _normalize_keys(rank, keys)
+    rank["_排行货量"] = pd.to_numeric(rank["_排行货量"], errors="coerce")
+    rows = []
+    for key_values, group in rank.groupby(keys, dropna=False, sort=False):
+        if not isinstance(key_values, tuple):
+            key_values = (key_values,)
+        row = dict(zip(keys, key_values))
+        row["_排行货量"] = group["_排行货量"].sum(min_count=1)
+        if "供应商货量占比" in rank:
+            row["供应商货量占比"] = _weighted_supplier_shares(group)
+        rows.append(row)
+    result = pd.DataFrame(rows)
+    totals = result.groupby(keys[:2], dropna=False)["_排行货量"].transform("sum")
+    result["货量占比"] = result["_排行货量"].div(totals.where(totals.gt(0)))
+    result["货量排名"] = result.groupby(keys[:2], dropna=False)["_排行货量"].rank(
+        method="first", ascending=False,
+    ).astype("Int64")
+    return result
+
+
+def _collapse_price(price, keys):
+    if price.empty:
+        return price
+    price = _normalize_keys(price, keys)
+    value_cols = ["参考价有效方数", "参考价有效板数", "参考价总成本"]
+    for col in value_cols:
+        price[col] = pd.to_numeric(price[col], errors="coerce")
+    result = price.groupby(keys, dropna=False, sort=False)[value_cols].sum(min_count=1).reset_index()
+    result["每方参考价（总成本÷总方数）"] = result["参考价总成本"].div(
+        result["参考价有效方数"].where(result["参考价有效方数"].gt(0))
+    )
+    return result
+
+
+def _collapse_timing(timing, keys):
+    if timing.empty:
+        return timing
+    timing = _normalize_keys(timing, keys)
+    rows = []
+    for key_values, group in timing.groupby(keys, dropna=False, sort=False):
+        if not isinstance(key_values, tuple):
+            key_values = (key_values,)
+        row = dict(zip(keys, key_values))
+        weights = pd.to_numeric(group["有效时效方数"], errors="coerce")
+        averages = pd.to_numeric(group["平均派送时效"], errors="coerce")
+        valid = weights.gt(0) & averages.notna()
+        row["平均派送时效"] = (
+            (weights[valid] * averages[valid]).sum() / weights[valid].sum() if valid.any() else pd.NA
+        )
+        p80 = pd.to_numeric(group["P80派送时效"], errors="coerce").dropna()
+        row["P80派送时效"] = p80.iloc[0] if len(p80) == 1 else (p80.max() if len(p80) else pd.NA)
+        for col in ["有效时效批次数", "有效时效方数", "无效时效批次数"]:
+            row[col] = pd.to_numeric(group[col], errors="coerce").sum(min_count=1)
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def _join(frames, keys):
@@ -20,9 +126,7 @@ def _join(frames, keys):
     for source in frames:
         if source.empty:
             continue
-        part = source.copy()
-        for key in keys:
-            part[key] = part[key].fillna("").astype(str).str.strip()
+        part = _normalize_keys(source, keys)
         if part.duplicated(keys).any():
             raise ValueError(f"仓点汇总存在重复键，无法安全合并：{keys}")
         result = result.merge(part, on=keys, how="outer", validate="one_to_one")
@@ -39,6 +143,7 @@ def _station(reports, kind):
     })
     if not rank.empty:
         rank = rank[keys + [c for c in ["_排行货量", "货量排名", "货量占比", "供应商货量占比"] if c in rank]]
+        rank = _collapse_rank(rank, keys)
     summary = _frame(reports, "FBA仓点分析") if fba else pd.DataFrame()
     summary = summary.rename(columns={"平均每方成本": "批次平均每方成本"})
     price = _frame(reports, "每方价格参考")
@@ -49,10 +154,12 @@ def _station(reports, kind):
             "每方价格参考": "每方参考价（总成本÷总方数）",
         })
         price = price[keys + ["参考价有效方数", "参考价有效板数", "参考价总成本", "每方参考价（总成本÷总方数）"]]
+        price = _collapse_price(price, keys)
     timing = _frame(reports, "派送时效")
     if not timing.empty:
         timing = timing[timing["目的地类型"].eq(kind)].rename(columns={"目的仓点": code})
         timing = timing[keys + [c for c in ["平均派送时效", "P80派送时效", "有效时效批次数", "有效时效方数", "无效时效批次数"] if c in timing]]
+        timing = _collapse_timing(timing, keys)
     result = _join([summary, rank, price, timing], keys)
     if result.empty:
         return result
@@ -69,8 +176,49 @@ def _station(reports, kind):
         "批次平均每方成本", "每方参考价（总成本÷总方数）", "平均派送时效", "P80派送时效",
     ]
     columns = [c for c in preferred if c in result] + [c for c in result if c not in preferred]
-    return result[columns].sort_values(keys[:2] + ["总出库体积"] + keys[2:],
+    result = result[columns]
+    if result.duplicated(keys).any():
+        raise ValueError(f"仓点总览归一后仍有重复键：{keys}")
+    if not fba:
+        result.insert(2, "记录类型", "平台仓")
+    return result.sort_values(keys[:2] + ["总出库体积"] + keys[2:],
         ascending=[True, True, False] + [True] * len(keys[2:]), na_position="last", kind="stable").reset_index(drop=True)
+
+
+def _append_fbx_unidentified_summary(reports, station):
+    """Append one reconciling row for FBX volume without a platform-station code."""
+    volume = _frame(reports, "货量")
+    if volume.empty:
+        return station
+    totals = volume[
+        volume["指标名称"].eq("FBA比FBX方数")
+        & volume["维度值"].astype(str).str.strip().eq("FBX")
+    ].copy()
+    if totals.empty:
+        return station
+    totals["数值"] = pd.to_numeric(totals["数值"], errors="coerce")
+    existing = (
+        station.groupby(["仓库", "统计周期"], dropna=False)["总出库体积"].sum(min_count=1)
+        if not station.empty else pd.Series(dtype=float)
+    )
+    rows = []
+    for _, total_row in totals.iterrows():
+        key = (_clean_label(total_row["仓库"]), _clean_label(total_row["统计周期"]))
+        total = total_row["数值"]
+        covered = existing.get(key, 0.0)
+        residual = float(total) - float(covered) if pd.notna(total) else 0.0
+        if residual <= 0.01:
+            continue
+        rows.append({
+            "仓库": key[0], "统计周期": key[1], "记录类型": "非平台/未知目的地汇总",
+            "平台名称": "非平台/未知", "FBX仓点": "商业、私人地址及未识别平台仓",
+            "总出库体积": residual,
+            "货量占比": residual / float(total) if float(total) > 0 else pd.NA,
+            "数据说明": "与派送总览FBX总量的差额；完整批次在审核明细文件查看",
+        })
+    if not rows:
+        return station
+    return pd.concat([station, pd.DataFrame(rows)], ignore_index=True, sort=False)
 
 
 def _move_station_dispatch(reports, stations):
@@ -78,25 +226,30 @@ def _move_station_dispatch(reports, stations):
     if dispatch.empty:
         return set()
     dispatch = dispatch[dispatch["指标名称"].eq("目的仓点发车数")].copy()
-    keys = ["仓库", "统计周期", "维度值"]
-    identities = []
-    for name, data in stations.items():
-        code = "FBA仓点" if name == "FBA仓点总览" else "FBX仓点"
-        if not data.empty:
-            identities.append(data[["仓库", "统计周期", code]].rename(columns={code: "维度值"}))
-    if not identities:
-        return set()
-    identity = pd.concat(identities, ignore_index=True)
-    unique = identity.loc[~identity.duplicated(keys, keep=False)]
-    dispatch = dispatch.merge(unique, on=keys, how="inner", validate="one_to_one")
-    covered = set(dispatch[keys].itertuples(index=False, name=None))
+    base_keys = ["仓库", "统计周期", "维度值"]
+    if "平台名称" not in dispatch:
+        dispatch["平台名称"] = ""
+    dispatch = _normalize_keys(dispatch, base_keys + ["平台名称"])
+    covered = set()
     for name, data in list(stations.items()):
         if data.empty:
             continue
         code = "FBA仓点" if name == "FBA仓点总览" else "FBX仓点"
-        keep = keys + [c for c in ["数值", "精确车份额"] if c in dispatch]
-        extra = dispatch[keep].rename(columns={"维度值": code, "数值": "FTL折算发车数"})
-        stations[name] = data.merge(extra, on=["仓库", "统计周期", code], how="left", validate="many_to_one")
+        data = _normalize_keys(data, ["仓库", "统计周期", code] + (["平台名称"] if "平台名称" in data else []))
+        extra = dispatch.rename(columns={"维度值": code, "数值": "FTL折算发车数"}).copy()
+        match_keys = ["仓库", "统计周期", code]
+        if name == "FBX仓点总览" and extra["平台名称"].ne("").any():
+            match_keys.append("平台名称")
+            extra = extra[extra["平台名称"].ne("")]
+        else:
+            extra = extra[extra["平台名称"].eq("")]
+        keep = match_keys + [c for c in ["FTL折算发车数", "精确车份额"] if c in extra]
+        extra = extra[keep].drop_duplicates(match_keys)
+        merged = data.merge(extra, on=match_keys, how="left", validate="one_to_one")
+        if "FTL折算发车数" in merged:
+            for _, row in merged[merged["FTL折算发车数"].notna()].iterrows():
+                covered.add((row["仓库"], row["统计周期"], row[code], _canonical_platform(row.get("平台名称", ""))))
+        stations[name] = merged
     return covered
 
 
@@ -113,7 +266,8 @@ def _overview(reports, covered):
                              "数值": group["数值"].sum(), "分布及占比": ""})
         if name == "发车量":
             moved = data.apply(lambda row: row["指标名称"] == "目的仓点发车数" and
-                               (row["仓库"], row["统计周期"], row["维度值"]) in covered, axis=1)
+                               (_clean_label(row["仓库"]), _clean_label(row["统计周期"]),
+                                _clean_label(row["维度值"]), _canonical_platform(row.get("平台名称", ""))) in covered, axis=1)
             data = data.loc[~moved]
         for keys, group in data.groupby(["仓库", "统计周期", "指标名称", "维度类型"], sort=False, dropna=False):
             warehouse, period, metric, dimension = keys
@@ -125,8 +279,11 @@ def _overview(reports, covered):
                 suffix = f"（{float(ratio):.2%}）" if pd.notna(ratio) else ""
                 return f"{row['维度值']} {amount}{row.get('单位', '')}{suffix}"
             total = group.iloc[0]["数值"] if len(group) == 1 and metric == "总发车数" else pd.NA
+            display_metric = {
+                "LA干线货量": "LA线路识别总货量（含未成车批次）",
+            }.get(metric, metric)
             rows.append({"仓库": warehouse, "统计周期": period, "类别": name,
-                         "指标": metric, "数值": total, "分布及占比": "；".join(entry(row) for _, row in group.iterrows())})
+                         "指标": display_metric, "数值": total, "分布及占比": "；".join(entry(row) for _, row in group.iterrows())})
     return pd.DataFrame(rows)
 
 
@@ -156,6 +313,8 @@ def _rules(reports):
     rows = [
         {"规则类别": "使用说明", "说明": "业务报告用于查看汇总；本审核文件保留完整批次、车次和邮编补录。填写邮编异常审核后，将本文件上传功能二的5A。"},
         {"规则类别": "成本口径", "说明": "批次平均每方成本是有效批次单价的算术平均；每方参考价是原价格参考有效总成本÷有效总方数，两者分母不同。"},
+        {"规则类别": "调拨成本", "说明": "调拨总方数和总成本包含混合目的地车中的调拨批次；每方调拨成本=总调拨成本÷总调拨方数。混合目的地车不进入整车价格和平均装载。"},
+        {"规则类别": "调拨车次", "说明": "完整调拨车计1；两卸或多卸中仅部分货量属于调拨时，车次数只计该调拨批次的精确车份额，并单列混合目的地折算车份额。"},
         {"规则类别": "整车样本", "说明": "FBA派送方式分析允许同目的地多批次合车；分类价格参考沿用单批次整车样本。供应商成本不含仓内装车费，运营成本含装车费。"},
         {"规则类别": "时效口径", "说明": "按有效方数加权平均和P80；LTL无需车次，FTL须有真实车次；其他有效性规则沿用。时效单位为天，货量单位为CBM，价格单位为美元。"},
         {"规则类别": "发车口径", "说明": "总发车数按真实FTL车次去重，分布按批次车份额汇总后取整；各分组显示值不能直接相加代替总发车数。"},
@@ -169,14 +328,20 @@ def _rules(reports):
 def build_delivery_exports(reports):
     """Return a business workbook (at most eight tabs) and a reusable audit workbook."""
     stations = {"FBA仓点总览": _station(reports, "FBA"), "FBX仓点总览": _station(reports, "FBX平台仓")}
+    stations["FBX仓点总览"] = _append_fbx_unidentified_summary(reports, stations["FBX仓点总览"])
     covered = _move_station_dispatch(reports, stations)
+    linehaul = _frame(reports, "干线数据")
+    if not linehaul.empty:
+        linehaul["货量口径"] = "仅纳入有效FTL发车批次；与派送总览线路识别总货量口径不同"
     candidates = {
         "派送总览": _overview(reports, covered),
         "FBA仓点总览": stations["FBA仓点总览"],
         "FBA派送方式分析": _frame(reports, "FBA派送方式分析"),
         "FBX仓点总览": stations["FBX仓点总览"],
         "分类价格参考": _classification_prices(reports),
-        **{name: _frame(reports, name) for name in ["调拨数据", "干线数据", "黄金标准数据"]},
+        "调拨数据": _frame(reports, "调拨数据"),
+        "干线数据": linehaul,
+        "黄金标准数据": _frame(reports, "黄金标准数据"),
     }
     business = {name: data for name, data in candidates.items() if not data.empty}
     if not business:

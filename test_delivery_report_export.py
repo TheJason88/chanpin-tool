@@ -45,7 +45,11 @@ class CompactExportTests(unittest.TestCase):
             self.assertEqual(fba[col], timing[col])
         for name in ["FBA派送方式分析", "调拨数据", "干线数据", "黄金标准数据"]:
             if name in business:
-                pd.testing.assert_frame_equal(business[name], reports[name])
+                if name == "干线数据":
+                    self.assertTrue(business[name]["货量口径"].str.contains("有效FTL").all())
+                    pd.testing.assert_frame_equal(business[name].drop(columns="货量口径"), reports[name])
+                else:
+                    pd.testing.assert_frame_equal(business[name], reports[name])
         for name in export.AUDIT_SHEETS:
             pd.testing.assert_frame_equal(audit[name], reports[name])
         for name in reports:
@@ -84,8 +88,57 @@ class CompactExportTests(unittest.TestCase):
 
     def test_duplicate_keys_fail_instead_of_multiplying_volume(self):
         rows = pd.DataFrame([{"仓库": "LA", "统计周期": "8月", "FBA仓点": "ONT8", "出库体积": 10}] * 2)
-        with self.assertRaisesRegex(ValueError, "重复键"):
-            export.build_delivery_exports({"FBA货量排行": rows})
+        business, _ = export.build_delivery_exports({"FBA货量排行": rows})
+        self.assertEqual(len(business["FBA仓点总览"]), 1)
+        self.assertEqual(business["FBA仓点总览"].iloc[0]["总出库体积"], 20)
+
+    def test_fbx_aliases_and_unidentified_volume_reconcile(self):
+        rank = pd.DataFrame([
+            {"仓库": "LA", "统计周期": "8月", "平台仓": "TikTok", "FBX代码": "XD01_ONT1", "出库体积": 443, "派送卡车使用比例": "A 100.00%"},
+            {"仓库": "LA", "统计周期": "8月", "平台仓": "TikTok", "FBX代码": "XD01_ONT1", "出库体积": 217, "派送卡车使用比例": "B 100.00%"},
+            {"仓库": "LA", "统计周期": "8月", "平台仓": "运去哪仓", "FBX代码": "CPF", "出库体积": 40},
+            {"仓库": "LA", "统计周期": "8月", "平台仓": "运去哪", "FBX代码": "CPF", "出库体积": 60},
+        ])
+        price = pd.DataFrame([{
+            "仓库": "LA", "统计周期": "8月", "对象类型": "FBX平台仓", "平台": "TikTok",
+            "仓点代码": "XD01_ONT1", "总出库体积": 100, "总出库卡板数": 10,
+            "总派送成本": 1000, "每方价格参考": 10,
+        }])
+        timing = pd.DataFrame([{
+            "仓库": "LA", "统计周期": "8月", "目的地类型": "FBX平台仓", "平台名称": "TikTok",
+            "目的仓点": "XD01_ONT1", "平均派送时效": 2, "P80派送时效": 3,
+            "有效时效批次数": 2, "有效时效方数": 100, "无效时效批次数": 0,
+        }])
+        volume = pd.DataFrame([
+            {"仓库": "LA", "统计周期": "8月", "指标名称": "FBA比FBX方数", "维度类型": "产品类型", "维度值": "FBX", "数值": 1000, "单位": "CBM"},
+        ])
+        business, _ = export.build_delivery_exports({
+            "FBX平台仓货量": rank, "货量": volume, "每方价格参考": price, "派送时效": timing,
+        })
+        result = business["FBX仓点总览"]
+        xd = result[result["FBX仓点"].eq("XD01_ONT1")].iloc[0]
+        self.assertEqual(xd["总出库体积"], 660)
+        self.assertEqual(xd["每方参考价（总成本÷总方数）"], 10)
+        self.assertEqual(xd["平均派送时效"], 2)
+        self.assertIn("A 67.12%", xd["供应商货量占比"])
+        self.assertEqual(len(result[result["FBX仓点"].eq("CPF")]), 1)
+        self.assertAlmostEqual(result["总出库体积"].sum(), 1000)
+        residual = result[result["记录类型"].eq("非平台/未知目的地汇总")].iloc[0]
+        self.assertEqual(residual["总出库体积"], 240)
+
+    def test_platform_specific_dispatch_moves_to_each_fbx_station(self):
+        rank = pd.DataFrame([
+            {"仓库": "LA", "统计周期": "8月", "平台仓": "A", "FBX代码": "92571", "出库体积": 10},
+            {"仓库": "LA", "统计周期": "8月", "平台仓": "B", "FBX代码": "92571", "出库体积": 20},
+        ])
+        dispatch = pd.DataFrame([
+            {"仓库": "LA", "统计周期": "8月", "指标名称": "目的仓点发车数", "维度类型": "目的仓点", "维度值": "92571", "平台名称": "A", "数值": 1, "单位": "车"},
+            {"仓库": "LA", "统计周期": "8月", "指标名称": "目的仓点发车数", "维度类型": "目的仓点", "维度值": "92571", "平台名称": "B", "数值": 2, "单位": "车"},
+        ])
+        business, _ = export.build_delivery_exports({"FBX平台仓货量": rank, "发车量": dispatch})
+        result = business["FBX仓点总览"].sort_values("平台名称")
+        self.assertEqual(result["FTL折算发车数"].tolist(), [1, 2])
+        self.assertNotIn("派送总览", business)
 
     def test_fractional_truck_count_and_distinct_prices_survive_excel(self):
         rows = pd.DataFrame([{"仓库": "LA", "统计周期": "8月", "成本计算类型": "大车卡板",

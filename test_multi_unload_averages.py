@@ -685,7 +685,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(row["总派送成本"], 570)
         self.assertTrue(pd.isna(row["平均整车价"]))
         self.assertTrue(pd.isna(row["P80整车价"]))
-        self.assertEqual(row["每方平均价"], 9.5)
+        self.assertEqual(row["每方平均价"], 9.875)
         self.assertEqual(row["平均每车出库体积"], 60)
         self.assertEqual(row["平均每车出库卡板数"], 12)
 
@@ -739,7 +739,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(row["总派送成本"], 1170)
         self.assertEqual(row["平均整车价"], 600)
         self.assertEqual(row["P80整车价"], 600)
-        self.assertEqual(row["每方平均价"], 9.75)
+        self.assertAlmostEqual(row["每方平均价"], (350 / 40 + 220 / 20 + 600 / 60) / 3)
         self.assertEqual(row["平均每车出库体积"], 60)
 
     def test_transfer_and_linehaul_exclude_cross_group_multibatch_trip_only_from_whole_truck_price(self):
@@ -810,9 +810,11 @@ class MultiUnloadAverageTests(unittest.TestCase):
         ])
 
         expected_columns = [
-            "发货仓", "调拨目标仓", "专线线路", "统计周期", "车次数",
-            "总出库体积", "总出库卡板数", "总派送成本", "平均整车价", "每方平均价",
+            "发货仓", "调拨目标仓", "专线线路", "统计周期", "车次数", "完整调拨车次数",
+            "混合目的地折算车份额", "总出库体积", "总出库卡板数", "总派送成本",
+            "每方调拨成本（总成本÷总方数）", "平均整车价", "每方平均价",
             "平均每车出库体积", "供应商平均整车价", "供应商平均整车成本", "供应商使用比例",
+            "平均整车价有效车次数", "平均每方价有效批次数", "平均装载有效车次数", "平均装载口径", "车次口径",
         ]
         transfer = delivery_runtime._build_transfer_report(rows)
         self.assertEqual(transfer.columns.tolist(), expected_columns)
@@ -842,6 +844,41 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertNotIn("指标名称", linehaul.columns)
         self.assertNotIn("批次号集合", linehaul.columns)
         self.assertNotIn("车次号集合", linehaul.columns)
+
+    def test_transfer_multi_unload_uses_full_trip_volume_for_average_load(self):
+        rows = pd.DataFrame([
+            {
+                "仓库": "LA", "统计周期": "2026-07", "专线线路": "LA-NJ",
+                "是否有真实车次号": True, "是否FTL发车": True,
+                "车次号": "T-TWO-STOP", "批次号集合": "NJ-PART", "整车批次数": 2,
+                "批次车份额": 2 / 3, "整车出库体积": 90, "整车出库卡板数": 18,
+                "出库体积": 60, "出库卡板数": 12, "派送成本": 600,
+                "匹配备注集合": "里外两卸", "出库类型": "调拨", "调入仓库": "NJ",
+                "业务场景": "仓间调拨",
+            },
+            {
+                "仓库": "LA", "统计周期": "2026-07", "专线线路": "LA-DAL",
+                "是否有真实车次号": True, "是否FTL发车": True,
+                "车次号": "T-TWO-STOP", "批次号集合": "OTHER-PART", "整车批次数": 2,
+                "批次车份额": 1 / 3, "整车出库体积": 90, "整车出库卡板数": 18,
+                "出库体积": 30, "出库卡板数": 6, "派送成本": 300,
+                "匹配备注集合": "里外两卸", "出库类型": "正常", "调入仓库": "",
+                "业务场景": "普通派送",
+            },
+        ])
+        transfer = delivery_runtime._build_transfer_report(rows).iloc[0]
+        self.assertAlmostEqual(transfer["车次数"], 0.67)
+        self.assertEqual(transfer["完整调拨车次数"], 0)
+        self.assertAlmostEqual(transfer["混合目的地折算车份额"], 0.67)
+        self.assertEqual(transfer["总出库体积"], 60)
+        self.assertEqual(transfer["总派送成本"], 600)
+        self.assertEqual(transfer["每方调拨成本（总成本÷总方数）"], 10)
+        self.assertTrue(pd.isna(transfer["平均每车出库体积"]))
+        self.assertEqual(transfer["平均装载有效车次数"], 0)
+        workbook = tool_common.write_sheets_to_excel({"调拨数据": pd.DataFrame([transfer])})
+        exported = pd.read_excel(workbook, sheet_name="调拨数据").iloc[0]
+        self.assertAlmostEqual(exported["车次数"], 0.67)
+        self.assertAlmostEqual(exported["混合目的地折算车份额"], 0.67)
 
     def test_old_multidestination_rows_are_not_equal_split(self):
         rows = pd.DataFrame([{

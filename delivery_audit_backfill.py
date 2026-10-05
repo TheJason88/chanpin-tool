@@ -29,6 +29,8 @@ LINEHAUL_SHEET_COLUMNS = [
     "发货仓", "干线目标区域", "专线线路", "统计周期", "车次数",
     "总出库体积", "总出库卡板数", "总派送成本", "平均整车价", "每方平均价",
     "平均每车出库体积", "平均派送时效", "P80派送时效",
+    "平均整车价有效车次数", "平均每方价有效批次数", "平均装载有效车次数",
+    "平均装载口径", "时效口径",
     "供应商平均整车成本", "供应商使用比例",
 ]
 
@@ -266,11 +268,7 @@ def _build_linehaul_sheet(matched):
 
             import delivery_workflow
 
-            if "批次车份额" in group.columns:
-                exact_trip_count = pd.to_numeric(group["批次车份额"], errors="coerce").fillna(0).sum()
-            else:
-                exact_trip_count = float(len(group))
-            trip_count = delivery_workflow.business_round_vehicle_count(exact_trip_count)
+            trip_count = processors.unique_real_trip_count(group)
             total_volume = float(group["出库体积"].sum(min_count=1)) if not group.empty and group["出库体积"].notna().any() else 0.0
             total_pallets = float(group["出库卡板数"].sum(min_count=1)) if not group.empty and group["出库卡板数"].notna().any() else 0.0
             total_cost = float(group["派送成本"].sum(min_count=1)) if not group.empty and group["派送成本"].notna().any() else 0.0
@@ -282,12 +280,11 @@ def _build_linehaul_sheet(matched):
             cost_group = processors.whole_truck_cost_sample_rows(average_group)
             timing_group = delivery_workflow.timing_sample_rows(average_group)
             trip_loads = average_group.drop_duplicates(["仓库", "车次号"]).copy()
-            average_share = (
-                pd.to_numeric(cost_group["批次车份额"], errors="coerce").fillna(0).sum()
-                if "批次车份额" in cost_group.columns
-                else float(len(cost_group))
-            )
-            average_cost = pd.to_numeric(cost_group["派送成本"], errors="coerce").fillna(0).sum()
+            whole_truck_prices = pd.to_numeric(cost_group["派送成本"], errors="coerce").dropna()
+            whole_truck_prices = whole_truck_prices[whole_truck_prices.gt(0)]
+            denominator_col = "批次出库体积" if "批次出库体积" in average_group.columns else "出库体积"
+            detail_prices = processors.detail_ratio_values(average_group, "派送成本", denominator_col)
+            trip_loads = processors.full_trip_load_sample_rows(group)
             supplier_costs, supplier_usage = processors.supplier_whole_truck_cost_summary(cost_group)
 
             rows.append({
@@ -299,18 +296,16 @@ def _build_linehaul_sheet(matched):
                 "总出库体积": total_volume,
                 "总出库卡板数": total_pallets,
                 "总派送成本": total_cost,
-                "平均整车价": processors.safe_divide(average_cost, average_share),
-                "每方平均价": processors.mean_detail_ratio(
-                    average_group,
-                    "派送成本",
-                    "批次出库体积" if "批次出库体积" in average_group.columns else "出库体积",
-                ),
-                "平均每车出库体积": pd.to_numeric(
-                    trip_loads.get("整车出库体积", trip_loads.get("出库体积", pd.Series(dtype=float))),
-                    errors="coerce",
-                ).mean(),
+                "平均整车价": whole_truck_prices.mean() if not whole_truck_prices.empty else pd.NA,
+                "每方平均价": detail_prices.mean() if not detail_prices.empty else pd.NA,
+                "平均每车出库体积": pd.to_numeric(trip_loads.get("完整车次出库体积"), errors="coerce").mean(),
                 "平均派送时效": delivery_workflow.volume_weighted_average(timing_group),
                 "P80派送时效": delivery_workflow.volume_weighted_p80(timing_group),
+                "平均整车价有效车次数": int(len(whole_truck_prices)),
+                "平均每方价有效批次数": int(len(detail_prices)),
+                "平均装载有效车次数": int(len(trip_loads)),
+                "平均装载口径": "按真实车次去重后取完整整车方数的有效样本算术平均",
+                "时效口径": "有效批次按出库方数加权平均及P80",
                 "供应商平均整车成本": supplier_costs,
                 "供应商使用比例": supplier_usage,
             })
