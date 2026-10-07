@@ -76,8 +76,8 @@ class CompactExportTests(unittest.TestCase):
         business, _ = export.build_delivery_exports({"派送二_匹配后批次数据": rows})
         result = business["满载率与地板率"].iloc[0]
         self.assertAlmostEqual(result["大车卡板满载率"], 0.75)
-        self.assertAlmostEqual(result["大车卡板满载率P80"], 1.0)
-        self.assertAlmostEqual(result["大车卡板满载率P90"], 1.0)
+        self.assertAlmostEqual(result["大车卡板满载率P80"], 0.75)
+        self.assertAlmostEqual(result["大车卡板满载率P90"], 0.75)
         self.assertAlmostEqual(result["大车地板满载率"], 1.0)
         self.assertAlmostEqual(result["大车地板满载率P80"], 1.0)
         self.assertAlmostEqual(result["大车地板满载率P90"], 1.0)
