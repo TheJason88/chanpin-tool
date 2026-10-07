@@ -556,8 +556,8 @@ def _build_transfer_cost_report(matched):
     columns = [
         "指标名称", "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组",
         "车次数", "完整调拨车次数", "混合目的地折算车份额", "总出库体积", "总派送成本",
-        "每方调拨成本（总成本÷总方数）", "平均整车价", "每方平均价",
-        "平均每车出库体积", "P80每车出库体积", "平均整车价有效车次数",
+        "每方调拨成本（总成本÷总方数）", "平均整车价", "P80整车价", "P90整车价", "每方平均价", "P80每方平均价", "P90每方平均价",
+        "平均每车出库体积", "P80每车出库体积", "P90每车出库体积", "平均整车价有效车次数",
         "平均每方价有效批次数", "平均装载有效车次数", "平均装载口径", "车次口径",
     ]
     if transfer.empty:
@@ -598,9 +598,16 @@ def _build_transfer_cost_report(matched):
             "总派送成本": total_cost,
             "每方调拨成本（总成本÷总方数）": processors.safe_divide(total_cost, total_volume),
             "平均整车价": whole_truck_prices.mean() if not whole_truck_prices.empty else pd.NA,
+            "P80整车价": processors.safe_p80(whole_truck_prices),
+            "P90整车价": processors.safe_p90(whole_truck_prices),
             "每方平均价": detail_prices.mean() if not detail_prices.empty else pd.NA,
+            "P80每方平均价": processors.safe_p80(detail_prices),
+            "P90每方平均价": processors.safe_p90(detail_prices),
             "平均每车出库体积": pd.to_numeric(trip_loads.get("完整车次出库体积"), errors="coerce").mean(),
             "P80每车出库体积": processors.safe_p80(
+                trip_loads.get("完整车次出库体积", pd.Series(dtype=float))
+            ),
+            "P90每车出库体积": processors.safe_p90(
                 trip_loads.get("完整车次出库体积", pd.Series(dtype=float))
             ),
             "平均整车价有效车次数": int(len(whole_truck_prices)),
@@ -622,8 +629,8 @@ def _build_transfer_report(matched):
     columns = [
         "发货仓", "调拨目标仓", "专线线路", "统计周期", "车次数", "完整调拨车次数",
         "混合目的地折算车份额", "总出库体积", "总出库卡板数", "总派送成本",
-        "每方调拨成本（总成本÷总方数）", "平均整车价", "每方平均价",
-        "平均每车出库体积", "供应商平均整车价", "供应商平均整车成本", "供应商使用比例",
+        "每方调拨成本（总成本÷总方数）", "平均整车价", "P80整车价", "P90整车价", "每方平均价", "P80每方平均价", "P90每方平均价",
+        "平均每车出库体积", "P80每车出库体积", "P90每车出库体积", "供应商平均整车价", "供应商平均整车成本", "供应商使用比例",
         "平均整车价有效车次数", "平均每方价有效批次数", "平均装载有效车次数", "平均装载口径", "车次口径",
     ]
     if transfer.empty:
@@ -668,8 +675,14 @@ def _build_transfer_report(matched):
             "总派送成本": total_cost,
             "每方调拨成本（总成本÷总方数）": processors.safe_divide(total_cost, total_volume),
             "平均整车价": whole_truck_prices.mean() if not whole_truck_prices.empty else pd.NA,
+            "P80整车价": processors.safe_p80(whole_truck_prices),
+            "P90整车价": processors.safe_p90(whole_truck_prices),
             "每方平均价": detail_prices.mean() if not detail_prices.empty else pd.NA,
+            "P80每方平均价": processors.safe_p80(detail_prices),
+            "P90每方平均价": processors.safe_p90(detail_prices),
             "平均每车出库体积": pd.to_numeric(trip_loads.get("完整车次出库体积"), errors="coerce").mean(),
+            "P80每车出库体积": processors.safe_p80(trip_loads.get("完整车次出库体积", pd.Series(dtype=float))),
+            "P90每车出库体积": processors.safe_p90(trip_loads.get("完整车次出库体积", pd.Series(dtype=float))),
             "供应商平均整车成本": supplier_costs,
             "供应商使用比例": supplier_usage,
             "供应商平均整车价": processors.supplier_whole_truck_average_cost(cost_group),
