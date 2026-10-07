@@ -959,7 +959,7 @@ def build_ltl_station_cost_report(matched):
 
     columns = [
         "指标名称", "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组",
-        "总出库体积", "总出库卡板数", "总派送成本", "平均每方价", "P80每方价", "P90每方价",
+        "总出库体积", "总出库卡板数", "总派送成本", "每方平均价", "P80每方平均价", "P90每方平均价",
     ]
     if matched is None or matched.empty:
         return pd.DataFrame(columns=columns)
@@ -1016,9 +1016,9 @@ def build_ltl_station_cost_report(matched):
             "总出库体积": group["出库体积"].sum(),
             "总出库卡板数": group["出库卡板数"].sum(),
             "总派送成本": group["派送成本"].sum(),
-            "平均每方价": prices.mean() if not prices.empty else pd.NA,
-            "P80每方价": processors.safe_p80(prices),
-            "P90每方价": processors.safe_p90(prices),
+            "每方平均价": prices.mean() if not prices.empty else pd.NA,
+            "P80每方平均价": processors.safe_p80(prices),
+            "P90每方平均价": processors.safe_p90(prices),
         })
         rows.append(row)
     return pd.DataFrame(rows, columns=columns)
@@ -1055,9 +1055,9 @@ def build_cost_price_reference_reports(cost_ftl, cost_ltl):
         "目的地总出库体积", "成本计算类型",
         "车次数", "细分货量方数", "整车价格", "每方成本", "仓点分摊口径",
         "总出库体积", "总出库卡板数", "总派送成本",
-        "指标名称", "平均整车价", "P80整车价", "每方平均价",
-        "平均每车出库体积", "P80每车出库体积",
-        "平均每车出库卡板数", "P80每车出库卡板数",
+        "指标名称", "平均整车价", "P80整车价", "P90整车价", "每方平均价", "P80每方平均价", "P90每方平均价",
+        "平均每车出库体积", "P80每车出库体积", "P90每车出库体积",
+        "平均每车出库卡板数", "P80每车出库卡板数", "P90每车出库卡板数",
     ]
 
     frames = []
