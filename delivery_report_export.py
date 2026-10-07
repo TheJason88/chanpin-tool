@@ -3,6 +3,8 @@ import re
 
 import pandas as pd
 
+import processors
+
 
 BUSINESS_SHEETS = (
     "派送总览", "FBA仓点总览", "FBA派送方式分析", "FBX仓点总览",
@@ -155,6 +157,8 @@ def _build_loading_metrics_report(reports):
         pallet_load_rate = float(pallet["_单车满载率"].mean()) if not pallet.empty else pd.NA
         floor_load_rate = float(floor["_单车满载率"].mean()) if not floor.empty else pd.NA
         overall_load_rate = float(valid_load["_单车满载率"].mean()) if not valid_load.empty else pd.NA
+        floor_flags = known["_装车类型"].map({"大车地板": 1.0, "大车卡板": 0.0}).dropna()
+        floor_rate_average = float(floor_flags.mean()) if not floor_flags.empty else pd.NA
         rows.append({
             "仓库": warehouse,
             "统计周期": period,
@@ -168,18 +172,31 @@ def _build_loading_metrics_report(reports):
             "大车卡板有效出库方数": float(pallet["_出库方数"].sum()),
             "大车卡板满载率加权车次": int(len(pallet)),
             "大车卡板满载率": pallet_load_rate,
+            "大车卡板满载率平均值": pallet_load_rate,
+            "大车卡板满载率P80": processors.safe_p80(pallet["_单车满载率"]),
+            "大车卡板满载率P90": processors.safe_p90(pallet["_单车满载率"]),
             "大车地板标准容量": 90.0,
             "大车地板有效出库方数": float(floor["_出库方数"].sum()),
             "大车地板满载率加权车次": int(len(floor)),
             "大车地板满载率": floor_load_rate,
+            "大车地板满载率平均值": floor_load_rate,
+            "大车地板满载率P80": processors.safe_p80(floor["_单车满载率"]),
+            "大车地板满载率P90": processors.safe_p90(floor["_单车满载率"]),
             "满载率有效实际出库方数": effective_volume,
             "满载率加权车次": int(len(valid_load)),
             "满载率": overall_load_rate,
-            "地板率": floor_count / denominator if denominator > 0 else pd.NA,
+            "满载率平均值": overall_load_rate,
+            "满载率P80": processors.safe_p80(valid_load["_单车满载率"]),
+            "满载率P90": processors.safe_p90(valid_load["_单车满载率"]),
+            "地板率": floor_rate_average,
+            "地板率平均值": floor_rate_average,
+            "地板率P80": processors.safe_p80(floor_flags),
+            "地板率P90": processors.safe_p90(floor_flags),
             "指标说明": (
                 "先按车次计算单车满载率=min(实际出库方数÷车型容量,100%)，再按车次等权加权平均；"
                 "大车卡板容量60 CBM，大车地板容量90 CBM；"
-                "地板率=大车地板车次数÷（大车卡板车次数+大车地板车次数）。"
+                "满载率统计同时给平均/P80/P90，单车样本按车次等权；"
+                "地板率统计以已判定的大车车次为样本，地板=1、卡板=0，同时给平均/P80/P90。"
             ),
         })
     return pd.DataFrame(rows)
@@ -263,6 +280,8 @@ def _collapse_timing(timing, keys):
         )
         p80 = pd.to_numeric(group["P80派送时效"], errors="coerce").dropna()
         row["P80派送时效"] = p80.iloc[0] if len(p80) == 1 else (p80.max() if len(p80) else pd.NA)
+        p90 = pd.to_numeric(group.get("P90派送时效", pd.Series(dtype=float)), errors="coerce").dropna()
+        row["P90派送时效"] = p90.iloc[0] if len(p90) == 1 else (p90.max() if len(p90) else pd.NA)
         for col in ["有效时效批次数", "有效时效方数", "无效时效批次数"]:
             row[col] = pd.to_numeric(group[col], errors="coerce").sum(min_count=1)
         rows.append(row)
@@ -307,7 +326,7 @@ def _station(reports, kind):
     timing = _frame(reports, "派送时效")
     if not timing.empty:
         timing = timing[timing["目的地类型"].eq(kind)].rename(columns={"目的仓点": code})
-        timing = timing[keys + [c for c in ["平均派送时效", "P80派送时效", "有效时效批次数", "有效时效方数", "无效时效批次数"] if c in timing]]
+        timing = timing[keys + [c for c in ["平均派送时效", "P80派送时效", "P90派送时效", "有效时效批次数", "有效时效方数", "无效时效批次数"] if c in timing]]
         timing = _collapse_timing(timing, keys)
     result = _join([summary, rank, price, timing], keys)
     if result.empty:
@@ -322,7 +341,8 @@ def _station(reports, kind):
         result["总出库体积"] = result["总出库体积"].fillna(rank_volume)
     preferred = keys[:2] + ["货量排名"] + keys[2:] + [
         "总出库体积", "货量占比", "派送方式货量", "派送方式占比", "供应商货量占比",
-        "批次平均每方成本", "每方参考价（总成本÷总方数）", "平均派送时效", "P80派送时效",
+        "批次平均每方成本", "P80每方成本", "P90每方成本", "每方参考价（总成本÷总方数）",
+        "平均派送时效", "P80派送时效", "P90派送时效",
     ]
     columns = [c for c in preferred if c in result] + [c for c in result if c not in preferred]
     result = result[columns]
@@ -455,19 +475,19 @@ def _classification_prices(reports):
         "总出库体积": "有效成本方数", "总出库卡板数": "有效成本板数",
         "每方成本": "每方参考价（总成本÷总方数）", "每方平均价": "批次平均每方成本",
         "平均整车价": "平均整车价（单批次整车）", "P80整车价": "P80整车价（单批次整车）",
+        "P90整车价": "P90整车价（单批次整车）",
     })
 
 
 def _rules(reports):
     rows = [
-        {"规则类别": "使用说明", "说明": "业务工作表用于查看汇总；审核工作表保留完整批次、车次和邮编补录。填写邮编异常审核后，将本工作表上传功能二的5A。"},
-        {"规则类别": "成本口径", "说明": "批次平均每方成本是有效批次单价的算术平均；每方参考价是原价格参考有效总成本÷有效总方数，两者分母不同。"},
-        {"规则类别": "调拨成本", "说明": "调拨总方数和总成本包含混合目的地车中的调拨批次；每方调拨成本=总调拨成本÷总调拨方数。混合目的地车不进入整车价格和平均装载。"},
-        {"规则类别": "调拨车次", "说明": "完整调拨车计1；两卸或多卸中仅部分货量属于调拨时，车次数只计该调拨批次的精确车份额，并单列混合目的地折算车份额。"},
-        {"规则类别": "整车样本", "说明": "FBA派送方式分析允许同目的地多批次合车；分类价格参考沿用单批次整车样本。供应商成本不含仓内装车费，运营成本含装车费。"},
-        {"规则类别": "时效口径", "说明": "按有效方数加权平均和P80；LTL无需车次，FTL须有真实车次；其他有效性规则沿用。时效单位为天，货量单位为CBM，价格单位为美元。"},
-        {"规则类别": "发车口径", "说明": "总发车数按真实FTL车次去重，分布按批次车份额汇总后取整；各分组显示值不能直接相加代替总发车数。"},
-        {"规则类别": "装载效率", "说明": "先按真实FTL大车车次计算单车满载率=min(实际出库方数÷车型容量,100%)，再按车次等权加权平均；大车卡板容量60 CBM，大车地板容量90 CBM。卡板车62方按100%计，不超过100%。地板率=大车地板车次数÷（大车卡板车次数+大车地板车次数）。同一车次只计一次，无法判定装车类型的车次不进入地板率分母。"},
+        {"规则类别": "使用说明", "说明": "业务看板与审核明细合并在同一个Excel；业务表看汇总，审核表追溯批次、车次、邮编和异常。"},
+        {"规则类别": "统计粒度", "说明": "方数按批次；车次按真实车次去重；柜量按柜号去重。车次类指标优先使用车次样本，避免用总方数÷总车次替代。"},
+        {"规则类别": "成本口径", "说明": "批次平均每方成本=同一有效批次单价样本的平均/P80/P90；每方参考价=同一有效来源总成本÷总方数，二者并列展示，不混用。"},
+        {"规则类别": "调拨与混合卸货", "说明": "混合目的地车只把调拨批次的方数、成本计入调拨；整车价和整车装载只使用完整调拨车；车次按完整车1、混合车按调拨批次精确车份额。"},
+        {"规则类别": "时效统计", "说明": "按有效批次方数加权给平均/P80/P90；LTL无需车次，FTL需真实车次；无效时间、无效方数及备注含“里/外”的批次不进时效样本。"},
+        {"规则类别": "装载统计", "说明": "大车卡板容量60 CBM、地板容量90 CBM；先按真实车次算min(实际方数÷容量,100%)，再按车次统计平均/P80/P90；地板率样本为地板=1、卡板=0。"},
+        {"规则类别": "数据筛选", "说明": "正成本样本的成本分子与方数分母同进同出；零成本、缺车次或缺车型的数据按指标规则保留在审核/总量口径，不强行进入不适用样本。"},
     ]
     for name in ["区域识别规则", "干线识别规则"]:
         for _, row in _frame(reports, name).iterrows():
