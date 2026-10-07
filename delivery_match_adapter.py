@@ -955,14 +955,11 @@ def build_station_cost_report(matched):
 
 
 def build_ltl_station_cost_report(matched):
-    """按目的仓点汇总LTL成本，只保留三个总量指标。
+    """按目的仓点汇总LTL成本；LTL不计算整车价，但计算批次每方成本分布。"""
 
-    LTL不按车次计算均值或P80；只统计派送成本大于0、且能明确匹配到
-    FBA仓点或FBX平台仓点的明细。
-    """
     columns = [
         "指标名称", "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组",
-        "总出库体积", "总出库卡板数", "总派送成本",
+        "总出库体积", "总出库卡板数", "总派送成本", "平均每方价", "P80每方价", "P90每方价",
     ]
     if matched is None or matched.empty:
         return pd.DataFrame(columns=columns)
@@ -1010,13 +1007,21 @@ def build_ltl_station_cost_report(matched):
 
     expanded = tool_common.normalize_case_insensitive_labels(expanded)
     group_cols = ["仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组"]
-    result = expanded.groupby(group_cols, dropna=False, as_index=False).agg(
-        总出库体积=("出库体积", "sum"),
-        总出库卡板数=("出库卡板数", "sum"),
-        总派送成本=("派送成本", "sum"),
-    )
-    result.insert(0, "指标名称", "FBA及FBX平台仓LTL成本")
-    return result[columns]
+    rows = []
+    for keys, group in expanded.groupby(group_cols, dropna=False, sort=False):
+        prices = processors.detail_ratio_values(group, "派送成本", "出库体积")
+        row = dict(zip(group_cols, keys))
+        row.update({
+            "指标名称": "FBA及FBX平台仓LTL成本",
+            "总出库体积": group["出库体积"].sum(),
+            "总出库卡板数": group["出库卡板数"].sum(),
+            "总派送成本": group["派送成本"].sum(),
+            "平均每方价": prices.mean() if not prices.empty else pd.NA,
+            "P80每方价": processors.safe_p80(prices),
+            "P90每方价": processors.safe_p90(prices),
+        })
+        rows.append(row)
+    return pd.DataFrame(rows, columns=columns)
 
 
 PRICE_REFERENCE_TYPES = ["大车地板", "大车卡板", "小车", "LTL"]
