@@ -228,7 +228,7 @@ def _build_linehaul_sheet(matched):
     生成LA四条干线的独立结果表，字段丰富度与调拨数据保持一致：
     - 每个统计周期固定输出 LA-NJ / LA-DAL / LA-CHI / LA-SAV 四行；
     - 全部指标按FTL车次汇总，LTL不计入干线车次、成本及货量；
-    - 同时输出体积、板数、成本、均价、平均装载、平均/P80时效、批次和车次信息。
+    - 同时输出体积、板数、成本、均价、平均装载、平均/P80/P90时效、批次和车次信息。
     """
     if matched is None or getattr(matched, "empty", True):
         return pd.DataFrame(columns=LINEHAUL_SHEET_COLUMNS)
