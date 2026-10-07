@@ -456,7 +456,7 @@ def unique_real_trip_count(df):
 def regular_delivery_average_sample_rows(df):
     """Return ordinary-trip rows eligible for load/cost averages, P80 and P90.
 
-    Totals continue to use the unfiltered detail rows.  Only average/P80
+    Totals continue to use the unfiltered detail rows.  Only average/P80/P90
     samples exclude under-loaded 53-foot trips: floor-loaded trips below
     60 CBM and pallet-loaded trips below 40 CBM.  Boundary values remain
     eligible.
