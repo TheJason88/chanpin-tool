@@ -232,7 +232,7 @@ def build_station_timing_report(matched):
     """Only recognized FBA/FBX destinations; keep existing valid timing rules."""
     import delivery_workflow
 
-    columns = ["仓库", "统计周期", "目的地类型", "平台名称", "目的仓点", "平均派送时效", "P80派送时效", "有效时效批次数", "有效时效方数", "无效时效批次数"]
+    columns = ["仓库", "统计周期", "目的地类型", "平台名称", "目的仓点", "平均派送时效", "P80派送时效", "P90派送时效", "有效时效批次数", "有效时效方数", "无效时效批次数"]
     if matched is None or matched.empty:
         return pd.DataFrame(columns=columns)
     source = matched.copy()
@@ -249,6 +249,7 @@ def build_station_timing_report(matched):
             **dict(zip(group_cols, keys)),
             "平均派送时效": delivery_workflow.volume_weighted_average(sample),
             "P80派送时效": delivery_workflow.volume_weighted_p80(sample),
+            "P90派送时效": delivery_workflow.volume_weighted_p90(sample),
             "有效时效批次数": len(sample), "有效时效方数": _number(sample, "出库体积").sum(),
             "无效时效批次数": len(group) - len(sample),
         })
