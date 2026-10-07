@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-10-07-grain-audit-v33"
+RUNTIME_SCHEMA_VERSION = "2026-10-07-grain-audit-v34"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "IL": {"name": "IL合作仓"},
