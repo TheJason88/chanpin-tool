@@ -81,6 +81,37 @@ class CompactExportTests(unittest.TestCase):
         self.assertAlmostEqual(result["地板率"], 1 / 3)
         self.assertEqual(result["满载率加权车次"], 3)
 
+    def test_transfer_multistop_uses_transfer_stop_and_consistent_cost_scope(self):
+        delivery_runtime.bootstrap(delivery_workflow)
+        rows = pd.DataFrame([
+            batch(
+                "TR", "MIX", volume=40, cost=400, kind="仓间调拨", code="NJ",
+                批次车份额=0.4, 整车批次数=2, 整车出库体积=100,
+                调入仓库="NJ", 出库类型="调拨", 业务场景="仓间调拨",
+            ),
+            batch(
+                "DIRECT", "MIX", volume=60, cost=600, kind="FBA", code="ONT8",
+                批次车份额=0.6, 整车批次数=2, 整车出库体积=100,
+            ),
+            batch(
+                "FREE", "MIX2", volume=20, cost=0, kind="仓间调拨", code="NJ",
+                调入仓库="NJ", 出库类型="调拨", 业务场景="仓间调拨",
+            ),
+        ])
+
+        transfer = delivery_runtime._build_transfer_report(rows)
+        transfer_row = transfer.iloc[0]
+        self.assertEqual(transfer_row["总出库体积"], 40)
+        self.assertEqual(transfer_row["总派送成本"], 400)
+        self.assertEqual(transfer_row["每方调拨成本（总成本÷总方数）"], 10)
+        self.assertEqual(transfer_row["车次数"], 0.4)
+
+        transfer_cost = delivery_runtime._build_transfer_cost_report(rows)
+        cost_row = transfer_cost.iloc[0]
+        self.assertEqual(cost_row["总出库体积"], 40)
+        self.assertEqual(cost_row["总派送成本"], 400)
+        self.assertEqual(cost_row["每方调拨成本（总成本÷总方数）"], 10)
+
     def test_excel_roundtrip_and_explicit_wrong_file_error(self):
         business, audit = export.build_delivery_exports(self.reports())
         out = tool_common.write_sheets_to_excel(business)
