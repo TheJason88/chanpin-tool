@@ -30,7 +30,7 @@ class CompactExportTests(unittest.TestCase):
         reports = self.reports()
         snapshots = {k: v.copy(deep=True) for k, v in reports.items()}
         business, audit = export.build_delivery_exports(reports)
-        self.assertLessEqual(len(business), 8)
+        self.assertLessEqual(len(business), 9)
         self.assertEqual(list(audit), list(export.AUDIT_SHEETS) + ["规则说明"])
         self.assertNotIn("邮编异常审核", business)
         fba = business["FBA仓点总览"].iloc[0]
@@ -54,6 +54,32 @@ class CompactExportTests(unittest.TestCase):
             pd.testing.assert_frame_equal(audit[name], reports[name])
         for name in reports:
             pd.testing.assert_frame_equal(reports[name], snapshots[name])
+
+    def test_load_factor_is_trip_weighted_and_capped(self):
+        rows = pd.DataFrame([
+            {
+                "仓库": "LA", "统计周期": "1月", "车次号": "T1",
+                "是否有真实车次号": True, "是否FTL发车": True,
+                "车型标准值": "53尺大车", "装车类型标准值": "卡板", "出库体积": 62,
+            },
+            {
+                "仓库": "LA", "统计周期": "1月", "车次号": "T2",
+                "是否有真实车次号": True, "是否FTL发车": True,
+                "车型标准值": "53尺大车", "装车类型标准值": "卡板", "出库体积": 30,
+            },
+            {
+                "仓库": "LA", "统计周期": "1月", "车次号": "T3",
+                "是否有真实车次号": True, "是否FTL发车": True,
+                "车型标准值": "53尺大车", "装车类型标准值": "地板", "出库体积": 95,
+            },
+        ])
+        business, _ = export.build_delivery_exports({"派送二_匹配后批次数据": rows})
+        result = business["满载率与地板率"].iloc[0]
+        self.assertAlmostEqual(result["大车卡板满载率"], 0.75)
+        self.assertAlmostEqual(result["大车地板满载率"], 1.0)
+        self.assertAlmostEqual(result["满载率"], (1.0 + 0.5 + 1.0) / 3)
+        self.assertAlmostEqual(result["地板率"], 1 / 3)
+        self.assertEqual(result["满载率加权车次"], 3)
 
     def test_excel_roundtrip_and_explicit_wrong_file_error(self):
         business, audit = export.build_delivery_exports(self.reports())
