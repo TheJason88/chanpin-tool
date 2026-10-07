@@ -535,8 +535,19 @@ def build_cleaned_batches_from_detail(valid_detail):
     for batch_key, group in df.groupby("_批次聚合键", dropna=False, sort=False):
         batch_no = first_nonblank(group["批次号"])
         warehouse = processors.standardize_warehouse(first_nonblank(group["仓库"]))
+        remark_values = [
+            str(value)
+            for col in processors.REMARK_TRANSPORT_COLUMNS
+            if col in group.columns
+            for value in group[col]
+            if not processors.is_blank(value)
+        ]
+        remark_text = " ".join(remark_values)
+        remark_dispatch = processors.remark_dispatch_method(remark_text)
         transport_type = str(first_nonblank(group["标准运输类型"])).upper().strip()
         transport_type = transport_type if transport_type in {"FTL", "LTL"} else "LTL"
+        if remark_dispatch == "LTL":
+            transport_type = "LTL"
         volume = float(group["出库体积"].sum())
         pallets = float(group["出库卡板数"].sum())
         cost, cost_audit = _batch_cost_value(group["派送成本"])
@@ -592,7 +603,7 @@ def build_cleaned_batches_from_detail(valid_detail):
             "标准运输类型": transport_type,
             "原始运输类型集合": combine_unique(group["原始运输类型集合"]),
             "运输类型重判原因": first_nonblank(group["运输类型重判原因"]),
-            "派送方式": build_method(transport_type, vehicle, loading),
+            "派送方式": "转快递" if remark_dispatch == "转快递" else build_method(transport_type, vehicle, loading),
             "车型标准值": vehicle,
             "装车类型标准值": loading,
             "车次号": trip_no,
