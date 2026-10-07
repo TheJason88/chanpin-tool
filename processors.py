@@ -1881,7 +1881,7 @@ def build_dispatch_summary(stage2):
 
 
 def build_linehaul_summary(stage2):
-    cols = ["仓库", "统计周期", "专线线路", "发车数", "出库体积", "派送成本", "平均派送时效", "P80派送时效"]
+    cols = ["仓库", "统计周期", "专线线路", "发车数", "出库体积", "派送成本", "平均派送时效", "P80派送时效", "P90派送时效"]
     if stage2.empty:
         return pd.DataFrame(columns=cols)
     df = stage2[~stage2["专线线路"].isin(["", "未知线路", "非LA干线"])].copy()
@@ -1893,18 +1893,20 @@ def build_linehaul_summary(stage2):
         派送成本=("派送成本", "sum"),
         平均派送时效=("派送时效", "mean"),
         P80派送时效=("派送时效", safe_p80),
+        P90派送时效=("派送时效", safe_p90),
     ).reset_index()
     return result[cols]
 
 
 def build_delivery_timing_metrics(stage2):
     if stage2.empty:
-        return pd.DataFrame(columns=["仓库", "统计周期", "派送方式", "有效批次数", "平均派送时效", "P80派送时效"])
+        return pd.DataFrame(columns=["仓库", "统计周期", "派送方式", "有效批次数", "平均派送时效", "P80派送时效", "P90派送时效"])
     result = stage2.groupby(["仓库", "统计周期", "派送方式"], dropna=False).agg(
         总批次数=("分析批次ID", "count"),
         有效批次数=("是否有效时效", "sum"),
         平均派送时效=("派送时效", "mean"),
         P80派送时效=("派送时效", safe_p80),
+        P90派送时效=("派送时效", safe_p90),
     ).reset_index()
     return result
 
