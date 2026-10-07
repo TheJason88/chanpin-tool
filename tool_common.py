@@ -953,7 +953,7 @@ def _format_delivery_business_sheet(ws):
             cell.comment = Comment("沿用原分类价格参考的单批次整车样本；FBA派送方式分析允许同目的地多批次合车，两者样本不同。", "美盈数据工具")
         elif "供应商" in header and "成本" in header:
             cell.comment = Comment("优先采用原始承运商成本，不含仓内地板装车费。", "美盈数据工具")
-        elif header in {"平均派送时效", "P80派送时效"}:
+        elif header in {"平均派送时效", "P80派送时效", "P90派送时效"}:
             cell.comment = Comment("单位：天。按有效批次方数加权，LTL无需车次号，FTL仍需真实车次号。", "美盈数据工具")
         col = get_column_letter(cell.column)
         ws.column_dimensions[col].width = 42 if any(word in header for word in ["供应商", "分布", "派送方式货量", "派送方式占比"]) else min(max(len(header) * 1.6 + 2, 13), 27)
@@ -964,7 +964,7 @@ def _format_delivery_business_sheet(ws):
             if row_idx % 2 == 0:
                 data.fill = PatternFill("solid", fgColor="F0F5FA")
             if isinstance(data.value, (int, float)):
-                if "占比" in header or "覆盖率" in header:
+                if "占比" in header or "覆盖率" in header or "率" in header:
                     data.number_format = "0.00%"
                 elif "时效" in header and "次数" not in header and "方数" not in header:
                     data.number_format = '0.00" 天"'
