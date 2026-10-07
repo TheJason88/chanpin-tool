@@ -28,7 +28,7 @@ LINEHAUL_TARGET_NAMES = {
 LINEHAUL_SHEET_COLUMNS = [
     "发货仓", "干线目标区域", "专线线路", "统计周期", "车次数",
     "总出库体积", "总出库卡板数", "总派送成本", "平均整车价", "每方平均价",
-    "平均每车出库体积", "平均派送时效", "P80派送时效",
+    "平均每车出库体积", "P80每车出库体积", "P90每车出库体积", "平均派送时效", "P80派送时效", "P90派送时效",
     "平均整车价有效车次数", "平均每方价有效批次数", "平均装载有效车次数",
     "平均装载口径", "时效口径",
     "供应商平均整车成本", "供应商使用比例",
@@ -297,15 +297,22 @@ def _build_linehaul_sheet(matched):
                 "总出库卡板数": total_pallets,
                 "总派送成本": total_cost,
                 "平均整车价": whole_truck_prices.mean() if not whole_truck_prices.empty else pd.NA,
+                "P80整车价": processors.safe_p80(whole_truck_prices),
+                "P90整车价": processors.safe_p90(whole_truck_prices),
                 "每方平均价": detail_prices.mean() if not detail_prices.empty else pd.NA,
+                "P80每方平均价": processors.safe_p80(detail_prices),
+                "P90每方平均价": processors.safe_p90(detail_prices),
                 "平均每车出库体积": pd.to_numeric(trip_loads.get("完整车次出库体积"), errors="coerce").mean(),
+                "P80每车出库体积": processors.safe_p80(trip_loads.get("完整车次出库体积", pd.Series(dtype=float))),
+                "P90每车出库体积": processors.safe_p90(trip_loads.get("完整车次出库体积", pd.Series(dtype=float))),
                 "平均派送时效": delivery_workflow.volume_weighted_average(timing_group),
                 "P80派送时效": delivery_workflow.volume_weighted_p80(timing_group),
+                "P90派送时效": delivery_workflow.volume_weighted_p90(timing_group),
                 "平均整车价有效车次数": int(len(whole_truck_prices)),
                 "平均每方价有效批次数": int(len(detail_prices)),
                 "平均装载有效车次数": int(len(trip_loads)),
                 "平均装载口径": "按真实车次去重后取完整整车方数的有效样本算术平均",
-                "时效口径": "有效批次按出库方数加权平均及P80",
+                "时效口径": "有效批次按出库方数加权平均、P80及P90",
                 "供应商平均整车成本": supplier_costs,
                 "供应商使用比例": supplier_usage,
             })
@@ -314,8 +321,8 @@ def _build_linehaul_sheet(matched):
     result["车次数"] = pd.to_numeric(result["车次数"], errors="coerce").fillna(0).round(0).astype("Int64")
     result["总出库卡板数"] = pd.to_numeric(result["总出库卡板数"], errors="coerce").fillna(0).round(0).astype("Int64")
     for col in [
-        "总出库体积", "总派送成本", "平均整车价", "每方平均价",
-        "平均每车出库体积", "平均派送时效", "P80派送时效",
+        "总出库体积", "总派送成本", "平均整车价", "P80整车价", "P90整车价", "每方平均价", "P80每方平均价", "P90每方平均价",
+        "平均每车出库体积", "P80每车出库体积", "P90每车出库体积", "平均派送时效", "P80派送时效", "P90派送时效",
     ]:
         result[col] = pd.to_numeric(result[col], errors="coerce").round(2)
     return result
