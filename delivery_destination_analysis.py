@@ -14,11 +14,12 @@ METHOD = "仓点派送方式"
 METHODS = ["整车大车卡板", "整车大车地板", "整车小车", "多卸", "LTL", "待确认"]
 KEYS = ["仓库", "统计周期", "FBA仓点"]
 SUMMARY_COLUMNS = KEYS + [
-    "总出库体积", "派送方式货量", "派送方式占比", "平均每方成本",
+    "总出库体积", "派送方式货量", "派送方式占比", "平均每方成本", "P80每方成本", "P90每方成本",
     "有效成本批次数", "有效成本方数", "成本覆盖率",
 ]
 METHOD_COLUMNS = KEYS + [
-    "派送方式", "总出库体积", "占仓点货量比例", "平均整车成本", "平均每方成本",
+    "派送方式", "总出库体积", "占仓点货量比例", "平均整车成本", "P80整车成本", "P90整车成本",
+    "平均每方成本", "P80每方成本", "P90每方成本",
     "有效整车样本数", "有效成本批次数", "有效成本方数", "成本覆盖率",
     "供应商货量", "供应商使用比例", "供应商平均整车成本", "供应商平均每方成本",
     "供应商有效成本方数", "供应商成本覆盖率", "原始成本缺失回退批次数",
@@ -138,8 +139,11 @@ def _cost_metrics(group, carrier=False):
     sample = group[group["_有效承运成本" if carrier else "_有效运营成本"]]
     cost = "_承运成本" if carrier else "_运营成本"
     volume = float(sample["_方数"].sum())
+    unit_prices = processors.detail_ratio_values(sample, cost, "_方数")
     return {
-        "平均每方成本": sample[cost].div(sample["_方数"]).mean(),
+        "平均每方成本": unit_prices.mean() if not unit_prices.empty else np.nan,
+        "P80每方成本": processors.safe_p80(unit_prices),
+        "P90每方成本": processors.safe_p90(unit_prices),
         "有效成本批次数": len(sample), "有效成本方数": volume,
         "成本覆盖率": f"{volume / group['_方数'].sum():.2%}",
     }
@@ -209,6 +213,8 @@ def build_fba_destination_reports(matched):
                 **identity, "派送方式": method, "总出库体积": float(part["_方数"].sum()),
                 "占仓点货量比例": f"{part['_方数'].sum() / total:.2%}",
                 "平均整车成本": trucks["运营成本"].mean(),
+                "P80整车成本": processors.safe_p80(trucks["运营成本"]),
+                "P90整车成本": processors.safe_p90(trucks["运营成本"]),
                 "有效整车样本数": int(trucks["运营成本"].notna().sum()),
                 **_cost_metrics(part), **_supplier_cells(part, trucks),
             })
