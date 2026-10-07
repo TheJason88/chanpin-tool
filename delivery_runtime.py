@@ -184,7 +184,10 @@ def _clean_delivery_time_columns(df):
 
 def _patch_invalid_batch_keywords(delivery_workflow_module):
     """派送一无效批次剔除关键词补充。"""
-    keywords = list(getattr(delivery_workflow_module, "INVALID_BATCH_KEYWORDS", []))
+    keywords = [
+        keyword for keyword in getattr(delivery_workflow_module, "INVALID_BATCH_KEYWORDS", [])
+        if keyword != "快递"
+    ]
     for keyword in ADDITIONAL_INVALID_BATCH_KEYWORDS:
         if keyword not in keywords:
             keywords.append(keyword)
