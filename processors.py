@@ -370,7 +370,7 @@ def supplier_whole_truck_cost_summary(df):
 
 
 def average_sample_rows(df):
-    """Return transfer/linehaul detail rows eligible for averages/P80.
+    """Return transfer/linehaul detail rows eligible for averages/P80/P90.
 
     A remark containing either ``里`` or ``外`` marks a batch that shares a
     two-stop trip with a non-transfer batch.  It remains in all totals, but it
