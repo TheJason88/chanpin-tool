@@ -26,8 +26,8 @@ INTEGER_COLUMNS = ["排名", "发车数", "派送数", "出库卡板数"]
 DECIMAL_COLUMNS = [
     "数值", "占比", "出库体积", "FBA出库体积", "FBX出库体积", "派送成本", "派送时效",
     "总出库体积", "总派送成本", "平均整车价", "每方平均价", "平均每车出库体积",
-    "P80每车出库体积", "平均每车出库卡板数", "P80每车出库卡板数", "P80整车价",
-    "平均派送时效", "P80派送时效", "每方价格参考", "目的地总出库体积",
+    "P80每车出库体积", "P90每车出库体积", "平均每车出库卡板数", "P80每车出库卡板数", "P90每车出库卡板数", "P80整车价", "P90整车价",
+    "平均派送时效", "P80派送时效", "P90派送时效", "每方价格参考", "目的地总出库体积",
     "细分货量方数", "整车价格", "每方成本", "供应商平均整车价",
 ]
 DELIVERY_TRUCK_SHARE_COLUMN = "派送卡车使用比例"
@@ -876,6 +876,7 @@ def build_station_cost_report(matched):
             "平均整车价": None, "每方平均价": None,
             "平均每车出库体积": trip_volume.mean(),
             "P80每车出库体积": processors.safe_p80(trip_volume),
+            "P90每车出库体积": processors.safe_p90(trip_volume),
         })
     ftl["派送成本"] = pd.to_numeric(ftl.get("派送成本", 0), errors="coerce").fillna(0)
     positive_cost_source = pd.to_numeric(
@@ -933,12 +934,17 @@ def build_station_cost_report(matched):
                 "总出库卡板数": total_pallets,
                 "总派送成本": total_cost,
                 "平均整车价": whole_truck_prices.mean() if not whole_truck_prices.empty else pd.NA,
-                "P80整车价": processors.safe_p80(whole_truck_cost_sample["批次整车等价价"]),
+                "P80整车价": processors.safe_p80(whole_truck_prices),
+                "P90整车价": processors.safe_p90(whole_truck_prices),
                 "每方平均价": detail_prices.mean() if not detail_prices.empty else pd.NA,
+                "P80每方平均价": processors.safe_p80(detail_prices),
+                "P90每方平均价": processors.safe_p90(detail_prices),
                 "平均每车出库体积": trip_sample["出库体积"].mean() if not trip_sample.empty else pd.NA,
                 "P80每车出库体积": processors.safe_p80(trip_sample["出库体积"]),
+                "P90每车出库体积": processors.safe_p90(trip_sample["出库体积"]),
                 "平均每车出库卡板数": trip_sample["出库卡板数"].mean() if not trip_sample.empty else pd.NA,
                 "P80每车出库卡板数": processors.safe_p80(trip_sample["出库卡板数"]),
+                "P90每车出库卡板数": processors.safe_p90(trip_sample["出库卡板数"]),
                 "平均整车价有效车次数": int(len(whole_truck_prices)),
                 "平均每方价有效批次数": int(len(detail_prices)),
                 "平均装载有效车次数": int(len(trip_sample)),
