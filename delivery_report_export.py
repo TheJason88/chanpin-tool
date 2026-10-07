@@ -122,7 +122,12 @@ def _build_loading_metrics_report(reports):
         mode = mode_values.pop() if len(mode_values) == 1 else "无法判定"
         trip_volume = group["_出库方数"].sum(min_count=1)
         volume_is_valid = pd.notna(trip_volume) and float(trip_volume) > 0
-        capacity = {"大车卡板": 60.0, "大车地板": 80.0}.get(mode)
+        capacity = {"大车卡板": 60.0, "大车地板": 90.0}.get(mode)
+        single_trip_rate = (
+            min(float(trip_volume) / capacity, 1.0)
+            if volume_is_valid and capacity
+            else pd.NA
+        )
         trip_rows.append({
             "仓库": warehouse or "未识别仓库",
             "统计周期": period or "未识别周期",
@@ -130,7 +135,7 @@ def _build_loading_metrics_report(reports):
             "_装车类型": mode,
             "_出库方数": float(trip_volume) if pd.notna(trip_volume) else 0.0,
             "_有有效方数": volume_is_valid,
-            "_理论容量": capacity if volume_is_valid else 0.0,
+            "_单车满载率": single_trip_rate,
         })
 
     trips = pd.DataFrame(trip_rows)
@@ -140,14 +145,16 @@ def _build_loading_metrics_report(reports):
     rows = []
     for (warehouse, period), group in trips.groupby(["仓库", "统计周期"], dropna=False, sort=False):
         known = group[group["_装车类型"].isin(["大车卡板", "大车地板"])].copy()
-        valid_load = known[known["_有有效方数"]].copy()
+        valid_load = known[known["_有有效方数"] & known["_单车满载率"].notna()].copy()
         pallet = valid_load[valid_load["_装车类型"].eq("大车卡板")]
         floor = valid_load[valid_load["_装车类型"].eq("大车地板")]
         pallet_count = int((known["_装车类型"] == "大车卡板").sum())
         floor_count = int((known["_装车类型"] == "大车地板").sum())
         denominator = pallet_count + floor_count
-        effective_capacity = float(valid_load["_理论容量"].sum())
         effective_volume = float(valid_load["_出库方数"].sum())
+        pallet_load_rate = float(pallet["_单车满载率"].mean()) if not pallet.empty else pd.NA
+        floor_load_rate = float(floor["_单车满载率"].mean()) if not floor.empty else pd.NA
+        overall_load_rate = float(valid_load["_单车满载率"].mean()) if not valid_load.empty else pd.NA
         rows.append({
             "仓库": warehouse,
             "统计周期": period,
@@ -157,24 +164,21 @@ def _build_loading_metrics_report(reports):
             "大车地板车次数": floor_count,
             "无法判定装车类型车次数": int(len(group) - len(known)),
             "无有效出库方数车次数": int((known["_有有效方数"] == False).sum()),
+            "大车卡板标准容量": 60.0,
             "大车卡板有效出库方数": float(pallet["_出库方数"].sum()),
-            "大车卡板理论容量": float(pallet["_理论容量"].sum()),
-            "大车卡板满载率": (
-                float(pallet["_出库方数"].sum()) / float(pallet["_理论容量"].sum())
-                if float(pallet["_理论容量"].sum()) > 0 else pd.NA
-            ),
+            "大车卡板满载率加权车次": int(len(pallet)),
+            "大车卡板满载率": pallet_load_rate,
+            "大车地板标准容量": 90.0,
             "大车地板有效出库方数": float(floor["_出库方数"].sum()),
-            "大车地板理论容量": float(floor["_理论容量"].sum()),
-            "大车地板满载率": (
-                float(floor["_出库方数"].sum()) / float(floor["_理论容量"].sum())
-                if float(floor["_理论容量"].sum()) > 0 else pd.NA
-            ),
+            "大车地板满载率加权车次": int(len(floor)),
+            "大车地板满载率": floor_load_rate,
             "满载率有效实际出库方数": effective_volume,
-            "满载率有效理论容量": effective_capacity,
-            "满载率": effective_volume / effective_capacity if effective_capacity > 0 else pd.NA,
+            "满载率加权车次": int(len(valid_load)),
+            "满载率": overall_load_rate,
             "地板率": floor_count / denominator if denominator > 0 else pd.NA,
             "指标说明": (
-                "满载率=有效实际出库方数÷有效车型容量；大车卡板容量60 CBM，大车地板容量80 CBM；"
+                "先按车次计算单车满载率=min(实际出库方数÷车型容量,100%)，再按车次等权加权平均；"
+                "大车卡板容量60 CBM，大车地板容量90 CBM；"
                 "地板率=大车地板车次数÷（大车卡板车次数+大车地板车次数）。"
             ),
         })
@@ -463,7 +467,7 @@ def _rules(reports):
         {"规则类别": "整车样本", "说明": "FBA派送方式分析允许同目的地多批次合车；分类价格参考沿用单批次整车样本。供应商成本不含仓内装车费，运营成本含装车费。"},
         {"规则类别": "时效口径", "说明": "按有效方数加权平均和P80；LTL无需车次，FTL须有真实车次；其他有效性规则沿用。时效单位为天，货量单位为CBM，价格单位为美元。"},
         {"规则类别": "发车口径", "说明": "总发车数按真实FTL车次去重，分布按批次车份额汇总后取整；各分组显示值不能直接相加代替总发车数。"},
-        {"规则类别": "装载效率", "说明": "满载率按真实FTL大车车次汇总：有效实际出库方数÷有效车型容量；大车卡板容量60 CBM，大车地板容量80 CBM。地板率=大车地板车次数÷（大车卡板车次数+大车地板车次数）。同一车次只计一次，无法判定装车类型的车次不进入地板率分母。"},
+        {"规则类别": "装载效率", "说明": "先按真实FTL大车车次计算单车满载率=min(实际出库方数÷车型容量,100%)，再按车次等权加权平均；大车卡板容量60 CBM，大车地板容量90 CBM。卡板车62方按100%计，不超过100%。地板率=大车地板车次数÷（大车卡板车次数+大车地板车次数）。同一车次只计一次，无法判定装车类型的车次不进入地板率分母。"},
     ]
     for name in ["区域识别规则", "干线识别规则"]:
         for _, row in _frame(reports, name).iterrows():
