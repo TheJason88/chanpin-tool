@@ -437,11 +437,15 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
                 else:
                     metrics = build_stage2_report_for_destination(cleaned_batches, match_df=match_df, period_type=period_type, destination_type=delivery_destination_type)
                 business, audit = delivery_report_export.build_delivery_exports(metrics)
+                combined = {**business, **audit}
                 file_name = tool_common.build_output_filename(warehouse, DELIVERY_STAGE2_MODULE, delivery_destination_type, period_type)
                 st.session_state["delivery_stage2_exports"] = {
-                    "scope": export_scope, "sheets": list(business), "filename": file_name,
-                    "business": tool_common.write_sheets_to_excel(business).getvalue(),
-                    "audit": tool_common.write_sheets_to_excel(audit).getvalue(),
+                    "scope": export_scope,
+                    "business_sheets": list(business),
+                    "audit_sheets": list(audit),
+                    "all_sheets": list(combined),
+                    "filename": file_name,
+                    "output": tool_common.write_sheets_to_excel(combined).getvalue(),
                 }
         except Exception as e:
             st.error("派送数据匹配及分析失败，请检查派送一结果文件、匹配文件字段或批次号是否一致。")
@@ -449,14 +453,20 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
 
     saved = st.session_state.get("delivery_stage2_exports")
     if saved and saved["scope"] == export_scope:
-        st.success(f"报告已生成：{len(saved['sheets'])} 张业务表，审核明细单独下载。")
-        st.write(f"业务报告：{'、'.join(saved['sheets'])}")
-        st.download_button("下载派送分析报告 Excel", saved["business"], saved["filename"],
-                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_delivery_stage2")
-        st.download_button("下载审核明细 Excel（批次、车次、邮编补录）", saved["audit"],
-                           saved["filename"].removesuffix(".xlsx") + "_审核明细.xlsx",
-                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_delivery_stage2_audit")
-        st.caption("日常查看业务报告；核对批次或补邮编时使用审核明细。补录后将审核明细文件上传至5A。")
+        st.success(
+            f"报告已生成：{len(saved['business_sheets'])} 张业务表 + "
+            f"{len(saved['audit_sheets'])} 张审核表，共 {len(saved['all_sheets'])} 张工作表。"
+        )
+        st.write(f"业务表：{'、'.join(saved['business_sheets'])}")
+        st.write(f"审核表：{'、'.join(saved['audit_sheets'])}")
+        st.download_button(
+            "下载派送分析结果 Excel（业务 + 审核）",
+            saved["output"],
+            saved["filename"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_delivery_stage2",
+        )
+        st.caption("业务汇总和审核明细已合并到同一个 Excel；工作表分开命名，避免重复。补录邮编后继续上传至5A。")
 
 else:
     uploaded_files = st.file_uploader(
