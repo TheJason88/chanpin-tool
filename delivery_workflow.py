@@ -191,16 +191,17 @@ def add_ratio_rows(report_rows, report_part, metric_name, warehouse, period, dim
             "报告部分": report_part, "指标名称": metric_name, "仓库": warehouse, "统计周期": period,
             "维度类型": dimension_type, "维度值": dim_value, "数值": amount, "单位": unit,
             "占比": ratios.get(dim_value, 0), "出库体积": np.nan, "发车数": np.nan,
-            "平均派送时效": np.nan, "P80派送时效": np.nan,
+            "平均派送时效": np.nan, "P80派送时效": np.nan, "P90派送时效": np.nan,
             "备注": "占比按本指标各维度总数归一化，合计为1.00"
         })
 
 
-def report_row(report_part, metric_name, warehouse, period, dimension_type, dimension_value, value=np.nan, unit="", share=np.nan, volume=np.nan, dispatch=np.nan, avg_time=np.nan, p80_time=np.nan, note=""):
+def report_row(report_part, metric_name, warehouse, period, dimension_type, dimension_value, value=np.nan, unit="", share=np.nan, volume=np.nan, dispatch=np.nan, avg_time=np.nan, p80_time=np.nan, p90_time=np.nan, note=""):
     return {
         "报告部分": report_part, "指标名称": metric_name, "仓库": warehouse, "统计周期": period,
         "维度类型": dimension_type, "维度值": dimension_value, "数值": value, "单位": unit, "占比": share,
-        "出库体积": volume, "发车数": dispatch, "平均派送时效": avg_time, "P80派送时效": p80_time, "备注": note,
+        "出库体积": volume, "发车数": dispatch, "平均派送时效": avg_time, "P80派送时效": p80_time,
+        "P90派送时效": p90_time, "备注": note,
     }
 
 
@@ -998,6 +999,22 @@ def volume_weighted_p80(df, value_col="派送时效", weight_col="出库体积")
     return float(sample.loc[cumulative.ge(cutoff), "value"].iloc[0])
 
 
+def volume_weighted_p90(df, value_col="派送时效", weight_col="出库体积"):
+    """按方数权重求离散P90：累计有效方数首次达到90%时对应的批次时效。"""
+    if df is None or df.empty:
+        return np.nan
+    sample = pd.DataFrame({
+        "value": pd.to_numeric(df[value_col], errors="coerce"),
+        "weight": pd.to_numeric(df[weight_col], errors="coerce"),
+    }).dropna()
+    sample = sample[sample["weight"] > 0].sort_values("value", kind="stable")
+    if sample.empty:
+        return np.nan
+    cutoff = float(sample["weight"].sum()) * 0.9
+    cumulative = sample["weight"].cumsum()
+    return float(sample.loc[cumulative.ge(cutoff), "value"].iloc[0])
+
+
 def timing_sample_rows(df):
     """LTL无需车次，FTL须有真实车次；无效时效/方数及里外备注仍排除。"""
     if df is None or df.empty:
@@ -1040,7 +1057,8 @@ def _append_weighted_timing_row(rows, metric_name, warehouse, period, dimension_
         dimension_value,
         avg_time=volume_weighted_average(sample),
         p80_time=volume_weighted_p80(sample),
-        note="按有效FTL/LTL批次方数加权；LTL无需车次；FTL缺车次、无效时效/方数及备注含‘里/外’批次不参与",
+        p90_time=volume_weighted_p90(sample),
+        note="按有效FTL/LTL批次方数加权；平均/P80/P90均在同一有效样本上计算；LTL无需车次；FTL缺车次、无效时效/方数及备注含‘里/外’批次不参与",
     )
     row["有效时效批次数"] = int(len(sample))
     row["有效时效方数"] = float(pd.to_numeric(sample.get("出库体积", 0), errors="coerce").fillna(0).sum()) if not sample.empty else 0.0
