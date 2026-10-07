@@ -1174,29 +1174,92 @@ def cost_vehicle_group(row):
 
 
 def build_sheet2_cost_report(df):
+    """Compatibility cost report with car-level counts and car-level load samples."""
     rows = []
     if df.empty:
         return pd.DataFrame()
+
     marked = processors.mark_whole_truck_cost_sample_eligibility(df)
     ftl = dispatch_rows(marked).copy()
     if ftl.empty:
         return pd.DataFrame()
+
     ftl["车型装车分组"] = ftl.apply(cost_vehicle_group, axis=1)
     ftl[["对象类型", "对象名称"]] = ftl.apply(lambda r: pd.Series(cost_dimension_label(r)), axis=1)
-    full_load = ftl[(ftl["车型标准值"] == "53尺大车") & (ftl["装车类型标准值"] == "地板")].copy()
+
+    def trip_level_sample(frame):
+        if frame.empty or "车次号" not in frame.columns:
+            return pd.DataFrame()
+        sample = frame.copy()
+        trip_no = sample["车次号"].fillna("").astype(str).str.strip()
+        sample = sample[trip_no.ne("")].copy()
+        if sample.empty:
+            return pd.DataFrame()
+        warehouse = sample.get("仓库", pd.Series("", index=sample.index)).fillna("").astype(str).str.upper().str.strip()
+        sample["_车次键"] = warehouse + "||" + sample["车次号"].fillna("").astype(str).str.strip()
+        volume_col = "整车出库体积" if "整车出库体积" in sample.columns else "出库体积"
+        sample["_车次方数"] = pd.to_numeric(sample[volume_col], errors="coerce")
+        return sample.drop_duplicates("_车次键", keep="first").copy()
+
+    full_load = ftl[
+        (ftl["车型标准值"] == "53尺大车")
+        & (ftl["装车类型标准值"] == "地板")
+    ].copy()
     for (warehouse, period), group in full_load.groupby(["仓库", "统计周期"], dropna=False):
-        rows.append({"报告部分": "4.成本", "指标名称": "满载情况", "仓库": warehouse, "统计周期": period, "对象类型": "FTL大车地板", "对象名称": "全部", "车型装车分组": "大车地板", "车次数": len(group), "总出库体积": group["出库体积"].sum(), "总派送成本": group["派送成本"].sum(), "平均整车价": np.nan, "每方平均价": np.nan, "平均每车出库体积": group["出库体积"].mean(), "P80每车出库体积": processors.safe_p80(group["出库体积"]), "备注": "满载口径：FTL + 53尺大车 + 地板"})
+        trip_sample = trip_level_sample(group)
+        if trip_sample.empty:
+            continue
+        rows.append({
+            "报告部分": "4.成本",
+            "指标名称": "满载情况",
+            "仓库": warehouse,
+            "统计周期": period,
+            "对象类型": "FTL大车地板",
+            "对象名称": "全部",
+            "车型装车分组": "大车地板",
+            "车次数": int(len(trip_sample)),
+            "总出库体积": pd.to_numeric(group["出库体积"], errors="coerce").sum(),
+            "总派送成本": pd.to_numeric(group["派送成本"], errors="coerce").sum(),
+            "平均整车价": np.nan,
+            "每方平均价": np.nan,
+            "平均每车出库体积": trip_sample["_车次方数"].mean(),
+            "P80每车出库体积": processors.safe_p80(trip_sample["_车次方数"]),
+            "备注": "车次数和平均/P80装载均按真实车次去重；满载口径：FTL + 53尺大车 + 地板",
+        })
+
     cost_source = ftl[ftl["对象类型"].isin(["FBA", "FBX平台仓"])].copy()
     cost_source = cost_source[cost_source["车型装车分组"].isin(["小车", "大车卡板", "大车地板"])]
-    for (warehouse, period, obj_type, obj_name, vehicle_group), group in cost_source.groupby(["仓库", "统计周期", "对象类型", "对象名称", "车型装车分组"], dropna=False):
-        total_cost = group["派送成本"].sum(); total_volume = group["出库体积"].sum()
+    for (warehouse, period, obj_type, obj_name, vehicle_group), group in cost_source.groupby(
+        ["仓库", "统计周期", "对象类型", "对象名称", "车型装车分组"],
+        dropna=False,
+    ):
+        total_cost = pd.to_numeric(group["派送成本"], errors="coerce").sum()
+        total_volume = pd.to_numeric(group["出库体积"], errors="coerce").sum()
         whole_truck_cost_group = processors.whole_truck_cost_sample_rows(group)
-        rows.append({"报告部分": "4.成本", "指标名称": "FBA及FBX平台仓成本", "仓库": warehouse, "统计周期": period, "对象类型": obj_type, "对象名称": obj_name, "车型装车分组": vehicle_group, "车次数": len(group), "总出库体积": total_volume, "总派送成本": total_cost, "平均整车价": whole_truck_cost_group["派送成本"].mean(), "每方平均价": processors.safe_divide(total_cost, total_volume), "平均每车出库体积": group["出库体积"].mean(), "P80每车出库体积": processors.safe_p80(group["出库体积"]), "备注": "小车不区分卡板/地板；大车区分卡板与地板；多批次车次不计整车成本"})
+        trip_sample = trip_level_sample(group)
+        exact_trip_count = (
+            pd.to_numeric(group["批次车份额"], errors="coerce").sum()
+            if "批次车份额" in group.columns
+            else len(trip_sample)
+        )
+        rows.append({
+            "报告部分": "4.成本",
+            "指标名称": "FBA及FBX平台仓成本",
+            "仓库": warehouse,
+            "统计周期": period,
+            "对象类型": obj_type,
+            "对象名称": obj_name,
+            "车型装车分组": vehicle_group,
+            "车次数": exact_trip_count,
+            "总出库体积": total_volume,
+            "总派送成本": total_cost,
+            "平均整车价": whole_truck_cost_group["派送成本"].mean(),
+            "每方平均价": processors.safe_divide(total_cost, total_volume),
+            "平均每车出库体积": trip_sample["_车次方数"].mean() if not trip_sample.empty else np.nan,
+            "P80每车出库体积": processors.safe_p80(trip_sample["_车次方数"]) if not trip_sample.empty else np.nan,
+            "备注": "每方价格按方数口径；车次数和平均/P80装载按真实车次；多批次车次不计整车成本",
+        })
     return pd.DataFrame(rows)
-
-
-def dispatch_rows(df):
-    return df[df["是否FTL发车"]].copy()
 
 
 def process_stage2_analysis(cleaned_batches, match_df, period_type="按周统计"):
