@@ -6,7 +6,7 @@ import pandas as pd
 
 BUSINESS_SHEETS = (
     "派送总览", "FBA仓点总览", "FBA派送方式分析", "FBX仓点总览",
-    "分类价格参考", "调拨数据", "干线数据", "黄金标准数据",
+    "分类价格参考", "调拨数据", "干线数据", "黄金标准数据", "满载率与地板率",
 )
 AUDIT_SHEETS = ("派送二_匹配后批次数据", "派送二_车次汇总核对", "邮编异常审核")
 PLATFORM_ALIASES = {"运去哪仓": "运去哪"}
@@ -34,6 +34,148 @@ def _normalize_keys(frame, keys):
         cleaner = _canonical_platform if key == "平台名称" else _clean_label
         out[key] = out[key].apply(cleaner)
     return out
+
+
+
+def _is_truthy(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip().lower() in {"true", "1", "yes", "y", "是", "有", "ftl"}
+
+
+def _is_real_trip(row):
+    trip_no = _clean_label(row.get("车次号", ""))
+    if not trip_no:
+        return False
+    if "是否有真实车次号" in row.index and not _is_truthy(row.get("是否有真实车次号")):
+        return False
+    return True
+
+
+def _is_ftl_trip(row):
+    if _is_truthy(row.get("是否FTL发车")):
+        return True
+    transport_type = _clean_label(row.get("标准运输类型", "")).upper()
+    return "FTL" in transport_type or "整车" in transport_type
+
+
+def _loading_group(row):
+    vehicle = _clean_label(row.get("车型标准值", ""))
+    loading = _clean_label(row.get("装车类型标准值", ""))
+    is_large_truck = "53" in vehicle or "大车" in vehicle
+    if is_large_truck and "地板" in loading:
+        return "大车地板"
+    if is_large_truck and "卡板" in loading:
+        return "大车卡板"
+    return "无法判定"
+
+
+def _build_loading_metrics_report(reports):
+    """
+    Build load-factor and floor-rate metrics at warehouse/period grain.
+
+    A truck is counted once by real trip number. For FBA/FBX filtered exports,
+    the internal full matched batch set is used because a truck's capacity
+    belongs to the physical truck, not to a destination-type slice.
+    """
+    data = _frame(reports, "__满载率全量批次")
+    if data.empty:
+        data = _frame(reports, "派送二_匹配后批次数据")
+    if data.empty:
+        return pd.DataFrame()
+
+    data = data.copy()
+    if "仓库" not in data.columns:
+        data["仓库"] = "未识别仓库"
+    if "统计周期" not in data.columns:
+        data["统计周期"] = "未识别周期"
+    if "车次号" not in data.columns:
+        return pd.DataFrame()
+
+    data["_出库方数"] = pd.to_numeric(data.get("出库体积", 0), errors="coerce")
+    data["_真实FTL车次"] = data.apply(lambda row: _is_real_trip(row) and _is_ftl_trip(row), axis=1)
+    data["_装车类型标准值"] = data.apply(_loading_group, axis=1)
+    data = data[data["_真实FTL车次"]].copy()
+    if data.empty:
+        return pd.DataFrame()
+
+    trip_rows = []
+    trip_keys = ["仓库", "统计周期", "车次号"]
+    for key_values, group in data.groupby(trip_keys, dropna=False, sort=False):
+        if not isinstance(key_values, tuple):
+            key_values = (key_values,)
+        warehouse, period, trip_no = (_clean_label(value) for value in key_values)
+        mode_values = {
+            value for value in group["_装车类型标准值"].tolist()
+            if value
+        } if "_装车类型标准值" in group else set()
+        mode = mode_values.pop() if len(mode_values) == 1 else "无法判定"
+        trip_volume = group["_出库方数"].sum(min_count=1)
+        volume_is_valid = pd.notna(trip_volume) and float(trip_volume) > 0
+        capacity = {"大车卡板": 60.0, "大车地板": 80.0}.get(mode)
+        trip_rows.append({
+            "仓库": warehouse or "未识别仓库",
+            "统计周期": period or "未识别周期",
+            "车次号": trip_no,
+            "_装车类型": mode,
+            "_出库方数": float(trip_volume) if pd.notna(trip_volume) else 0.0,
+            "_有有效方数": volume_is_valid,
+            "_理论容量": capacity if volume_is_valid else 0.0,
+        })
+
+    trips = pd.DataFrame(trip_rows)
+    if trips.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for (warehouse, period), group in trips.groupby(["仓库", "统计周期"], dropna=False, sort=False):
+        known = group[group["_装车类型"].isin(["大车卡板", "大车地板"])].copy()
+        valid_load = known[known["_有有效方数"]].copy()
+        pallet = valid_load[valid_load["_装车类型"].eq("大车卡板")]
+        floor = valid_load[valid_load["_装车类型"].eq("大车地板")]
+        pallet_count = int((known["_装车类型"] == "大车卡板").sum())
+        floor_count = int((known["_装车类型"] == "大车地板").sum())
+        denominator = pallet_count + floor_count
+        effective_capacity = float(valid_load["_理论容量"].sum())
+        effective_volume = float(valid_load["_出库方数"].sum())
+        rows.append({
+            "仓库": warehouse,
+            "统计周期": period,
+            "统计口径": "真实FTL大车车次；FBA/FBX筛选时仍按全量物理车次计算",
+            "大车整车车次数": int(len(group)),
+            "大车卡板车次数": pallet_count,
+            "大车地板车次数": floor_count,
+            "无法判定装车类型车次数": int(len(group) - len(known)),
+            "无有效出库方数车次数": int((known["_有有效方数"] == False).sum()),
+            "大车卡板有效出库方数": float(pallet["_出库方数"].sum()),
+            "大车卡板理论容量": float(pallet["_理论容量"].sum()),
+            "大车卡板满载率": (
+                float(pallet["_出库方数"].sum()) / float(pallet["_理论容量"].sum())
+                if float(pallet["_理论容量"].sum()) > 0 else pd.NA
+            ),
+            "大车地板有效出库方数": float(floor["_出库方数"].sum()),
+            "大车地板理论容量": float(floor["_理论容量"].sum()),
+            "大车地板满载率": (
+                float(floor["_出库方数"].sum()) / float(floor["_理论容量"].sum())
+                if float(floor["_理论容量"].sum()) > 0 else pd.NA
+            ),
+            "满载率有效实际出库方数": effective_volume,
+            "满载率有效理论容量": effective_capacity,
+            "满载率": effective_volume / effective_capacity if effective_capacity > 0 else pd.NA,
+            "地板率": floor_count / denominator if denominator > 0 else pd.NA,
+            "指标说明": (
+                "满载率=有效实际出库方数÷有效车型容量；大车卡板容量60 CBM，大车地板容量80 CBM；"
+                "地板率=大车地板车次数÷（大车卡板车次数+大车地板车次数）。"
+            ),
+        })
+    return pd.DataFrame(rows)
 
 
 def _weighted_supplier_shares(group):
@@ -318,6 +460,7 @@ def _rules(reports):
         {"规则类别": "整车样本", "说明": "FBA派送方式分析允许同目的地多批次合车；分类价格参考沿用单批次整车样本。供应商成本不含仓内装车费，运营成本含装车费。"},
         {"规则类别": "时效口径", "说明": "按有效方数加权平均和P80；LTL无需车次，FTL须有真实车次；其他有效性规则沿用。时效单位为天，货量单位为CBM，价格单位为美元。"},
         {"规则类别": "发车口径", "说明": "总发车数按真实FTL车次去重，分布按批次车份额汇总后取整；各分组显示值不能直接相加代替总发车数。"},
+        {"规则类别": "装载效率", "说明": "满载率按真实FTL大车车次汇总：有效实际出库方数÷有效车型容量；大车卡板容量60 CBM，大车地板容量80 CBM。地板率=大车地板车次数÷（大车卡板车次数+大车地板车次数）。同一车次只计一次，无法判定装车类型的车次不进入地板率分母。"},
     ]
     for name in ["区域识别规则", "干线识别规则"]:
         for _, row in _frame(reports, name).iterrows():
@@ -326,7 +469,7 @@ def _rules(reports):
 
 
 def build_delivery_exports(reports):
-    """Return a business workbook (at most eight tabs) and a reusable audit workbook."""
+    """Return one business workbook and one reusable audit workbook."""
     stations = {"FBA仓点总览": _station(reports, "FBA"), "FBX仓点总览": _station(reports, "FBX平台仓")}
     stations["FBX仓点总览"] = _append_fbx_unidentified_summary(reports, stations["FBX仓点总览"])
     covered = _move_station_dispatch(reports, stations)
@@ -342,6 +485,7 @@ def build_delivery_exports(reports):
         "调拨数据": _frame(reports, "调拨数据"),
         "干线数据": linehaul,
         "黄金标准数据": _frame(reports, "黄金标准数据"),
+        "满载率与地板率": _build_loading_metrics_report(reports),
     }
     business = {name: data for name, data in candidates.items() if not data.empty}
     if not business:
