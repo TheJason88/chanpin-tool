@@ -19,7 +19,7 @@ TRANSFER_TARGETS = {
 }
 
 # 原始代码已有：取消、作废、废单、无效、删除、关闭。这里补足历史备注删除关键词和新增关键词。
-ADDITIONAL_INVALID_BATCH_KEYWORDS = ["废单", "快递", "公共单", "清除", "自提"]
+ADDITIONAL_INVALID_BATCH_KEYWORDS = ["废单", "公共单", "清除", "自提"]
 
 # 明细阶段的LTL优先识别词；车次合并后的最终运输类型仍由
 # apply_trip_transport_type_rules只按真实车次及原始运输证据判定，不用承运商名称推断FTL/LTL。
@@ -204,23 +204,36 @@ def _set_text_for_mask(df, mask, col, value, create=False):
 
 
 def _apply_ltl_priority_to_detail(detail_df):
-    """备注命中LTL/散货/散板时，优先按LTL处理。"""
+    """备注含LTL时强制LTL；备注含快递时只覆盖派送方式为“转快递”。"""
     if detail_df is None or detail_df.empty:
         return detail_df
 
     out = detail_df.copy()
     remark_cols = [col for col in LTL_REMARK_COLUMNS if col in out.columns]
     if remark_cols:
-        mask = out.apply(lambda row: _contains_any_keyword(_row_text(row, remark_cols), LTL_PRIORITY_KEYWORDS), axis=1)
-        if mask.any():
-            _set_text_for_mask(out, mask, "标准运输类型", "LTL", create=True)
-            _set_text_for_mask(out, mask, "运输类型", "LTL")
-            _set_text_for_mask(out, mask, "运输方式", "LTL")
-            _set_text_for_mask(out, mask, "派送方式", "散板出库")
-            _set_text_for_mask(out, mask, "车型标准值", "不适用")
-            _set_text_for_mask(out, mask, "装车类型标准值", "散板")
-    return _clean_delivery_time_columns(out)
+        remark_text = out.apply(lambda row: _row_text(row, remark_cols), axis=1)
+        ltl_mask = remark_text.map(
+            lambda value: _contains_any_keyword(value, LTL_PRIORITY_KEYWORDS)
+        )
+        courier_mask = remark_text.map(
+            lambda value: _contains_any_keyword(value, ["快递"])
+        )
 
+        if ltl_mask.any():
+            _set_text_for_mask(out, ltl_mask, "标准运输类型", "LTL", create=True)
+            _set_text_for_mask(out, ltl_mask, "运输类型", "LTL")
+            _set_text_for_mask(out, ltl_mask, "运输方式", "LTL")
+            _set_text_for_mask(out, ltl_mask, "派送方式", "散板出库")
+            _set_text_for_mask(out, ltl_mask, "标准派送方式", "散板出库")
+            _set_text_for_mask(out, ltl_mask, "车型标准值", "不适用")
+            _set_text_for_mask(out, ltl_mask, "装车类型标准值", "散板")
+
+        # LTL优先：同一备注同时出现“LTL”和“快递”时，仍按LTL，不改成转快递。
+        courier_only = courier_mask & ~ltl_mask
+        if courier_only.any():
+            _set_text_for_mask(out, courier_only, "派送方式", "转快递")
+            _set_text_for_mask(out, courier_only, "标准派送方式", "转快递")
+    return _clean_delivery_time_columns(out)
 
 def _patch_ltl_priority_from_remarks():
     """功能一原始明细清洗后、合并车次前，按备注优先纠正LTL。"""
