@@ -25,7 +25,7 @@ try:
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-10-02-compact-reports-v29"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-10-07-loading-metrics-v30"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
@@ -210,6 +210,8 @@ def build_stage2_report_for_destination(cleaned_batches, match_df=None, period_t
     for sheet in get_stage2_report_sheet_names(destination_type):
         if sheet in report:
             ordered[sheet] = report[sheet]
+    # Load/floor metrics use the full physical-trip dataset even for an FBA/FBX slice.
+    ordered["__满载率全量批次"] = all_matched
     return ordered
 
 
@@ -298,7 +300,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
     if period_type == ORIGINAL_FILE_PERIOD:
         st.info("派送二按原文件时间范围：货量、发车、时效及所有派送成本统一按批次出库时间范围归期。")
     else:
-        st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。货量、发车、时效及所有派送成本统一按批次出库时间归期。业务报告最多8张表，仓点货量、价格和时效合并展示；审核明细单独下载。LTL不显示整车价格。")
+        st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。货量、发车、时效及所有派送成本统一按批次出库时间归期。业务报告按模块输出，满载率与地板率单独展示；业务汇总和审核明细统一写入同一个 Excel。LTL不显示整车价格。")
 elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
     time_dimension = st.selectbox(
         "3. 选择统计时间指标",
