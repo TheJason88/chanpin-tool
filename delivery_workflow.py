@@ -1242,7 +1242,8 @@ def build_sheet2_cost_report(df):
             "每方平均价": np.nan,
             "平均每车出库体积": trip_sample["_车次方数"].mean(),
             "P80每车出库体积": processors.safe_p80(trip_sample["_车次方数"]),
-            "备注": "车次数和平均/P80装载均按真实车次去重；满载口径：FTL + 53尺大车 + 地板",
+            "P90每车出库体积": processors.safe_p90(trip_sample["_车次方数"]),
+            "备注": "车次数和平均/P80/P90装载均按真实车次去重；满载口径：FTL + 53尺大车 + 地板",
         })
 
     cost_source = ftl[ftl["对象类型"].isin(["FBA", "FBX平台仓"])].copy()
@@ -1255,6 +1256,8 @@ def build_sheet2_cost_report(df):
         total_volume = pd.to_numeric(group["出库体积"], errors="coerce").sum()
         whole_truck_cost_group = processors.whole_truck_cost_sample_rows(group)
         trip_sample = trip_level_sample(group)
+        average_source = processors.average_sample_rows(group)
+        detail_prices = processors.detail_ratio_values(average_source, "派送成本", "出库体积")
         exact_trip_count = (
             pd.to_numeric(group["批次车份额"], errors="coerce").sum()
             if "批次车份额" in group.columns
@@ -1272,10 +1275,16 @@ def build_sheet2_cost_report(df):
             "总出库体积": total_volume,
             "总派送成本": total_cost,
             "平均整车价": whole_truck_cost_group["派送成本"].mean(),
+            "P80整车价": processors.safe_p80(whole_truck_cost_group["派送成本"]),
+            "P90整车价": processors.safe_p90(whole_truck_cost_group["派送成本"]),
             "每方平均价": processors.safe_divide(total_cost, total_volume),
+            "批次平均每方价": detail_prices.mean() if not detail_prices.empty else np.nan,
+            "P80每方平均价": processors.safe_p80(detail_prices),
+            "P90每方平均价": processors.safe_p90(detail_prices),
             "平均每车出库体积": trip_sample["_车次方数"].mean() if not trip_sample.empty else np.nan,
             "P80每车出库体积": processors.safe_p80(trip_sample["_车次方数"]) if not trip_sample.empty else np.nan,
-            "备注": "每方价格按方数口径；车次数和平均/P80装载按真实车次；多批次车次不计整车成本",
+            "P90每车出库体积": processors.safe_p90(trip_sample["_车次方数"]) if not trip_sample.empty else np.nan,
+            "备注": "每方参考价为总成本÷总方数；批次平均每方价/P80/P90使用同一有效批次样本；车次数和装载按真实车次；多批次车次不计整车成本",
         })
     return pd.DataFrame(rows)
 
