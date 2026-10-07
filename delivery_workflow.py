@@ -984,7 +984,7 @@ def volume_weighted_average(df, value_col="派送时效", weight_col="出库体�
 
 
 def volume_weighted_p80(df, value_col="派送时效", weight_col="出库体积"):
-    """按方数权重求离散P80：累计有效方数首次达到80%时对应的批次时效。"""
+    """按方数权重求离散P80/P90：累计有效方数首次达到80%或90%时对应的批次时效。"""
     if df is None or df.empty:
         return np.nan
     sample = pd.DataFrame({
