@@ -69,6 +69,8 @@ def _is_ftl_trip(row):
 def _loading_group(row):
     vehicle = _clean_label(row.get("车型标准值", ""))
     loading = _clean_label(row.get("装车类型标准值", ""))
+    if "26" in vehicle or "小车" in vehicle:
+        return "非大车"
     is_large_truck = "53" in vehicle or "大车" in vehicle
     if is_large_truck and "地板" in loading:
         return "大车地板"
@@ -103,6 +105,7 @@ def _build_loading_metrics_report(reports):
     data["_真实FTL车次"] = data.apply(lambda row: _is_real_trip(row) and _is_ftl_trip(row), axis=1)
     data["_装车类型标准值"] = data.apply(_loading_group, axis=1)
     data = data[data["_真实FTL车次"]].copy()
+    data = data[data["_装车类型标准值"] != "非大车"].copy()
     if data.empty:
         return pd.DataFrame()
 
