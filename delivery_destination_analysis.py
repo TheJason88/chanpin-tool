@@ -11,7 +11,7 @@ import tool_common
 
 TRIP_CONTEXT = "车次批次目的地上下文"
 METHOD = "仓点派送方式"
-METHODS = ["整车大车卡板", "整车大车地板", "整车小车", "多卸", "LTL", "待确认"]
+METHODS = ["整车大车卡板", "整车大车地板", "整车小车", "多卸", "LTL", "转快递", "待确认"]
 KEYS = ["仓库", "统计周期", "FBA仓点"]
 SUMMARY_COLUMNS = KEYS + [
     "总出库体积", "派送方式货量", "派送方式占比", "平均每方成本", "P80每方成本", "P90每方成本",
@@ -104,6 +104,16 @@ def annotate_trip_context(df):
     large = vehicle.str.contains("大车|53", regex=True)
     out.loc[single & large & loading.eq("卡板"), METHOD] = "整车大车卡板"
     out.loc[single & large & loading.eq("地板"), METHOD] = "整车大车地板"
+
+    # 备注是最终派送方式的覆盖证据；LTL优先于“快递”，避免同一备注产生冲突标签。
+    remark_cols = [col for col in processors.REMARK_TRANSPORT_COLUMNS if col in out.columns]
+    if remark_cols:
+        remarks = out[remark_cols].fillna("").astype(str).agg(" ".join, axis=1)
+        ltl_note = remarks.map(processors.remark_contains_ltl)
+        courier_note = remarks.map(processors.remark_contains_courier)
+        out.loc[ltl_note, METHOD] = "LTL"
+        out.loc[courier_note & ~ltl_note, METHOD] = "转快递"
+
     # The shared minimum-volume rule applies to the complete trip, not each stop.
     sample_source = out.copy()
     sample_source["出库体积"] = _number(out, "整车出库体积").fillna(_number(out, "出库体积"))
