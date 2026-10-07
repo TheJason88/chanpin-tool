@@ -614,7 +614,11 @@ def _build_transfer_cost_report(matched):
 
 def _build_transfer_report(matched):
     marked = processors.mark_whole_truck_cost_sample_eligibility(matched)
-    transfer = _transfer_rows(marked, ftl_only=True, include_missing_trip=True)
+    # 调拨总方数、总成本和每方调拨成本必须共用同一批有效调拨卸点：
+    # 仅保留原始派送成本>0的调拨批次，避免零成本批次进入方数分母。
+    transfer = _filter_positive_cost_rows(
+        _transfer_rows(marked, ftl_only=True, include_missing_trip=True)
+    )
     columns = [
         "发货仓", "调拨目标仓", "专线线路", "统计周期", "车次数", "完整调拨车次数",
         "混合目的地折算车份额", "总出库体积", "总出库卡板数", "总派送成本",
