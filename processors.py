@@ -176,6 +176,44 @@ def safe_p90(series):
 
 MULTI_UNLOAD_REMARK_MARKERS = ("里", "外")
 MULTI_UNLOAD_REMARK_COLUMNS = ("同车次备注集合", "匹配备注集合", "备注", "备注信息", "MEMO", "跟进记录", "内部备注")
+
+# 运输类型/派送方式识别统一扫描这些备注列。备注是业务证据，不能因为列名不同而漏判。
+REMARK_TRANSPORT_COLUMNS = tuple(dict.fromkeys(MULTI_UNLOAD_REMARK_COLUMNS + (
+    "备注列", "派送区域", "运输备注", "配送备注",
+)))
+
+def remark_text_from_row(row):
+    """合并一行可用备注，兼容Series和普通mapping。"""
+    values = []
+    for col in REMARK_TRANSPORT_COLUMNS:
+        try:
+            present = col in row.index if hasattr(row, "index") else col in row
+            value = row.get(col, "") if present else ""
+        except (AttributeError, TypeError):
+            value = ""
+        if not is_blank(value):
+            values.append(str(value))
+    return " ".join(values)
+
+def remark_contains_ltl(value):
+    """备注含LTL/散货/散板时，返回强制LTL证据。"""
+    if is_blank(value):
+        return False
+    return bool(re.search(r"L\s*T\s*L|散货|散板", str(value), flags=re.IGNORECASE))
+
+def remark_contains_courier(value):
+    if is_blank(value):
+        return False
+    return "快递" in str(value)
+
+def remark_dispatch_method(value):
+    """备注派送方式优先级：LTL高于快递，避免同一备注同时出现时被误改。"""
+    if remark_contains_ltl(value):
+        return "LTL"
+    if remark_contains_courier(value):
+        return "转快递"
+    return ""
+
 MIN_TRANSFER_LINEHAUL_AVERAGE_VOLUME = 45
 REGULAR_DELIVERY_MIN_AVERAGE_VOLUME = {
     "大车地板": 60,
@@ -1510,6 +1548,9 @@ def process_delivery_stage1_from_df(df, warehouse, period_type="按周统计", s
     df = pd.concat([df, loading_results], axis=1)
 
     df["标准派送方式"] = df.apply(lambda row: build_standard_delivery_method(row["标准运输类型"], row["车型标准值"], row["装车类型标准值"]), axis=1)
+    # 备注中的“快递”是派送方式覆盖，不改变运输类型；与LTL同时出现时LTL优先。
+    remark_methods = df.apply(lambda row: remark_dispatch_method(remark_text_from_row(row)), axis=1)
+    df.loc[remark_methods.eq("转快递"), "标准派送方式"] = "转快递"
 
     df["出库时间"] = pd.to_datetime(df["出库时间"], errors="coerce")
     df["签收时间"] = pd.to_datetime(df["签收时间"], errors="coerce")
@@ -1631,11 +1672,12 @@ TRIP_LTL_TO_FTL_VOLUME_THRESHOLD = 60.0
 
 
 def apply_trip_transport_type_rules(df, volume_threshold=TRIP_LTL_TO_FTL_VOLUME_THRESHOLD):
-    """先按仓库+真实车次审视整车，再决定批次最终运输类型。
+    """按仓库+真实车次判定运输类型，优先保留备注中的强制证据。
 
-    同车次同时出现FTL和LTL时整车统一按FTL；同车次只有LTL且总出库
-    体积严格大于60CBM时也按FTL。60CBM本身仍保持LTL，空车次互不合并。
-    承运商名称（包括AMAZON FREIGHT）不参与FTL/LTL判定。
+    - 备注含LTL/散货/散板：该批次强制LTL，不能被车次合并规则改成FTL。
+    - FBX有真实车次号且备注未强制LTL：按车次号进入整车判定，允许小车/大车卡板/大车地板。
+    - 其他历史规则继续保留：同车次FTL/LTL混合时，非强制LTL行统一FTL；
+      同车次纯LTL且总量严格大于阈值时，非强制LTL行重判FTL。
     """
     if df is None or df.empty:
         return df
@@ -1644,13 +1686,15 @@ def apply_trip_transport_type_rules(df, volume_threshold=TRIP_LTL_TO_FTL_VOLUME_
     if "标准运输类型" not in out.columns:
         source = out["运输类型"] if "运输类型" in out.columns else pd.Series("", index=out.index)
         out["标准运输类型"] = source.apply(normalize_transport_type)
-    for col in ["仓库", "车次号"]:
+    for col in ["仓库", "车次号", "FBA/FBX", "系统产品类型"]:
         if col not in out.columns:
             out[col] = ""
     if "出库体积" not in out.columns:
         out["出库体积"] = 0
 
     out["标准运输类型"] = out["标准运输类型"].astype(str).str.upper().str.strip()
+    # 留存车次判定前的原始标准运输类型，避免“FBX有车次改FTL”后审核丢失原始证据。
+    out["_原始标准运输类型"] = out["标准运输类型"].copy()
     if "原始运输类型集合" not in out.columns:
         out["原始运输类型集合"] = out["标准运输类型"]
     else:
@@ -1661,35 +1705,66 @@ def apply_trip_transport_type_rules(df, volume_threshold=TRIP_LTL_TO_FTL_VOLUME_
     else:
         out["运输类型重判原因"] = out["运输类型重判原因"].astype(object)
 
+    remark_text = out.apply(remark_text_from_row, axis=1)
+    out["_备注强制LTL"] = remark_text.map(remark_contains_ltl)
+    out.loc[out["_备注强制LTL"], "标准运输类型"] = "LTL"
+    out.loc[out["_备注强制LTL"], "运输类型重判原因"] = "备注含LTL/散货/散板，强制按LTL"
+
     trip_text = out["车次号"].apply(lambda value: "" if is_blank(value) else str(value).strip())
     warehouse_text = out["仓库"].apply(lambda value: "" if is_blank(value) else str(value).strip().upper())
     real_trip_mask = trip_text.ne("")
-    out["_运输类型车次键"] = warehouse_text + "||" + trip_text
+    fbx_text = (
+        out["FBA/FBX"].astype(str).str.upper().str.strip()
+        + " "
+        + out["系统产品类型"].astype(str).str.upper().str.strip()
+    )
+    fbx_mask = fbx_text.str.contains(r"(^|\s|-)FBX($|\s|平台仓)", regex=True, na=False)
+    fbx_trip_mask = real_trip_mask & fbx_mask & ~out["_备注强制LTL"]
+    if fbx_trip_mask.any():
+        out.loc[fbx_trip_mask, "标准运输类型"] = "FTL"
+        out.loc[fbx_trip_mask, "运输类型重判原因"] = "FBX有真实车次号，按车次号判定为整车"
 
+    out["_运输类型车次键"] = warehouse_text + "||" + trip_text
     for _, indexes in out.loc[real_trip_mask].groupby("_运输类型车次键", dropna=False).groups.items():
         group = out.loc[indexes]
+        protected = group["_备注强制LTL"].astype(bool)
+        eligible_indexes = group.index[~protected.to_numpy()]
+        if len(eligible_indexes) == 0:
+            continue
+
+        eligible = out.loc[eligible_indexes]
         original_types = {
             str(value).upper().strip()
-            for value in group["标准运输类型"]
+            for value in group["_原始标准运输类型"]
             if str(value).upper().strip() in {"FTL", "LTL"}
         }
-        total_volume = pd.to_numeric(group["出库体积"], errors="coerce").fillna(0).sum()
+        eligible_types = {
+            str(value).upper().strip()
+            for value in eligible["标准运输类型"]
+            if str(value).upper().strip() in {"FTL", "LTL"}
+        }
+        total_volume = pd.to_numeric(eligible["出库体积"], errors="coerce").fillna(0).sum()
+        has_fbx_trip = bool(fbx_mask.loc[eligible_indexes].any())
 
         reason = ""
-        if {"FTL", "LTL"}.issubset(original_types):
-            reason = "同车次同时含FTL和LTL，整车统一重判为FTL"
-        elif original_types == {"LTL"} and float(total_volume) > float(volume_threshold):
-            reason = f"同车次纯LTL总出库体积>{float(volume_threshold):g}CBM，整车重判为FTL"
+        if has_fbx_trip:
+            reason = "FBX存在真实车次号，车次内非强制LTL批次统一按FTL"
+        elif {"FTL", "LTL"}.issubset(eligible_types):
+            reason = "同车次同时含FTL和LTL，非强制LTL批次统一重判为FTL"
+        elif eligible_types == {"LTL"} and float(total_volume) > float(volume_threshold):
+            reason = f"同车次纯LTL总出库体积>{float(volume_threshold):g}CBM，非强制LTL批次重判为FTL"
+
+        if reason:
+            out.loc[eligible_indexes, "标准运输类型"] = "FTL"
+            out.loc[eligible_indexes, "运输类型重判原因"] = reason
 
         type_summary = ",".join(value for value in ["FTL", "LTL"] if value in original_types)
         if type_summary:
             out.loc[indexes, "原始运输类型集合"] = type_summary
-        if reason:
-            out.loc[indexes, "标准运输类型"] = "FTL"
-            out.loc[indexes, "运输类型重判原因"] = reason
 
-    return out.drop(columns=["_运输类型车次键"])
-
+    return out.drop(columns=[
+        "_运输类型车次键", "_备注强制LTL", "_原始标准运输类型",
+    ], errors="ignore")
 
 def resolve_group_loading(series):
     values = [str(v) for v in series if not is_blank(v)]
