@@ -1096,10 +1096,10 @@ def build_time_ops_one_row_summary(df, duration_col, duration_label):
     result_df = build_volume_one_row_summary(df, include_us_customer=False)
 
     duration_cols = [
-        f"总平均{duration_label}时效", f"总P80{duration_label}时效",
-        f"T1平均{duration_label}时效", f"T1P80{duration_label}时效",
-        f"T2平均{duration_label}时效", f"T2P80{duration_label}时效",
-        f"T3平均{duration_label}时效", f"T3P80{duration_label}时效",
+        f"总平均{duration_label}时效", f"总P80{duration_label}时效", f"总P90{duration_label}时效",
+        f"T1平均{duration_label}时效", f"T1P80{duration_label}时效", f"T1P90{duration_label}时效",
+        f"T2平均{duration_label}时效", f"T2P80{duration_label}时效", f"T2P90{duration_label}时效",
+        f"T3平均{duration_label}时效", f"T3P80{duration_label}时效", f"T3P90{duration_label}时效",
     ]
 
     if result_df.empty:
@@ -1114,10 +1114,12 @@ def build_time_ops_one_row_summary(df, duration_col, duration_label):
         row = {"仓库": keys[0], "统计周期": keys[1]}
         row[f"总平均{duration_label}时效"] = group[duration_col].mean()
         row[f"总P80{duration_label}时效"] = safe_p80(group[duration_col])
+        row[f"总P90{duration_label}时效"] = safe_p90(group[duration_col])
         for channel in ["T1", "T2", "T3"]:
             channel_series = group.loc[group["T渠道类型"] == channel, duration_col]
             row[f"{channel}平均{duration_label}时效"] = channel_series.mean()
             row[f"{channel}P80{duration_label}时效"] = safe_p80(channel_series)
+            row[f"{channel}P90{duration_label}时效"] = safe_p90(channel_series)
         duration_rows.append(row)
 
     duration_df = pd.DataFrame(duration_rows)
@@ -1131,10 +1133,10 @@ def build_combined_container_summary(df):
 
     for duration_col, duration_label in duration_specs:
         duration_cols = [
-            f"总平均{duration_label}时效", f"总P80{duration_label}时效",
-            f"T1平均{duration_label}时效", f"T1P80{duration_label}时效",
-            f"T2平均{duration_label}时效", f"T2P80{duration_label}时效",
-            f"T3平均{duration_label}时效", f"T3P80{duration_label}时效",
+            f"总平均{duration_label}时效", f"总P80{duration_label}时效", f"总P90{duration_label}时效",
+            f"T1平均{duration_label}时效", f"T1P80{duration_label}时效", f"T1P90{duration_label}时效",
+            f"T2平均{duration_label}时效", f"T2P80{duration_label}时效", f"T2P90{duration_label}时效",
+            f"T3平均{duration_label}时效", f"T3P80{duration_label}时效", f"T3P90{duration_label}时效",
         ]
         if result_df.empty:
             for col in duration_cols:
@@ -1149,6 +1151,7 @@ def build_combined_container_summary(df):
             values = pd.to_numeric(group[duration_col], errors="coerce")
             row[f"总平均{duration_label}时效"] = values.mean()
             row[f"总P80{duration_label}时效"] = safe_p80(values)
+            row[f"总P90{duration_label}时效"] = safe_p90(values)
             for channel in ["T1", "T2", "T3"]:
                 channel_values = pd.to_numeric(
                     group.loc[group["T渠道类型"] == channel, duration_col],
@@ -1156,6 +1159,7 @@ def build_combined_container_summary(df):
                 )
                 row[f"{channel}平均{duration_label}时效"] = channel_values.mean()
                 row[f"{channel}P80{duration_label}时效"] = safe_p80(channel_values)
+                row[f"{channel}P90{duration_label}时效"] = safe_p90(channel_values)
             rows.append(row)
 
         result_df = result_df.merge(
