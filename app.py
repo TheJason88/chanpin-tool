@@ -22,10 +22,11 @@ try:
     import delivery_runtime
     import delivery_destination_analysis
     import delivery_report_export
+    import delivery_stage3
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-10-12-transfer-trip-merge-v35"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-10-12-delivery3-fusion-v36"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
@@ -40,6 +41,7 @@ if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSI
         delivery_runtime = importlib.reload(delivery_runtime)
         delivery_destination_analysis = importlib.reload(delivery_destination_analysis)
         delivery_report_export = importlib.reload(delivery_report_export)
+        delivery_stage3 = importlib.reload(delivery_stage3)
     except Exception as exc:
         _dependency_error = exc
 
@@ -52,6 +54,7 @@ VALID_WAREHOUSES = ["LA", "NJ", "SAV", "DAL"]
 PLACEHOLDER = "请填入"
 DELIVERY_STAGE1_MODULE = "派送原数据处理"
 DELIVERY_STAGE2_MODULE = "派送数据匹配及分析"
+DELIVERY_STAGE3_MODULE = "派送三：直发与调拨分析"
 CONTAINER_ANALYSIS_MODULE = "柜量及提拆柜分析"
 NORMAL_MODULES = [CONTAINER_ANALYSIS_MODULE]
 CONTAINER_TIME_DIMENSIONS = [PLACEHOLDER] + processors.CONTAINER_TIME_DIMENSIONS
@@ -280,7 +283,7 @@ def sanitize_stage2_input_df(df):
 warehouse = st.selectbox("1. 选择仓点", [PLACEHOLDER, "LA", "NJ", "SAV", "DAL", "全部"], index=0, key="warehouse_select")
 analysis_module = st.selectbox(
     "2. 选择分析模块",
-    [PLACEHOLDER, CONTAINER_ANALYSIS_MODULE, DELIVERY_STAGE1_MODULE, DELIVERY_STAGE2_MODULE],
+    [PLACEHOLDER, CONTAINER_ANALYSIS_MODULE, DELIVERY_STAGE1_MODULE, DELIVERY_STAGE2_MODULE, DELIVERY_STAGE3_MODULE],
     index=0,
     key="analysis_module_select",
 )
@@ -301,6 +304,8 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
         st.info("派送二按原文件时间范围：货量、发车、时效及所有派送成本统一按批次出库时间范围归期。")
     else:
         st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。货量、发车、时效及所有派送成本统一按批次出库时间归期。业务报告按模块输出，满载率与地板率单独展示；业务汇总和审核明细统一写入同一个 Excel。LTL不显示整车价格。")
+elif analysis_module == DELIVERY_STAGE3_MODULE:
+    st.info("派送三把派送二的直发FBA数据与调拨出库明细按FBA仓点合并，调拨作为独立派送方式参与货量和成本分析。真实每方成本按有效直发成本与有效调拨成本合计÷对应有效方数计算。调拨成本优先读取调拨文件自带成本，缺失时按批次号回查派送二并按仓点方数分摊。")
 elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
     time_dimension = st.selectbox(
         "3. 选择统计时间指标",
@@ -325,6 +330,7 @@ st.caption(
     "满载率/地板率：真实FTL大车按车次计算；卡板容量60 CBM、地板容量90 CBM，单车满载率封顶100%；同时输出平均/P80/P90。"
     "凡能落到批次/车次/柜号样本的时效、率和计算指标均给平均/P80/P90；排名占比、供应商使用比例、成本覆盖率等结构性分子分母只保留同口径占比，不制造无意义分位数。"
     "FBA/FBX、干线、调拨分别取数；缺车次、缺车型或无法确认目的地的数据保留在审核表，不强行归入不适用指标。"
+    "派送三：直发与调拨按FBA仓点统一汇总；调拨与整车卡板、整车地板、多卸、LTL等派送方式并列展示，核心成本指标为真实每方成本。"
     "邮编异常审核请填写“补充标准邮编”，可选填写“补充目的州”，再继续上传至功能二。"
 )
 
@@ -457,6 +463,56 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
             key="download_delivery_stage2",
         )
         st.caption("业务汇总和审核明细已合并到同一个 Excel；工作表分开命名，避免重复。补录邮编后继续上传至5A。")
+
+elif analysis_module == DELIVERY_STAGE3_MODULE:
+    stage2_file = st.file_uploader(
+        "5A. 上传派送二完整结果 Excel（需含“派送二_匹配后批次数据”）",
+        type=["xlsx", "xls"],
+        key="delivery_stage3_stage2_file",
+    )
+    transfer_file = st.file_uploader(
+        "5B. 上传调拨出库明细 Excel（需含“SO明细”，建议同时含“批次汇总”）",
+        type=["xlsx", "xls"],
+        key="delivery_stage3_transfer_file",
+    )
+    stage3_scope = (
+        warehouse,
+        getattr(stage2_file, "file_id", None),
+        getattr(transfer_file, "file_id", None),
+    )
+    if st.button("生成派送三最终分析", type="primary", key="run_delivery_stage3"):
+        st.session_state.pop("delivery_stage3_export", None)
+        try:
+            if not selection_complete:
+                st.warning("请先选择仓点和派送三分析模块。")
+            elif not stage2_file or not transfer_file:
+                st.warning("请同时上传派送二完整结果和调拨出库明细。")
+            else:
+                reports = delivery_stage3.build_delivery3_reports(stage2_file, transfer_file, warehouse)
+                output = tool_common.write_sheets_to_excel(reports).getvalue()
+                file_name = tool_common.build_output_filename(warehouse, DELIVERY_STAGE3_MODULE)
+                st.session_state["delivery_stage3_export"] = {
+                    "scope": stage3_scope,
+                    "sheets": list(reports),
+                    "filename": file_name,
+                    "output": output,
+                }
+        except Exception as e:
+            st.error("派送三生成失败，请检查两个文件的工作表、字段、仓点选择和批次号是否匹配。")
+            st.exception(e)
+
+    saved = st.session_state.get("delivery_stage3_export")
+    if saved and saved["scope"] == stage3_scope:
+        st.success(f"派送三已生成，共 {len(saved['sheets'])} 张工作表。")
+        st.write(f"工作表：{'、'.join(saved['sheets'])}")
+        st.download_button(
+            "下载派送三最终分析 Excel",
+            saved["output"],
+            saved["filename"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_delivery_stage3",
+        )
+        st.caption("仓点总览中的“真实每方成本”仅使用成本有效货量作为分母；调拨明细没有成本时自动回查派送二。调拨成本完整性标记用于提示当前是否只含调拨干线。")
 
 else:
     uploaded_files = st.file_uploader(

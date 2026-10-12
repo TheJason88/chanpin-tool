@@ -992,7 +992,7 @@ def write_sheets_to_excel(sheets):
             ws = writer.book[safe_name]
             _force_literal_text_cells(ws)
             _format_excel_ws(ws)
-            if safe_name in {"派送总览", "FBA仓点总览", "FBX仓点总览", "FBA派送方式分析", "分类价格参考", "调拨数据", "干线数据", "黄金标准数据"}:
+            if safe_name in {"派送总览", "FBA仓点总览", "FBX仓点总览", "FBA派送方式分析", "分类价格参考", "调拨数据", "干线数据", "黄金标准数据", "派送三_仓点总览", "派送三_派送方式", "派送三_批次明细", "派送三_核对", "调拨非FBA核对"}:
                 _format_delivery_business_sheet(ws)
             if safe_name == "黄金标准数据":
                 _format_golden_standard_supplier_colors(ws)
