@@ -8,7 +8,7 @@ import delivery_match_adapter
 import delivery_stage1_adapter
 
 
-RUNTIME_SCHEMA_VERSION = "2026-10-07-grain-audit-v34"
+RUNTIME_SCHEMA_VERSION = "2026-10-12-transfer-trip-merge-v35"
 ORIGINAL_FILE_PERIOD = "按原文件时间范围"
 TRANSFER_TARGETS = {
     "IL": {"name": "IL合作仓"},
@@ -509,14 +509,16 @@ def _exact_vehicle_share_series(df):
 
 
 def _transfer_vehicle_scope(group):
-    """Return exact vehicle share and rows belonging to full transfer vehicles.
+    """Return physical trips, full-transfer rows, and multi-unload context.
 
-    A mixed-destination truck contributes only its batch share to the transfer
-    vehicle total and never enters per-truck averages.  Multiple transfer
-    batches that together cover the complete truck remain one full vehicle.
+    Every warehouse + real trip number is one physical truck. Multiple rows
+    for the same destination can therefore combine into one single-unload
+    transfer truck. If only part of that truck belongs to the current
+    destination, it remains one physical truck but is classified as
+    multi-unload and stays out of destination-specific per-truck averages.
     """
     if group is None or group.empty:
-        return 0.0, group.copy(), 0, 0.0
+        return 0, group.copy(), 0, 0, 0.0
     out = group.copy()
     warehouse = out.get("仓库", pd.Series("", index=out.index)).fillna("").astype(str).str.upper().str.strip()
     trip_no = out.get("车次号", pd.Series("", index=out.index)).fillna("").astype(str).str.strip()
@@ -525,16 +527,132 @@ def _transfer_vehicle_scope(group):
         valid &= tool_common.normalize_boolean_series(out["是否有真实车次号"])
     out = out.loc[valid].copy()
     if out.empty:
-        return 0.0, out, 0, 0.0
+        return 0, out, 0, 0, 0.0
     out["_调拨车次键"] = warehouse.loc[out.index] + "||" + trip_no.loc[out.index]
     out["_调拨车份额"] = _exact_vehicle_share_series(out)
     trip_shares = out.groupby("_调拨车次键", sort=False)["_调拨车份额"].sum().clip(upper=1)
-    exact_share = float(trip_shares.sum())
     full_keys = set(trip_shares[trip_shares.ge(1 - 1e-6)].index)
     full_rows = out[out["_调拨车次键"].isin(full_keys)].copy()
+    physical_count = int(len(trip_shares))
     full_count = len(full_keys)
-    partial_share = max(0.0, exact_share - float(full_count))
-    return exact_share, full_rows, full_count, partial_share
+    partial_trip_shares = trip_shares[trip_shares.lt(1 - 1e-6)]
+    multi_unload_count = int(len(partial_trip_shares))
+    partial_share = float(partial_trip_shares.sum())
+    return physical_count, full_rows, full_count, multi_unload_count, partial_share
+
+
+def _full_transfer_trip_cost_samples(full_transfer_rows):
+    """Build one cost observation per complete transfer trip.
+
+    Function one keeps one cleaned row per batch. A physical transfer truck
+    can therefore contain several batch rows even when every batch is unloaded
+    at the same transfer destination. Those rows are one complete vehicle,
+    not a multi-destination truck. ``full_transfer_rows`` has already been
+    scoped to one transfer destination and to trip keys whose batch shares sum
+    to one, so this function combines their batch costs before calculating
+    whole-truck and supplier prices.
+
+    Trips below the existing 45-CBM transfer threshold remain totals-only.
+    Every represented batch must carry a positive original carrier cost; this
+    prevents a warehouse loading fee from making a missing carrier price look
+    like a valid whole-truck sample.
+    """
+    if full_transfer_rows is None or full_transfer_rows.empty:
+        return full_transfer_rows.copy() if full_transfer_rows is not None else pd.DataFrame()
+
+    source = full_transfer_rows.copy()
+    warehouse = source.get("仓库", pd.Series("", index=source.index)).fillna("").astype(str).str.upper().str.strip()
+    trip_no = source.get("车次号", pd.Series("", index=source.index)).fillna("").astype(str).str.strip()
+    valid = trip_no.ne("")
+    if "是否有真实车次号" in source.columns:
+        valid &= tool_common.normalize_boolean_series(source["是否有真实车次号"])
+    source = source.loc[valid].copy()
+    if source.empty:
+        return source
+
+    source["_完整调拨车次键"] = warehouse.loc[source.index] + "||" + trip_no.loc[source.index]
+    rows = []
+    for _, group in source.groupby("_完整调拨车次键", sort=False, dropna=False):
+        # One batch may be repeated in an uploaded matching file, but it must
+        # contribute its cost only once per physical trip.
+        group = group.copy()
+        group["_完整调拨批次键"] = group.apply(
+            lambda row: "|".join(_unique_batch_keys_from_row(row)) or f"ROW::{row.name}",
+            axis=1,
+        )
+        group = group.drop_duplicates("_完整调拨批次键", keep="first")
+
+        # With only one represented batch, an explicit two-stop remark means
+        # the other destination is not present in this destination group. Do
+        # not call it a complete destination-specific truck. Ordinary wording
+        # such as "外面装点地板" is not a two-stop signal.
+        if len(group) == 1:
+            remark_cols = [
+                col for col in processors.MULTI_UNLOAD_REMARK_COLUMNS
+                if col in group.columns
+            ]
+            if remark_cols:
+                remarks = " ".join(
+                    group[remark_cols].fillna("").astype(str).iloc[0].tolist()
+                )
+                if re.search(r"一提(?:两|多)卸|(?:两|多)卸|里外|\([^)]*[里外][^)]*\)|（[^）]*[里外][^）]*）", remarks):
+                    continue
+
+        full_volume = pd.to_numeric(
+            group.get("整车出库体积", pd.Series(pd.NA, index=group.index)), errors="coerce",
+        ).dropna()
+        full_volume = full_volume[full_volume.gt(0)]
+        trip_volume = float(full_volume.iloc[0]) if not full_volume.empty else float(
+            pd.to_numeric(group.get("出库体积"), errors="coerce").fillna(0).sum()
+        )
+        if trip_volume < float(processors.MIN_TRANSFER_LINEHAUL_AVERAGE_VOLUME):
+            continue
+
+        loaded_cost = pd.to_numeric(
+            group.get("派送成本", pd.Series(pd.NA, index=group.index)), errors="coerce",
+        )
+        base_cost = pd.to_numeric(
+            group.get(tool_common.BASE_DELIVERY_COST_COLUMN, pd.Series(pd.NA, index=group.index)),
+            errors="coerce",
+        )
+        effective_base_cost = base_cost.where(base_cost.notna(), loaded_cost)
+        if effective_base_cost.isna().any() or effective_base_cost.le(0).any():
+            continue
+        trip_loaded_cost = float(loaded_cost.fillna(effective_base_cost).sum())
+        trip_base_cost = float(effective_base_cost.sum())
+        if trip_loaded_cost <= 0 or trip_base_cost <= 0:
+            continue
+
+        supplier_values = []
+        supplier_keys = set()
+        for value in group.get("派送卡车", pd.Series("", index=group.index)).fillna(""):
+            display = re.sub(r"\s+", " ", str(value)).strip()
+            if not display:
+                continue
+            key = display.casefold()
+            if key not in supplier_keys:
+                supplier_keys.add(key)
+                supplier_values.append(display)
+
+        row = group.iloc[0].copy()
+        row["出库体积"] = trip_volume
+        row["整车出库体积"] = trip_volume
+        row["批次车份额"] = 1.0
+        row["整车批次数"] = len(group)
+        row["派送成本"] = trip_loaded_cost
+        row[tool_common.BASE_DELIVERY_COST_COLUMN] = trip_base_cost
+        row["派送卡车"] = supplier_values[0] if len(supplier_values) == 1 else ""
+        if len(supplier_values) > 1:
+            row["供应商审核"] = "同车次供应商冲突:" + ",".join(supplier_values)
+        row[processors.WHOLE_TRUCK_COST_ELIGIBLE_COLUMN] = True
+        row[processors.WHOLE_TRUCK_COST_EXCLUSION_REASON_COLUMN] = ""
+        rows.append(row)
+
+    if not rows:
+        return source.iloc[0:0].copy()
+    return pd.DataFrame(rows).drop(
+        columns=["_完整调拨车次键", "_完整调拨批次键"], errors="ignore",
+    )
 
 
 def _station_cost_source_rows(matched):
@@ -571,7 +689,7 @@ def _build_transfer_cost_report(matched):
     transfer = _filter_positive_cost_rows(_transfer_rows(marked, ftl_only=True))
     columns = [
         "指标名称", "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组",
-        "车次数", "完整调拨车次数", "混合目的地折算车份额", "总出库体积", "总派送成本",
+        "车次数", "完整调拨车次数", "多卸车次数", "混合目的地折算车份额", "总出库体积", "总派送成本",
         "每方调拨成本（总成本÷总方数）", "平均整车价", "P80整车价", "P90整车价", "每方平均价", "P80每方平均价", "P90每方平均价",
         "平均每车出库体积", "P80每车出库体积", "P90每车出库体积", "平均整车价有效车次数",
         "平均每方价有效批次数", "平均装载有效车次数", "平均装载口径", "车次口径",
@@ -583,7 +701,7 @@ def _build_transfer_cost_report(matched):
 
     rows = []
     for (warehouse, period, target, target_name), group in transfer.groupby(["仓库", "统计周期", "调拨目标仓", "调拨目标仓名称"], dropna=False):
-        exact_trip_share, full_transfer_rows, full_trip_count, partial_share = _transfer_vehicle_scope(group)
+        physical_trip_count, full_transfer_rows, full_trip_count, multi_unload_count, partial_share = _transfer_vehicle_scope(group)
         total_volume = group["出库体积"].sum()
         total_cost = group["派送成本"].sum()
         # Batch-level unit-price averages may use valid allocated transfer costs.
@@ -593,7 +711,7 @@ def _build_transfer_cost_report(matched):
             average_source["批次出库体积"] = average_source["出库体积"]
             average_source["出库体积"] = pd.to_numeric(average_source["整车出库体积"], errors="coerce")
         average_group = processors.average_sample_rows(average_source)
-        cost_group = processors.whole_truck_cost_sample_rows(average_group)
+        cost_group = _full_transfer_trip_cost_samples(full_transfer_rows)
         whole_truck_prices = pd.to_numeric(cost_group["派送成本"], errors="coerce").dropna()
         whole_truck_prices = whole_truck_prices[whole_truck_prices.gt(0)]
         denominator_col = "批次出库体积" if "批次出库体积" in average_group.columns else "出库体积"
@@ -607,8 +725,9 @@ def _build_transfer_cost_report(matched):
             "平台": "联宇盈仓",
             "仓点代码": target_name,
             "车型装车分组": "不区分车型",
-            "车次数": round(exact_trip_share, 2),
+            "车次数": int(physical_trip_count),
             "完整调拨车次数": int(full_trip_count),
+            "多卸车次数": int(multi_unload_count),
             "混合目的地折算车份额": round(partial_share, 2),
             "总出库体积": total_volume,
             "总派送成本": total_cost,
@@ -630,7 +749,7 @@ def _build_transfer_cost_report(matched):
             "平均每方价有效批次数": int(len(detail_prices)),
             "平均装载有效车次数": int(len(trip_loads)),
             "平均装载口径": "按真实车次去重后取完整整车方数的有效样本算术平均",
-            "车次口径": "完整调拨车计1；混合目的地车仅计调拨批次的精确车份额",
+            "车次口径": "同一发货仓+真实车次号合成一辆物理车；同目的地为单卸完整调拨车，不同目的地为多卸车；多卸不进入整车价格和平均装载",
         })
     return pd.DataFrame(rows)[columns]
 
@@ -644,7 +763,7 @@ def _build_transfer_report(matched):
     )
     columns = [
         "发货仓", "调拨目标仓", "专线线路", "统计周期", "车次数", "完整调拨车次数",
-        "混合目的地折算车份额", "总出库体积", "总出库卡板数", "总派送成本",
+        "多卸车次数", "混合目的地折算车份额", "总出库体积", "总出库卡板数", "总派送成本",
         "每方调拨成本（总成本÷总方数）", "平均整车价", "P80整车价", "P90整车价", "每方平均价", "P80每方平均价", "P90每方平均价",
         "平均每车出库体积", "P80每车出库体积", "P90每车出库体积", "供应商平均整车价", "供应商平均整车成本", "供应商使用比例",
         "平均整车价有效车次数", "平均每方价有效批次数", "平均装载有效车次数", "平均装载口径", "车次口径",
@@ -660,7 +779,7 @@ def _build_transfer_report(matched):
             dispatched = group[tool_common.normalize_boolean_series(group["是否FTL发车"])].copy()
         else:
             dispatched = group[group["车次号"].fillna("").astype(str).str.strip().ne("")].copy()
-        exact_trip_share, full_transfer_rows, full_trip_count, partial_share = _transfer_vehicle_scope(dispatched)
+        physical_trip_count, full_transfer_rows, full_trip_count, multi_unload_count, partial_share = _transfer_vehicle_scope(dispatched)
         total_volume = group["出库体积"].sum()
         total_pallets = group["出库卡板数"].sum()
         total_cost = group["派送成本"].sum()
@@ -671,7 +790,7 @@ def _build_transfer_report(matched):
             average_source["批次出库体积"] = average_source["出库体积"]
             average_source["出库体积"] = pd.to_numeric(average_source["整车出库体积"], errors="coerce")
         average_group = processors.average_sample_rows(average_source)
-        cost_group = processors.whole_truck_cost_sample_rows(average_group)
+        cost_group = _full_transfer_trip_cost_samples(full_transfer_rows)
         whole_truck_prices = pd.to_numeric(cost_group["派送成本"], errors="coerce").dropna()
         whole_truck_prices = whole_truck_prices[whole_truck_prices.gt(0)]
         denominator_col = "批次出库体积" if "批次出库体积" in average_group.columns else "出库体积"
@@ -683,8 +802,9 @@ def _build_transfer_report(matched):
             "调拨目标仓": target_name,
             "专线线路": line,
             "统计周期": period,
-            "车次数": round(exact_trip_share, 2),
+            "车次数": int(physical_trip_count),
             "完整调拨车次数": int(full_trip_count),
+            "多卸车次数": int(multi_unload_count),
             "混合目的地折算车份额": round(partial_share, 2),
             "总出库体积": total_volume,
             "总出库卡板数": total_pallets,
@@ -706,7 +826,7 @@ def _build_transfer_report(matched):
             "平均每方价有效批次数": int(len(detail_prices)),
             "平均装载有效车次数": int(len(trip_loads)),
             "平均装载口径": "按真实车次去重后取完整整车方数的有效样本算术平均",
-            "车次口径": "完整调拨车计1；混合目的地车仅计调拨批次的精确车份额",
+            "车次口径": "同一发货仓+真实车次号合成一辆物理车；同目的地为单卸完整调拨车，不同目的地为多卸车；多卸不进入整车价格和平均装载",
         })
     return pd.DataFrame(rows)[columns]
 
