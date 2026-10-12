@@ -25,7 +25,7 @@ try:
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-10-07-grain-audit-v34"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-10-12-transfer-trip-merge-v35"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
@@ -320,7 +320,7 @@ st.caption(
     "柜类：按所选日期字段和柜号去重；直送只看柜量，拆送才计算提柜/拆柜时效。柜级时效输出平均、P80、P90。"
     "派送二：按批次出库时间归期；方数按批次，车次按真实车次去重，结果中的业务表与审核表合并在同一个Excel。"
     "成本：有效成本样本要求原始成本>0；批次每方成本给平均/P80/P90，另保留同一来源总成本÷总方数的参考价，分子分母同进同出。"
-    "调拨：只归集明确调拨批次；一车多卸时仅调拨卸点进入调拨方数和成本，完整调拨车才进入整车价/装载样本，混合车按调拨批次精确车份额计车次。"
+    "调拨：同一发货仓和真实车次号先合成一辆物理车；同目的地为单卸完整调拨车，不同目的地为多卸车。多卸车保留物理车次、调拨方数、成本和折算份额，但不进入单一目的地的整车价/装载样本。"
     "时效：有效FTL/LTL批次按出库方数加权输出平均/P80/P90；LTL无需车次，FTL需真实车次，无效时间/方数和“里/外”备注不进样本。"
     "满载率/地板率：真实FTL大车按车次计算；卡板容量60 CBM、地板容量90 CBM，单车满载率封顶100%；同时输出平均/P80/P90。"
     "凡能落到批次/车次/柜号样本的时效、率和计算指标均给平均/P80/P90；排名占比、供应商使用比例、成本覆盖率等结构性分子分母只保留同口径占比，不制造无意义分位数。"
