@@ -105,6 +105,32 @@ class DeliveryStage3Tests(unittest.TestCase):
         self.assertAlmostEqual(detail.loc["ABE8", "成本"], 330.0)
         self.assertEqual(detail.loc["ABE8", "成本来源"], "调拨明细仓点每方成本")
 
+    def test_detects_transfer_detail_by_columns_when_sheet_name_changes(self):
+        stage2 = pd.DataFrame([
+            _stage2_row("D1", 400.0),
+            _stage2_row("T1", 600.0, scenario="仓间调拨", volume=60.0),
+        ])
+        stage2_file = io.BytesIO()
+        with pd.ExcelWriter(stage2_file, engine="openpyxl") as writer:
+            stage2.to_excel(writer, index=False, sheet_name=delivery_stage3.STAGE2_DETAIL_SHEET)
+        stage2_file.seek(0)
+        transfer_file = io.BytesIO()
+        with pd.ExcelWriter(transfer_file, engine="openpyxl") as writer:
+            pd.DataFrame({"说明": ["新版文件"]}).to_excel(writer, index=False, sheet_name="说明")
+            renamed = self._transfer_rows().rename(columns={
+                "调拨线路": "线路",
+                "出库批次号": "批次号",
+                "仓点": "FBA仓点",
+                "平台": "平台名称",
+                "方数": "出库体积",
+            })
+            renamed.to_excel(writer, index=False, sheet_name="九月调拨数据")
+        transfer_file.seek(0)
+
+        reports = delivery_stage3.build_delivery3_reports(stage2_file, transfer_file, "LA")
+        station = reports["派送三_仓点总览"].set_index("FBA仓点")
+        self.assertAlmostEqual(station.loc["ABE8", "调拨方数"], 30.0)
+
     def test_missing_transfer_cost_keeps_volume_out_of_cost_denominator(self):
         stage2 = pd.DataFrame([_stage2_row("D1", 400.0)])
         transfer = pd.DataFrame([
