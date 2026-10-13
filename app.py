@@ -52,8 +52,8 @@ if _dependency_error is not None:
 
 VALID_WAREHOUSES = ["LA", "NJ", "SAV", "DAL"]
 PLACEHOLDER = "请填入"
-DELIVERY_STAGE1_MODULE = "派送原数据处理"
-DELIVERY_STAGE2_MODULE = "派送数据匹配及分析"
+DELIVERY_STAGE1_MODULE = "派送一：原数据处理"
+DELIVERY_STAGE2_MODULE = "派送二：数据匹配及分析"
 DELIVERY_STAGE3_MODULE = "派送三：直发与调拨分析"
 CONTAINER_ANALYSIS_MODULE = "柜量及提拆柜分析"
 NORMAL_MODULES = [CONTAINER_ANALYSIS_MODULE]
@@ -297,13 +297,13 @@ if analysis_module in [DELIVERY_STAGE1_MODULE, DELIVERY_STAGE2_MODULE]:
 period_type = "不适用"
 date_range = None
 if analysis_module == DELIVERY_STAGE1_MODULE:
-    st.info("派送原数据处理执行全量清洗，不按时间范围筛选；可按目的地类型筛选：全部 / FBA / FBX。")
+    st.info("派送一执行全量原数据清洗，不按时间范围筛选；可按目的地类型筛选：全部 / FBA / FBX。")
 elif analysis_module == DELIVERY_STAGE2_MODULE:
     period_type = st.selectbox("4. 选择统计周期", DELIVERY_PERIOD_TYPES, index=0, key="stage2_period_select")
     if period_type == ORIGINAL_FILE_PERIOD:
         st.info("派送二按原文件时间范围：货量、发车、时效及所有派送成本统一按批次出库时间范围归期。")
     else:
-        st.info("派送数据匹配及分析会先完成邮编/平台仓匹配，再按目的地类型生成报告。货量、发车、时效及所有派送成本统一按批次出库时间归期。业务报告按模块输出，满载率与地板率单独展示；业务汇总和审核明细统一写入同一个 Excel。LTL不显示整车价格。")
+        st.info("派送二会先完成邮编/平台仓匹配，再按目的地类型生成报告。货量、发车、时效及所有派送成本统一按批次出库时间归期。业务报告按模块输出，满载率与地板率单独展示；业务汇总和审核明细统一写入同一个 Excel。LTL不显示整车价格。")
 elif analysis_module == DELIVERY_STAGE3_MODULE:
     st.info("派送三把派送二的直发FBA数据与调拨出库明细按FBA仓点合并，调拨作为独立派送方式参与货量和成本分析。真实每方成本按有效直发成本与有效调拨成本合计÷对应有效方数计算。调拨成本优先读取调拨文件自带成本，缺失时按批次号回查派送二并按仓点方数分摊。")
 elif analysis_module in NORMAL_MODULES or analysis_module == PLACEHOLDER:
@@ -397,7 +397,7 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
                 file_name = tool_common.build_output_filename(warehouse, DELIVERY_STAGE1_MODULE, delivery_destination_type)
                 st.download_button("下载派送一结果 Excel", output, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_delivery_stage1")
         except Exception as e:
-            st.error("派送原数据处理失败，请检查文件字段、仓点选择或源数据格式。")
+            st.error("派送一原数据处理失败，请检查文件字段、仓点选择或源数据格式。")
             st.exception(e)
 
 elif analysis_module == DELIVERY_STAGE2_MODULE:
@@ -444,7 +444,7 @@ elif analysis_module == DELIVERY_STAGE2_MODULE:
                     "output": tool_common.write_sheets_to_excel(combined).getvalue(),
                 }
         except Exception as e:
-            st.error("派送数据匹配及分析失败，请检查派送一结果文件、匹配文件字段或批次号是否一致。")
+            st.error("派送二数据匹配及分析失败，请检查派送一结果文件、匹配文件字段或批次号是否一致。")
             st.exception(e)
 
     saved = st.session_state.get("delivery_stage2_exports")
