@@ -172,9 +172,18 @@ def _truck_samples(group):
             continue
         supplier_keys = trip["_供应商键"].unique()
         supplier = supplier_keys[0] if len(supplier_keys) == 1 else ""
+        positive_carrier = trip["_承运成本"].gt(0)
+        valid_carrier = positive_carrier & trip["_有效承运成本"]
+        carrier_cost = (
+            trip.loc[valid_carrier, "_承运成本"].sum()
+            if positive_carrier.any() and valid_carrier.sum() == positive_carrier.sum()
+            else np.nan
+        )
+        operational = trip["_运营成本"]
+        operational_cost = operational.sum() if pd.notna(carrier_cost) and operational.notna().all() else np.nan
         rows.append({
-            "运营成本": trip["_运营成本"].sum() if trip["_有效运营成本"].all() else np.nan,
-            "承运成本": trip["_承运成本"].sum() if trip["_有效承运成本"].all() else np.nan,
+            "运营成本": operational_cost,
+            "承运成本": carrier_cost,
             "供应商键": supplier,
         })
     return pd.DataFrame(rows, columns=["运营成本", "承运成本", "供应商键"])

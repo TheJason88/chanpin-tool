@@ -110,20 +110,20 @@ class CompactExportTests(unittest.TestCase):
 
         transfer = delivery_runtime._build_transfer_report(rows)
         transfer_row = transfer.iloc[0]
-        self.assertEqual(transfer_row["总出库体积"], 40)
+        self.assertEqual(transfer_row["总出库体积"], 60)
         self.assertEqual(transfer_row["总派送成本"], 400)
-        self.assertEqual(transfer_row["每方调拨成本（总成本÷总方数）"], 10)
-        self.assertEqual(transfer_row["车次数"], 1)
-        self.assertEqual(transfer_row["完整调拨车次数"], 0)
+        self.assertAlmostEqual(transfer_row["每方调拨成本（总成本÷总方数）"], 400 / 60)
+        self.assertEqual(transfer_row["车次数"], 2)
+        self.assertEqual(transfer_row["完整调拨车次数"], 1)
         self.assertEqual(transfer_row["多卸车次数"], 1)
         self.assertEqual(transfer_row["混合目的地折算车份额"], 0.4)
 
         transfer_cost = delivery_runtime._build_transfer_cost_report(rows)
         cost_row = transfer_cost.iloc[0]
-        self.assertEqual(cost_row["总出库体积"], 40)
+        self.assertEqual(cost_row["总出库体积"], 60)
         self.assertEqual(cost_row["总派送成本"], 400)
-        self.assertEqual(cost_row["每方调拨成本（总成本÷总方数）"], 10)
-        self.assertEqual(cost_row["车次数"], 1)
+        self.assertAlmostEqual(cost_row["每方调拨成本（总成本÷总方数）"], 400 / 60)
+        self.assertEqual(cost_row["车次数"], 2)
         self.assertEqual(cost_row["多卸车次数"], 1)
 
     def test_excel_roundtrip_and_explicit_wrong_file_error(self):

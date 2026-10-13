@@ -5,6 +5,7 @@ import pandas as pd
 from openpyxl import load_workbook
 
 import delivery_audit_backfill
+import delivery_destination_analysis
 import delivery_match_adapter
 import delivery_reference
 import delivery_runtime
@@ -55,7 +56,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(matched["邮编"], "84116")
         self.assertEqual(matched["州"], "UT")
 
-    def test_linehaul_totals_include_both_but_averages_exclude_marked_row(self):
+    def test_linehaul_remarks_do_not_remove_valid_vehicle_rows(self):
         report = delivery_audit_backfill._build_linehaul_sheet(self.rows)
         row = report.loc[report["专线线路"] == "LA-NJ"].iloc[0]
         self.assertEqual(row["车次数"], 2)
@@ -64,8 +65,8 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(row["平均整车价"], 500)
         self.assertEqual(row["每方平均价"], 10)
         self.assertEqual(row["平均每车出库体积"], 50)
-        self.assertEqual(row["平均派送时效"], 2)
-        self.assertEqual(row["P80派送时效"], 2)
+        self.assertEqual(row["平均派送时效"], 11.82)
+        self.assertEqual(row["P80派送时效"], 20)
 
     def test_transfer_totals_include_both_but_averages_exclude_marked_row(self):
         report = delivery_runtime._build_transfer_report(self.rows)
@@ -107,13 +108,13 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(report.iloc[0]["总出库体积"], 80)
         self.assertEqual(report.iloc[0]["总派送成本"], 9700)
 
-    def test_either_marker_is_sufficient(self):
+    def test_inside_outside_words_are_not_business_rules(self):
         for marker in ("里", "外", "里外"):
             rows = self.rows.copy()
             rows.loc[1, "匹配备注集合"] = marker
             report = delivery_audit_backfill._build_linehaul_sheet(rows)
             row = report.loc[report["专线线路"] == "LA-NJ"].iloc[0]
-            self.assertEqual(row["平均派送时效"], 2)
+            self.assertEqual(row["平均派送时效"], 11.82)
 
     def test_stage1_and_stage2_keep_batch_remarks_as_last_column(self):
         detail = pd.DataFrame([
@@ -478,7 +479,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
             770,
         )
 
-    def test_stage1_remark_marker_excludes_entire_trip_from_linehaul_averages(self):
+    def test_stage1_remark_marker_does_not_exclude_valid_trip(self):
         rows = self.rows.copy()
         rows["同车次备注集合"] = ["正常", "外仓两卸"]
         rows["匹配备注集合"] = ""
@@ -487,8 +488,8 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(row["车次数"], 2)
         self.assertEqual(row["总出库体积"], 110)
         self.assertEqual(row["平均每车出库体积"], 50)
-        self.assertEqual(row["平均派送时效"], 2)
-        self.assertEqual(row["P80派送时效"], 2)
+        self.assertEqual(row["平均派送时效"], 11.82)
+        self.assertEqual(row["P80派送时效"], 20)
 
     def test_under_45_cbm_trip_is_totals_only_and_45_is_eligible(self):
         rows = self.rows.copy()
@@ -652,7 +653,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         exported = pd.read_excel(workbook, sheet_name="分类型价格参考")
         self.assertEqual(exported["车次数"].tolist(), [0.67, 0.33])
 
-    def test_same_destination_multibatch_trip_is_excluded_only_from_whole_truck_cost(self):
+    def test_same_destination_multibatch_trip_is_one_whole_truck_cost(self):
         detail = pd.DataFrame([
             {
                 "原始行号": 2, "仓库": "LA", "标准运输类型": "FTL", "车次号": "FTL-SAME-1",
@@ -683,8 +684,8 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(row["总出库体积"], 60)
         self.assertEqual(row["总出库卡板数"], 12)
         self.assertEqual(row["总派送成本"], 570)
-        self.assertTrue(pd.isna(row["平均整车价"]))
-        self.assertTrue(pd.isna(row["P80整车价"]))
+        self.assertEqual(row["平均整车价"], 570)
+        self.assertEqual(row["P80整车价"], 570)
         self.assertEqual(row["每方平均价"], 9.875)
         self.assertEqual(row["平均每车出库体积"], 60)
         self.assertEqual(row["平均每车出库卡板数"], 12)
@@ -725,7 +726,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertTrue(marked.loc[marked["车次号"] == "T-SINGLE", "是否纳入整车成本样本"].eq(True).all())
         self.assertTrue(
             marked.loc[marked["车次号"] == "T-MULTI", "整车成本样本排除原因"]
-            .eq("同车次含多个批次（多卸）")
+            .eq("同车次多目的地或目的地不完整")
             .all()
         )
 
@@ -938,6 +939,86 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(transfer["供应商平均整车成本"], "Carrier SAV $8000.00")
         self.assertEqual(transfer["供应商使用比例"], "Carrier SAV 100.00%")
 
+    def test_transfer_supplement_batch_joins_priced_vehicle(self):
+        rows = pd.DataFrame([
+            {
+                "仓库": "LA", "统计周期": "2026-09", "专线线路": "LA-DAL",
+                "是否有真实车次号": True, "是否FTL发车": True, "标准运输类型": "FTL",
+                "车次号": "CC260908000704", "批次号集合": "PC2609080073", "整车批次数": 2,
+                "批次车份额": 83.4974 / 85.4367, "整车出库体积": 85.4367,
+                "出库体积": 83.4974, "出库卡板数": 20,
+                "原始派送成本": 5600, "派送成本": 5795.46,
+                "派送卡车": "Carrier DAL", "备注": "正常",
+                "出库类型": "调拨", "调入仓库": "DAL", "业务场景": "仓间调拨",
+            },
+            {
+                "仓库": "LA", "统计周期": "2026-09", "专线线路": "LA-DAL",
+                "是否有真实车次号": True, "是否FTL发车": True, "标准运输类型": "FTL",
+                "车次号": "CC260908000704", "批次号集合": "PC2609080084", "整车批次数": 2,
+                "批次车份额": 1.9393 / 85.4367, "整车出库体积": 85.4367,
+                "出库体积": 1.9393, "出库卡板数": 1,
+                "原始派送成本": 0, "派送成本": 4.54,
+                "派送卡车": "Carrier DAL", "备注": "补单",
+                "出库类型": "调拨", "调入仓库": "DAL", "业务场景": "仓间调拨",
+            },
+        ])
+        row = delivery_runtime._build_transfer_report(rows).iloc[0]
+        self.assertAlmostEqual(row["总出库体积"], 85.4367)
+        self.assertAlmostEqual(row["总派送成本"], 5800.0)
+        self.assertEqual(row["车次数"], 1)
+        self.assertEqual(row["完整调拨车次数"], 1)
+        self.assertAlmostEqual(row["平均每车出库体积"], 85.4367)
+        self.assertAlmostEqual(row["平均整车价"], 5800.0)
+        self.assertAlmostEqual(row["供应商平均整车价"], 5600.0)
+
+    def test_fba_same_destination_supplement_is_one_whole_truck(self):
+        rows = pd.DataFrame([
+            {
+                "仓库": "LA", "统计周期": "2026-09", "标准运输类型": "FTL",
+                "是否有真实车次号": True, "是否FTL发车": True,
+                "车次号": "FBA-SUPPLEMENT", "批次号": "MAIN", "批次号集合": "MAIN",
+                "整车批次数": 2, "批次车份额": 0.9, "整车出库体积": 80,
+                "出库体积": 72, "原始派送成本": 5600, "派送成本": 5780,
+                "派送卡车": "Carrier FBA", "主产品类型": "FBA",
+                "批次目的地类型": "FBA", "批次目的仓点": "ONT8",
+                "FBA仓点代码集合": "ONT8", "车型标准值": "53尺大车", "装车类型标准值": "卡板",
+            },
+            {
+                "仓库": "LA", "统计周期": "2026-09", "标准运输类型": "FTL",
+                "是否有真实车次号": True, "是否FTL发车": True,
+                "车次号": "FBA-SUPPLEMENT", "批次号": "ADD", "批次号集合": "ADD",
+                "整车批次数": 2, "批次车份额": 0.1, "整车出库体积": 80,
+                "出库体积": 8, "原始派送成本": 0, "派送成本": 20,
+                "派送卡车": "Carrier FBA", "主产品类型": "FBA",
+                "批次目的地类型": "FBA", "批次目的仓点": "ONT8",
+                "FBA仓点代码集合": "ONT8", "车型标准值": "53尺大车", "装车类型标准值": "卡板",
+            },
+        ])
+        _, methods = delivery_destination_analysis.build_fba_destination_reports(rows)
+        row = methods.iloc[0]
+        self.assertEqual(row["派送方式"], "整车大车卡板")
+        self.assertEqual(row["有效整车样本数"], 1)
+        self.assertEqual(row["平均整车成本"], 5800)
+        self.assertEqual(row["供应商平均整车成本"], "Carrier FBA $5600.00")
+
+    def test_all_zero_cost_vehicle_stays_in_totals_but_not_price_samples(self):
+        rows = pd.DataFrame([{
+            "仓库": "LA", "统计周期": "2026-09", "专线线路": "LA-NJ",
+            "是否有真实车次号": True, "是否FTL发车": True, "标准运输类型": "FTL",
+            "车次号": "ZERO", "批次号集合": "ZERO-PC", "整车批次数": 1,
+            "批次车份额": 1.0, "整车出库体积": 50.0,
+            "出库体积": 50.0, "出库卡板数": 10,
+            "原始派送成本": 0, "派送成本": 0,
+            "出库类型": "调拨", "调入仓库": "NJ", "业务场景": "仓间调拨",
+        }])
+        row = delivery_runtime._build_transfer_report(rows).iloc[0]
+        self.assertEqual(row["总出库体积"], 50.0)
+        self.assertEqual(row["车次数"], 1)
+        self.assertEqual(row["平均装载有效车次数"], 1)
+        self.assertEqual(row["平均每车出库体积"], 50.0)
+        self.assertEqual(row["平均整车价有效车次数"], 0)
+        self.assertTrue(pd.isna(row["平均整车价"]))
+
     def test_old_multidestination_rows_are_not_equal_split(self):
         rows = pd.DataFrame([{
             "仓库": "LA", "统计周期": "2026-W30", "是否FTL发车": True,
@@ -1106,10 +1187,10 @@ class MultiUnloadAverageTests(unittest.TestCase):
         floor = type_price_reference.loc[
             type_price_reference["成本计算类型"] == "大车地板"
         ].iloc[0]
-        self.assertTrue(pd.isna(floor["平均整车价"]))
-        self.assertTrue(pd.isna(floor["P80整车价"]))
+        self.assertEqual(floor["平均整车价"], 810)
+        self.assertEqual(floor["P80整车价"], 810)
         self.assertEqual(floor["每方平均价"], 13.28)
-        self.assertTrue(pd.isna(floor["整车价格"]))
+        self.assertEqual(floor["整车价格"], 810)
         self.assertEqual(floor["每方成本"], 13.28)
 
     def test_amazon_freight_carrier_does_not_reclassify_or_fabricate_trip(self):
@@ -1466,7 +1547,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         type_price_reference = metrics["分类型价格参考"]
         self.assertEqual(
             type_price_reference[["仓点代码", "成本计算类型"]].values.tolist(),
-            [["ONT8", "大车卡板"], ["ONT8", "LTL"], ["16号仓", "LTL"]],
+            [["ONT8", "大车卡板"], ["ONT8", "LTL"], ["16号仓", "大车卡板"]],
         )
         car_count_index = type_price_reference.columns.tolist().index("车次数")
         self.assertEqual(
@@ -1582,7 +1663,7 @@ class MultiUnloadAverageTests(unittest.TestCase):
         self.assertEqual(exported_row["平台仓"], "谷仓")
         self.assertEqual(exported_row["FBX代码"], "16号仓")
 
-    def test_batch_volume_weighted_time_and_p80_include_ltl_exclude_ftl_missing_trip_and_marked_rows(self):
+    def test_batch_volume_weighted_time_includes_multi_unload_stop_but_excludes_ftl_missing_trip(self):
         rows = pd.DataFrame([
             {
                 "仓库": "LA", "统计周期": "2026-07", "派送区域": "Local",
@@ -1627,10 +1708,10 @@ class MultiUnloadAverageTests(unittest.TestCase):
             (report["指标名称"] == "目的仓点派送时效")
             & (report["维度值"] == "ONT8")
         ].iloc[0]
-        self.assertAlmostEqual(timing["平均派送时效"], 15 / 7)
-        self.assertEqual(timing["P80派送时效"], 3)
-        self.assertEqual(timing["有效时效批次数"], 3)
-        self.assertEqual(timing["有效时效方数"], 140)
+        self.assertAlmostEqual(timing["平均派送时效"], 400 / 190)
+        self.assertEqual(timing["P80派送时效"], 2)
+        self.assertEqual(timing["有效时效批次数"], 4)
+        self.assertEqual(timing["有效时效方数"], 190)
 
     def test_destination_dispatch_rounds_only_after_exact_share_sum(self):
         rows = []

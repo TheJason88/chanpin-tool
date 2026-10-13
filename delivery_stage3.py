@@ -22,6 +22,8 @@ TRANSFER_UNIT_COST_COLUMNS = ["仓点调拨成本/方", "调拨成本/方", "调
 TRANSFER_BATCH_COST_COLUMNS = ["批次总调拨成本", "批次调拨成本", "批次总成本", "总调拨成本", "调拨成本"]
 TRANSFER_KEYWORDS = ("仓间调拨", "调拨")
 AMAZON_KEYWORDS = ("AMAZON", "亚马逊", "FBA")
+STAGE2_PERIOD_COLUMNS = ("批次出库时间", "出库时间", "出库日期")
+TRANSFER_PERIOD_COLUMNS = ("出库时间", "批次出库时间", "出库日期")
 
 
 def _text(value):
@@ -107,8 +109,13 @@ def _read_matching_sheet(excel_file, aliases, required_columns, logical_name, op
     normalized_names = {str(name).strip().lower(): name for name in xls.sheet_names}
     selected = None
     for alias in aliases:
-        selected = normalized_names.get(str(alias).strip().lower())
-        if selected is not None:
+        candidate = normalized_names.get(str(alias).strip().lower())
+        if candidate is None:
+            continue
+        header = pd.read_excel(xls, sheet_name=candidate, nrows=0)
+        header = _canonicalize_columns(header, column_aliases)
+        if set(required_columns).issubset(set(header.columns)):
+            selected = candidate
             break
     if selected is None:
         for name in xls.sheet_names:
@@ -180,6 +187,33 @@ def _joined_unique(values):
         if text and text not in unique:
             unique.append(text)
     return "、".join(unique)
+
+
+def _file_months(frame, candidates):
+    """Return the set of YYYY-MM values represented by usable outbound dates."""
+    for col in candidates:
+        if col not in frame.columns:
+            continue
+        dates = pd.to_datetime(frame[col], errors="coerce").dropna()
+        if not dates.empty:
+            return set(dates.dt.to_period("M").astype(str))
+    return set()
+
+
+def _validate_source_periods(stage2, transfer):
+    """Prevent an accidental cross-month merge when both files expose dates."""
+    stage2_months = _file_months(stage2, STAGE2_PERIOD_COLUMNS)
+    transfer_months = _file_months(transfer, TRANSFER_PERIOD_COLUMNS)
+    if stage2_months and transfer_months and stage2_months != transfer_months:
+        left = "、".join(sorted(stage2_months))
+        right = "、".join(sorted(transfer_months))
+        raise ValueError(
+            f"派送三文件月份不一致：派送二为 {left}，调拨明细为 {right}。"
+            "请上传同一月份的两个结果文件。"
+        )
+    if stage2_months and transfer_months:
+        return "、".join(sorted(stage2_months)), "两份文件月份一致"
+    return "未核验", "至少一份文件没有可识别的出库日期，已按批次号继续匹配"
 
 
 def _first_existing(frame, candidates):
@@ -255,14 +289,26 @@ def _build_stage2_batch_costs(stage2_detail, warehouse="全部"):
         cost = _positive(row.get("派送成本", 0))
         batch_values = [_text(row.get("批次号", ""))]
         batch_values.extend(re.split(r"[,，;；、|/\s]+", _text(row.get("批次号集合", ""))))
-        for batch in batch_values:
-            batch = _text(batch)
-            if batch and batch not in result:
-                result[batch] = {
-                    "成本": cost,
-                    "供应商": _text(row.get("派送卡车", "")),
-                    "线路": _text(row.get("专线线路", "")),
-                }
+        batch_values = list(dict.fromkeys(batch for batch in map(_text, batch_values) if batch))
+        common = {
+            "供应商": _text(row.get("派送卡车", "")),
+            "线路": _text(row.get("专线线路", "")),
+        }
+        if len(batch_values) == 1:
+            result.setdefault(batch_values[0], {"成本": cost, **common})
+            continue
+
+        # A stage-two row may represent several batches. Never copy its full
+        # vehicle cost to every batch. Use allocation-detail costs only when
+        # they identify the batch explicitly; otherwise leave fallback absent.
+        allocated = {}
+        for item in _parse_allocations(row.get("目的仓点分配明细", "")):
+            batch = _text(item.get("批次号", ""))
+            item_cost = _positive(item.get("派送成本", 0))
+            if batch in batch_values and item_cost > 0:
+                allocated[batch] = allocated.get(batch, 0.0) + item_cost
+        for batch, batch_cost in allocated.items():
+            result.setdefault(batch, {"成本": batch_cost, **common})
     return result
 
 
@@ -314,9 +360,14 @@ def build_transfer_facts(transfer_detail, stage2_detail, transfer_batch_summary=
         station_cost = _coalesce_cost(group[station_cost_col]) if station_cost_col else 0.0
         station_cost_source = "调拨明细仓点分摊成本" if station_cost > 0 else ""
         if station_cost <= 0 and unit_cost_col:
-            unit_cost = _coalesce_cost(group[unit_cost_col])
-            station_cost = unit_cost * volume
-            station_cost_source = "调拨明细仓点每方成本" if station_cost > 0 else ""
+            unit_rate = pd.to_numeric(group[unit_cost_col], errors="coerce")
+            positive_volume = group["方数数值"].gt(0)
+            complete_unit_rate = positive_volume.any() and unit_rate.loc[positive_volume].gt(0).all()
+            if complete_unit_rate:
+                station_cost = float(
+                    (unit_rate.loc[positive_volume] * group.loc[positive_volume, "方数数值"]).sum()
+                )
+                station_cost_source = "调拨明细仓点每方成本" if station_cost > 0 else ""
         grouped_rows.append({
             "发货仓": _text(origin),
             "线路": _text(route),
@@ -457,13 +508,14 @@ def _aggregate_method(facts, station_summary):
     return pd.DataFrame(rows).sort_values(["发货仓", "FBA仓点", "来源", "方数"], ascending=[True, True, True, False]).reset_index(drop=True)
 
 
-def _build_checks(direct, transfer, all_transfer, station, methods):
+def _build_checks(direct, transfer, all_transfer, station, methods, period_value="未核验", period_note=""):
     rows = []
     transfer_source_volume = float(all_transfer["方数"].sum()) if not all_transfer.empty else 0.0
     transfer_fba_volume = float(transfer["方数"].sum()) if not transfer.empty else 0.0
     non_fba_volume = transfer_source_volume - transfer_fba_volume
     facts = pd.concat([direct, transfer], ignore_index=True, sort=False)
     checks = [
+        ("文件月份一致性", period_value, period_note),
         ("直发FBA方数", float(direct["方数"].sum()) if not direct.empty else 0.0, "派送二仓点分配明细中的有效直发FBA货量"),
         ("调拨全部方数", transfer_source_volume, "所选发货仓调拨SO明细全部平台货量"),
         ("调拨FBA方数", transfer_fba_volume, "调拨SO明细中Amazon/FBA平台货量"),
@@ -513,10 +565,11 @@ def build_delivery3_reports(stage2_file, transfer_file, warehouse="全部"):
     transfer_batches = _read_matching_sheet(
         transfer_file,
         TRANSFER_BATCH_SHEET_ALIASES,
-        ["出库批次号", "SO数", "方数"],
+        ["出库批次号"],
         "调拨批次汇总工作表",
         optional=True,
     )
+    period_value, period_note = _validate_source_periods(stage2, transfer)
     direct = build_direct_facts(stage2, warehouse)
     transfer_fba, all_transfer = build_transfer_facts(transfer, stage2, transfer_batches, warehouse)
     facts = pd.concat([direct, transfer_fba], ignore_index=True, sort=False)
@@ -526,7 +579,10 @@ def build_delivery3_reports(stage2_file, transfer_file, warehouse="全部"):
     methods = _aggregate_method(facts, station)
     detail_columns = ["发货仓", "FBA仓点", "来源", "派送方式", "批次号", "线路", "供应商", "方数", "成本", "成本有效方数", "成本阶段", "成本来源", "成本完整性"]
     detail = facts[detail_columns].copy().sort_values(["发货仓", "FBA仓点", "来源", "批次号"]).reset_index(drop=True)
-    checks = _build_checks(direct, transfer_fba, all_transfer, station, methods)
+    checks = _build_checks(
+        direct, transfer_fba, all_transfer, station, methods,
+        period_value=period_value, period_note=period_note,
+    )
     return {
         "派送三_仓点总览": station,
         "派送三_派送方式": methods,

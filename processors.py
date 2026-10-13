@@ -176,6 +176,7 @@ def safe_p90(series):
 
 MULTI_UNLOAD_REMARK_MARKERS = ("里", "外")
 MULTI_UNLOAD_REMARK_COLUMNS = ("同车次备注集合", "匹配备注集合", "备注", "备注信息", "MEMO", "跟进记录", "内部备注")
+EXPLICIT_MULTI_UNLOAD_PATTERN = r"一提(?:两|多)卸|(?:两|多)卸|里外"
 
 # 运输类型/派送方式识别统一扫描这些备注列。备注是业务证据，不能因为列名不同而漏判。
 REMARK_TRANSPORT_COLUMNS = tuple(dict.fromkeys(MULTI_UNLOAD_REMARK_COLUMNS + (
@@ -246,14 +247,15 @@ def _whole_truck_truthy(value):
 
 
 def mark_whole_truck_cost_sample_eligibility(df):
-    """Mark whether each row belongs to a comparable single-batch FTL trip.
+    """Mark whether each row belongs to a comparable single-destination FTL trip.
 
     The decision is made on the complete cleaned dataset by warehouse + real
-    trip number, before destination, transfer, or linehaul filtering. A trip is
-    excluded from whole-truck cost samples when any reliable signal shows that
-    it contains two or more batches: distinct batch ids on the trip, a declared
-    ``整车批次数`` above one, a non-unit ``批次车份额``, or multiple token-less
-    cleaned rows on the same trip. Totals and non-cost metrics remain untouched.
+    trip number, before destination, transfer, or linehaul filtering. Multiple
+    batches can form one valid vehicle when the destination context confirms
+    that they all unload at the same place (including a ``补单`` batch). A trip
+    is excluded when it has multiple destinations, an explicit multi-unload
+    note, or legacy multi-batch evidence whose destinations cannot be verified.
+    Totals and non-cost metrics remain untouched.
     """
     if df is None:
         return None
@@ -299,23 +301,72 @@ def mark_whole_truck_cost_sample_eligibility(df):
             multi_batch_trip_keys.add(trip_key)
 
     is_multi_batch_trip = has_real_trip & out["_整车成本车次键"].isin(multi_batch_trip_keys)
-    eligible = has_real_trip & ~is_multi_batch_trip
+    destination_count = pd.to_numeric(
+        out.get("车次目的地数", pd.Series(pd.NA, index=out.index)), errors="coerce",
+    )
+    destination_confirmed = out.get(
+        "车次目的地可确认", pd.Series(False, index=out.index),
+    ).apply(_whole_truck_truthy)
+    confirmed_single_destination = destination_confirmed & destination_count.eq(1)
+    confirmed_multi_destination = destination_confirmed & destination_count.ge(2)
+    remark_cols = [col for col in MULTI_UNLOAD_REMARK_COLUMNS if col in out.columns]
+    if remark_cols:
+        combined_remarks = out[remark_cols].fillna("").astype(str).agg(" ".join, axis=1)
+        explicit_multi_unload = combined_remarks.str.contains(
+            EXPLICIT_MULTI_UNLOAD_PATTERN, regex=True, na=False,
+        )
+    else:
+        explicit_multi_unload = pd.Series(False, index=out.index)
+    explicit_trip_keys = set(out.loc[has_real_trip & explicit_multi_unload, "_整车成本车次键"])
+    is_explicit_multi_unload = has_real_trip & out["_整车成本车次键"].isin(explicit_trip_keys)
+    uncertain_multi_batch = is_multi_batch_trip & ~confirmed_single_destination
+    disqualified = confirmed_multi_destination | is_explicit_multi_unload | uncertain_multi_batch
+    eligible = has_real_trip & ~disqualified
     out[WHOLE_TRUCK_COST_ELIGIBLE_COLUMN] = eligible.astype(bool)
     out[WHOLE_TRUCK_COST_EXCLUSION_REASON_COLUMN] = ""
     out.loc[~has_real_trip, WHOLE_TRUCK_COST_EXCLUSION_REASON_COLUMN] = "缺少真实车次号"
-    out.loc[is_multi_batch_trip, WHOLE_TRUCK_COST_EXCLUSION_REASON_COLUMN] = "同车次含多个批次（多卸）"
+    out.loc[disqualified, WHOLE_TRUCK_COST_EXCLUSION_REASON_COLUMN] = "同车次多目的地或目的地不完整"
     return out.drop(columns=["_整车成本车次键", "_整车成本批次Tokens"], errors="ignore")
 
 
 def whole_truck_cost_sample_rows(df):
-    """Return only single-batch trips eligible for whole-truck cost metrics."""
+    """Return one row per eligible physical vehicle for whole-truck costs."""
     if df is None or df.empty:
         return df.copy() if df is not None else None
     out = df.copy()
     if WHOLE_TRUCK_COST_ELIGIBLE_COLUMN not in out.columns:
         out = mark_whole_truck_cost_sample_eligibility(out)
     eligible = out[WHOLE_TRUCK_COST_ELIGIBLE_COLUMN].apply(_whole_truck_truthy)
-    return out.loc[eligible].copy()
+    out = out.loc[eligible].copy()
+    if out.empty:
+        return out
+
+    warehouse = out.get("仓库", pd.Series("", index=out.index)).fillna("").astype(str).str.upper().str.strip()
+    trip_no = out.get("车次号", pd.Series("", index=out.index)).fillna("").astype(str).str.strip()
+    record_id = out.get("整车记录ID", pd.Series("", index=out.index)).fillna("").astype(str).str.strip()
+    out["_整车样本键"] = warehouse + "||" + trip_no.where(trip_no.ne(""), record_id)
+    rows = []
+    for _, group in out.groupby("_整车样本键", sort=False, dropna=False):
+        row = group.iloc[0].copy()
+        loaded = pd.to_numeric(group.get("派送成本", pd.Series(pd.NA, index=group.index)), errors="coerce")
+        if loaded.notna().any():
+            row["派送成本"] = float(loaded.fillna(0).sum())
+        if "原始派送成本" in group.columns:
+            base = pd.to_numeric(group["原始派送成本"], errors="coerce")
+            row["原始派送成本"] = float(base[base.gt(0)].sum())
+        if "批次整车等价价" in group.columns and loaded.notna().any():
+            row["批次整车等价价"] = float(loaded.fillna(0).sum())
+        full_volume = pd.to_numeric(
+            group.get("整车出库体积", pd.Series(pd.NA, index=group.index)), errors="coerce",
+        ).dropna()
+        if not full_volume.empty:
+            row["出库体积"] = float(full_volume.iloc[0])
+        supplier = group.get("派送卡车", pd.Series("", index=group.index)).fillna("").astype(str).str.strip()
+        supplier = [value for value in dict.fromkeys(supplier) if value]
+        if "派送卡车" in group.columns:
+            row["派送卡车"] = supplier[0] if len(supplier) == 1 else ""
+        rows.append(row)
+    return pd.DataFrame(rows).drop(columns="_整车样本键", errors="ignore")
 
 
 def _supplier_whole_truck_cost_rows(df):
@@ -410,19 +461,14 @@ def supplier_whole_truck_cost_summary(df):
 def average_sample_rows(df):
     """Return transfer/linehaul detail rows eligible for averages/P80/P90.
 
-    A remark containing either ``里`` or ``外`` marks a batch that shares a
-    two-stop trip with a non-transfer batch.  It remains in all totals, but it
-    must not contribute an observation to an average or percentile. A trip
-    below 45 CBM follows the same totals-only rule; exactly 45 CBM is eligible.
+    Vehicle/destination completeness is determined before this helper is
+    called. Remarks are descriptive and must not decide whether a trip is
+    multi-unload: ordinary text such as ``放最里面`` would otherwise be lost.
+    A trip below 45 CBM follows the totals-only rule; exactly 45 CBM is eligible.
     """
     if df is None or df.empty:
         return df.copy()
-    remark_cols = [col for col in MULTI_UNLOAD_REMARK_COLUMNS if col in df.columns]
-    if remark_cols:
-        combined = df[remark_cols].fillna("").astype(str).agg(" ".join, axis=1)
-        excluded = combined.str.contains("里|外", regex=True, na=False)
-    else:
-        excluded = pd.Series(False, index=df.index)
+    excluded = pd.Series(False, index=df.index)
     if "出库体积" in df.columns:
         volume = pd.to_numeric(df["出库体积"], errors="coerce")
         excluded = excluded | volume.lt(MIN_TRANSFER_LINEHAUL_AVERAGE_VOLUME)
@@ -432,12 +478,10 @@ def average_sample_rows(df):
 def full_trip_load_sample_rows(df, min_volume=MIN_TRANSFER_LINEHAUL_AVERAGE_VOLUME):
     """Return one valid full-truck load observation per real trip.
 
-    Transfer and linehaul totals stay at the destination-batch grain.  Load
-    averages must instead use the complete vehicle volume.  A two-stop truck
-    therefore contributes its full ``整车出库体积`` once, never only the volume
-    unloaded at the transfer destination.  If a multi-batch row lacks a full
-    trip volume, it is excluded rather than treating a partial unload as a
-    complete truck.
+    Transfer and linehaul totals stay at the destination-batch grain. Load
+    averages use the complete vehicle volume only when the rows represented in
+    the current destination/route slice add up to a full vehicle. A multi-unload
+    slice is excluded; multiple batches for the same destination can combine.
     """
     if df is None or df.empty:
         return df.copy() if df is not None else None
@@ -452,25 +496,43 @@ def full_trip_load_sample_rows(df, min_volume=MIN_TRANSFER_LINEHAUL_AVERAGE_VOLU
         return out
 
     out["_完整车次键"] = warehouse.loc[out.index].str.upper() + "||" + trip_no.loc[out.index]
+    remark_cols = [col for col in MULTI_UNLOAD_REMARK_COLUMNS if col in out.columns]
+    if remark_cols:
+        combined_remarks = out[remark_cols].fillna("").astype(str).agg(" ".join, axis=1)
+        explicit_multi_unload = combined_remarks.str.contains(
+            EXPLICIT_MULTI_UNLOAD_PATTERN, regex=True, na=False,
+        )
+        excluded_keys = set(out.loc[explicit_multi_unload, "_完整车次键"])
+        out = out[~out["_完整车次键"].isin(excluded_keys)].copy()
+        if out.empty:
+            return out
+    batch_count = pd.to_numeric(
+        out.get("整车批次数", pd.Series(1, index=out.index)), errors="coerce",
+    ).fillna(1)
+    raw_share = pd.to_numeric(
+        out.get("批次车份额", pd.Series(pd.NA, index=out.index)), errors="coerce",
+    )
+    # A route/destination slice is a complete vehicle only when its represented
+    # batch shares add to one. This excludes a multi-unload slice structurally
+    # while allowing several supplemental batches for the same destination.
+    exact_share = raw_share.where(raw_share.notna(), batch_count.le(1).astype(float))
+    share_by_trip = out.assign(_批次车份额核验=exact_share).groupby(
+        "_完整车次键", sort=False,
+    )["_批次车份额核验"].sum(min_count=1)
+    full_keys = set(share_by_trip[share_by_trip.ge(1 - 1e-6)].index)
+    out = out[out["_完整车次键"].isin(full_keys)].copy()
+    if out.empty:
+        return out
+
     full_volume = pd.to_numeric(
         out.get("整车出库体积", pd.Series(pd.NA, index=out.index)), errors="coerce",
     )
     full_pallets = pd.to_numeric(
         out.get("整车出库卡板数", pd.Series(pd.NA, index=out.index)), errors="coerce",
     )
-    batch_count = pd.to_numeric(
-        out.get("整车批次数", pd.Series(1, index=out.index)), errors="coerce",
-    ).fillna(1)
-    exact_share = pd.to_numeric(
-        out.get("批次车份额", pd.Series(1, index=out.index)), errors="coerce",
-    ).fillna(1)
-    remark_cols = [col for col in MULTI_UNLOAD_REMARK_COLUMNS if col in out.columns]
-    if remark_cols:
-        combined_remarks = out[remark_cols].fillna("").astype(str).agg(" ".join, axis=1)
-        marked_multi_unload = combined_remarks.str.contains("里|外", regex=True, na=False)
-    else:
-        marked_multi_unload = pd.Series(False, index=out.index)
-    single_batch = batch_count.le(1) & exact_share.sub(1).abs().le(1e-6) & ~marked_multi_unload
+    batch_count = batch_count.loc[out.index]
+    exact_share = exact_share.loc[out.index]
+    single_batch = batch_count.le(1) & exact_share.sub(1).abs().le(1e-6)
     row_volume = pd.to_numeric(out.get("出库体积", pd.Series(pd.NA, index=out.index)), errors="coerce")
     row_pallets = pd.to_numeric(out.get("出库卡板数", pd.Series(pd.NA, index=out.index)), errors="coerce")
     out["完整车次出库体积"] = full_volume.where(full_volume.gt(0)).fillna(row_volume.where(single_batch))

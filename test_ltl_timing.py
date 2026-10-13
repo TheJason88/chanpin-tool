@@ -40,8 +40,11 @@ class LtlTimingTests(unittest.TestCase):
         snapshot = source.copy(deep=True)
         cleaned = delivery_runtime._clean_delivery_time_columns(source)
         sample = delivery_workflow.timing_sample_rows(cleaned)
-        self.assertEqual(sample["批次号"].tolist(), ["valid", "boundary"])
-        self.assertEqual(sample["派送时效"].tolist(), [2, 3])
+        self.assertEqual(
+            sample["批次号"].tolist(),
+            ["valid", "boundary", "marked_inside", "marked_outside"],
+        )
+        self.assertEqual(sample["派送时效"].tolist(), [2, 3, 2, 2])
         self.assertTrue(sample["是否有效时效"].all())
         self.assertTrue(cleaned.iloc[2:7]["派送时效"].isna().all())
         pd.testing.assert_frame_equal(source, snapshot)

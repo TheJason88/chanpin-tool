@@ -553,9 +553,10 @@ def _full_transfer_trip_cost_samples(full_transfer_rows):
     whole-truck and supplier prices.
 
     Trips below the existing 45-CBM transfer threshold remain totals-only.
-    Every represented batch must carry a positive original carrier cost; this
-    prevents a warehouse loading fee from making a missing carrier price look
-    like a valid whole-truck sample.
+    A physical vehicle needs at least one positive original carrier cost, but
+    an additional batch with zero original cost is still part of that vehicle.
+    This is the normal ``补单`` pattern: the carrier price is recorded on one
+    batch while the added batch contributes volume and its loading-fee share.
     """
     if full_transfer_rows is None or full_transfer_rows.empty:
         return full_transfer_rows.copy() if full_transfer_rows is not None else pd.DataFrame()
@@ -616,10 +617,16 @@ def _full_transfer_trip_cost_samples(full_transfer_rows):
             errors="coerce",
         )
         effective_base_cost = base_cost.where(base_cost.notna(), loaded_cost)
-        if effective_base_cost.isna().any() or effective_base_cost.le(0).any():
+        positive_base_cost = effective_base_cost[effective_base_cost.gt(0)]
+        if positive_base_cost.empty:
             continue
-        trip_loaded_cost = float(loaded_cost.fillna(effective_base_cost).sum())
-        trip_base_cost = float(effective_base_cost.sum())
+        # The same vehicle price can be copied to several batch rows. Count an
+        # identical carrier price once, then add each row's allocated surcharge
+        # (for example the exact share of the $200 floor-loading fee).
+        trip_base_cost = _aggregate_unique_batch_costs(positive_base_cost)
+        effective_loaded_cost = loaded_cost.where(loaded_cost.notna(), effective_base_cost)
+        surcharge = (effective_loaded_cost - effective_base_cost.fillna(0)).clip(lower=0)
+        trip_loaded_cost = float(trip_base_cost + surcharge.fillna(0).sum())
         if trip_loaded_cost <= 0 or trip_base_cost <= 0:
             continue
 
@@ -686,7 +693,9 @@ def _combine_series_text(series):
 
 def _build_transfer_cost_report(matched):
     marked = processors.mark_whole_truck_cost_sample_eligibility(matched)
-    transfer = _filter_positive_cost_rows(_transfer_rows(marked, ftl_only=True))
+    # Keep every transfer batch in totals and vehicle reconstruction. A zero
+    # cost row can be a supplemental batch loaded into a priced physical truck.
+    transfer = _transfer_rows(marked, ftl_only=True)
     columns = [
         "指标名称", "仓库", "统计周期", "对象类型", "平台", "仓点代码", "车型装车分组",
         "车次数", "完整调拨车次数", "多卸车次数", "混合目的地折算车份额", "总出库体积", "总派送成本",
@@ -706,7 +715,7 @@ def _build_transfer_cost_report(matched):
         total_cost = group["派送成本"].sum()
         # Batch-level unit-price averages may use valid allocated transfer costs.
         # Whole-truck price/load samples are filtered separately below.
-        average_source = group.copy()
+        average_source = _filter_positive_cost_rows(group)
         if "整车出库体积" in average_source.columns:
             average_source["批次出库体积"] = average_source["出库体积"]
             average_source["出库体积"] = pd.to_numeric(average_source["整车出库体积"], errors="coerce")
@@ -756,11 +765,9 @@ def _build_transfer_cost_report(matched):
 
 def _build_transfer_report(matched):
     marked = processors.mark_whole_truck_cost_sample_eligibility(matched)
-    # 调拨总方数、总成本和每方调拨成本必须共用同一批有效调拨卸点：
-    # 仅保留原始派送成本>0的调拨批次，避免零成本批次进入方数分母。
-    transfer = _filter_positive_cost_rows(
-        _transfer_rows(marked, ftl_only=True, include_missing_trip=True)
-    )
+    # 调拨总方数必须包含同车补单批次；成本有效性只约束整车价格样本，
+    # 不能在合成物理车之前删除原始成本为 0 的批次。
+    transfer = _transfer_rows(marked, ftl_only=True, include_missing_trip=True)
     columns = [
         "发货仓", "调拨目标仓", "专线线路", "统计周期", "车次数", "完整调拨车次数",
         "多卸车次数", "混合目的地折算车份额", "总出库体积", "总出库卡板数", "总派送成本",

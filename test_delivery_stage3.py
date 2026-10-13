@@ -105,6 +105,27 @@ class DeliveryStage3Tests(unittest.TestCase):
         self.assertAlmostEqual(detail.loc["ABE8", "成本"], 330.0)
         self.assertEqual(detail.loc["ABE8", "成本来源"], "调拨明细仓点每方成本")
 
+    def test_different_unit_rates_are_weighted_row_by_row(self):
+        stage2 = pd.DataFrame([_stage2_row("T1", 999.0, scenario="仓间调拨", volume=30.0)])
+        transfer = pd.DataFrame([
+            {"调拨线路": "LA→NJ", "出库批次号": "T1", "仓点": "ABE8", "平台": "Amazon", "方数": 10.0, "调拨成本/方": 5.0},
+            {"调拨线路": "LA→NJ", "出库批次号": "T1", "仓点": "ABE8", "平台": "Amazon", "方数": 20.0, "调拨成本/方": 8.0},
+        ])
+        stage2_file, transfer_file = self._files(stage2, transfer)
+        detail = delivery_stage3.build_delivery3_reports(stage2_file, transfer_file, "LA")["派送三_批次明细"]
+        self.assertAlmostEqual(detail.iloc[0]["成本"], 210.0)
+
+    def test_incomplete_unit_rates_fall_back_instead_of_understating_cost(self):
+        stage2 = pd.DataFrame([_stage2_row("T1", 300.0, scenario="仓间调拨", volume=30.0)])
+        transfer = pd.DataFrame([
+            {"调拨线路": "LA→NJ", "出库批次号": "T1", "仓点": "ABE8", "平台": "Amazon", "方数": 10.0, "调拨成本/方": 5.0},
+            {"调拨线路": "LA→NJ", "出库批次号": "T1", "仓点": "ABE8", "平台": "Amazon", "方数": 20.0, "调拨成本/方": None},
+        ])
+        stage2_file, transfer_file = self._files(stage2, transfer)
+        detail = delivery_stage3.build_delivery3_reports(stage2_file, transfer_file, "LA")["派送三_批次明细"]
+        self.assertAlmostEqual(detail.iloc[0]["成本"], 300.0)
+        self.assertEqual(detail.iloc[0]["成本来源"], "派送二批次成本按方数分摊")
+
     def test_detects_transfer_detail_by_columns_when_sheet_name_changes(self):
         stage2 = pd.DataFrame([
             _stage2_row("D1", 400.0),
@@ -130,6 +151,42 @@ class DeliveryStage3Tests(unittest.TestCase):
         reports = delivery_stage3.build_delivery3_reports(stage2_file, transfer_file, "LA")
         station = reports["派送三_仓点总览"].set_index("FBA仓点")
         self.assertAlmostEqual(station.loc["ABE8", "调拨方数"], 30.0)
+
+    def test_skips_invalid_alias_sheet_and_finds_valid_sheet_by_columns(self):
+        stage2 = pd.DataFrame([_stage2_row("D1", 400.0)])
+        stage2_file = io.BytesIO()
+        with pd.ExcelWriter(stage2_file, engine="openpyxl") as writer:
+            stage2.to_excel(writer, index=False, sheet_name=delivery_stage3.STAGE2_DETAIL_SHEET)
+        stage2_file.seek(0)
+        transfer_file = io.BytesIO()
+        with pd.ExcelWriter(transfer_file, engine="openpyxl") as writer:
+            pd.DataFrame({"说明": ["不是调拨明细"]}).to_excel(writer, index=False, sheet_name="明细")
+            self._transfer_rows().to_excel(writer, index=False, sheet_name="真实调拨数据")
+        transfer_file.seek(0)
+        reports = delivery_stage3.build_delivery3_reports(stage2_file, transfer_file, "LA")
+        self.assertAlmostEqual(reports["派送三_仓点总览"]["调拨方数"].sum(), 50.0)
+
+    def test_rejects_cross_month_source_files(self):
+        stage2 = pd.DataFrame([{**_stage2_row("D1", 400.0), "批次出库时间": "2026-09-10"}])
+        transfer = self._transfer_rows()
+        transfer["出库时间"] = "2026-10-01"
+        stage2_file, transfer_file = self._files(stage2, transfer)
+        with self.assertRaisesRegex(ValueError, "文件月份不一致"):
+            delivery_stage3.build_delivery3_reports(stage2_file, transfer_file, "LA")
+
+    def test_multibatch_stage2_cost_is_not_duplicated_without_batch_allocations(self):
+        stage2 = pd.DataFrame([{
+            **_stage2_row("T1", 600.0, scenario="仓间调拨", volume=60.0),
+            "批次号": "", "批次号集合": "T1,T2", "目的仓点分配明细": "[]",
+        }])
+        transfer = pd.DataFrame([
+            {"调拨线路": "LA→NJ", "出库批次号": batch, "仓点": station, "平台": "Amazon", "方数": 30.0}
+            for batch, station in [("T1", "ABE8"), ("T2", "TEB9")]
+        ])
+        stage2_file, transfer_file = self._files(stage2, transfer)
+        detail = delivery_stage3.build_delivery3_reports(stage2_file, transfer_file, "LA")["派送三_批次明细"]
+        self.assertEqual(detail["成本"].sum(), 0.0)
+        self.assertTrue(detail["成本来源"].eq("缺失").all())
 
     def test_missing_transfer_cost_keeps_volume_out_of_cost_denominator(self):
         stage2 = pd.DataFrame([_stage2_row("D1", 400.0)])

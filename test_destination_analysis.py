@@ -165,7 +165,7 @@ class DestinationAnalysisTests(unittest.TestCase):
         self.assertEqual(methods.iloc[0]["原始成本缺失回退批次数"], 1)
         self.assertEqual(methods.iloc[0]["供应商成本覆盖率"], "A 50.00%")
 
-    def test_trip_annotation_does_not_change_transfer_linehaul_or_golden_results(self):
+    def test_trip_annotation_enables_same_destination_whole_truck_price(self):
         rows = pd.DataFrame([
             batch("A", "A", volume=80, 装车类型标准值="地板", 出库类型="调拨", 调入仓库="NJ", 业务场景="仓间调拨"),
             batch("B", "T", 整车批次数=2, 批次车份额=0.5, 整车出库体积=100),
@@ -174,9 +174,13 @@ class DestinationAnalysisTests(unittest.TestCase):
         before = rows.copy(deep=True)
         marked = analysis.annotate_trip_context(rows)
         analysis.build_fba_destination_reports(marked)
-        for build in [delivery_runtime._build_transfer_report, delivery_audit_backfill._build_linehaul_sheet,
+        for build in [delivery_runtime._build_transfer_report,
                       delivery_match_adapter.build_golden_standard_batch_report]:
             pd.testing.assert_frame_equal(build(before), build(marked))
+        before_linehaul = delivery_audit_backfill._build_linehaul_sheet(before)
+        marked_linehaul = delivery_audit_backfill._build_linehaul_sheet(marked)
+        self.assertEqual(before_linehaul.iloc[0]["平均整车价"], 500)
+        self.assertEqual(marked_linehaul.iloc[0]["平均整车价"], 750)
         pd.testing.assert_frame_equal(rows, before)
 
     def test_timing_only_recognized_destinations_preserves_weighted_valid_samples(self):

@@ -1027,7 +1027,12 @@ def volume_weighted_p90(df, value_col="派送时效", weight_col="出库体积")
 
 
 def timing_sample_rows(df):
-    """LTL无需车次，FTL须有真实车次；无效时效/方数及里外备注仍排除。"""
+    """LTL无需车次，FTL须有真实车次；仅排除无效时效或方数。
+
+    多卸车的每个卸点都有独立出库和签收记录，因此可以进入各自目的地
+    的派送时效。是否可进入整车指标由车次目的地结构单独判断，不能靠
+    备注里出现“里/外”来猜测。
+    """
     if df is None or df.empty:
         return df.copy()
     out = df.copy()
@@ -1050,10 +1055,6 @@ def timing_sample_rows(df):
     duration = pd.to_numeric(out.get("派送时效", pd.Series(np.nan, index=out.index)), errors="coerce")
     volume = pd.to_numeric(out.get("出库体积", pd.Series(np.nan, index=out.index)), errors="coerce")
     mask &= duration.notna() & duration.gt(0) & volume.gt(0)
-    remark_cols = [col for col in processors.MULTI_UNLOAD_REMARK_COLUMNS if col in out.columns]
-    if remark_cols:
-        remarks = out[remark_cols].fillna("").astype(str).agg(" ".join, axis=1)
-        mask &= ~remarks.str.contains("里|外", regex=True, na=False)
     return out.loc[mask].copy()
 
 
@@ -1069,7 +1070,7 @@ def _append_weighted_timing_row(rows, metric_name, warehouse, period, dimension_
         avg_time=volume_weighted_average(sample),
         p80_time=volume_weighted_p80(sample),
         p90_time=volume_weighted_p90(sample),
-        note="按有效FTL/LTL批次方数加权；平均/P80/P90均在同一有效样本上计算；LTL无需车次；FTL缺车次、无效时效/方数及备注含‘里/外’批次不参与",
+        note="按有效FTL/LTL卸点方数加权；平均/P80/P90均在同一有效样本上计算；LTL无需车次；FTL缺车次、无效时效/方数不参与；多卸各卸点可进入对应目的地时效，但不进入单目的地整车指标",
     )
     row["有效时效批次数"] = int(len(sample))
     row["有效时效方数"] = float(pd.to_numeric(sample.get("出库体积", 0), errors="coerce").fillna(0).sum()) if not sample.empty else 0.0
