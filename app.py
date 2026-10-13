@@ -471,7 +471,7 @@ elif analysis_module == DELIVERY_STAGE3_MODULE:
         key="delivery_stage3_stage2_file",
     )
     transfer_file = st.file_uploader(
-        "5B. 上传调拨出库明细 Excel（需含“SO明细”，建议同时含“批次汇总”）",
+        "5B. 上传调拨出库明细 Excel（系统按字段自动识别明细表，建议同时包含批次汇总）",
         type=["xlsx", "xls"],
         key="delivery_stage3_transfer_file",
     )
@@ -498,7 +498,7 @@ elif analysis_module == DELIVERY_STAGE3_MODULE:
                     "output": output,
                 }
         except Exception as e:
-            st.error("派送三生成失败，请检查两个文件的工作表、字段、仓点选择和批次号是否匹配。")
+            st.error("派送三生成失败，请检查两个文件的字段、仓点选择和批次号是否匹配。系统会自动识别调拨明细工作表名称。")
             st.exception(e)
 
     saved = st.session_state.get("delivery_stage3_export")

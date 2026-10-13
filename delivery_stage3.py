@@ -8,6 +8,15 @@ import pandas as pd
 STAGE2_DETAIL_SHEET = "派送二_匹配后批次数据"
 TRANSFER_DETAIL_SHEET = "SO明细"
 TRANSFER_BATCH_SHEET = "批次汇总"
+TRANSFER_DETAIL_SHEET_ALIASES = ["SO明细", "调拨SO明细", "调拨明细", "调拨出库明细", "出库明细", "明细"]
+TRANSFER_BATCH_SHEET_ALIASES = ["批次汇总", "调拨批次汇总", "批次统计", "批次明细汇总"]
+TRANSFER_DETAIL_COLUMN_ALIASES = {
+    "调拨线路": ["调拨线路", "调拨路线", "线路"],
+    "出库批次号": ["出库批次号", "批次号", "出库批次"],
+    "仓点": ["仓点", "仓点代码", "FBA仓点", "目的仓点", "目的仓"],
+    "平台": ["平台", "平台名称", "目的平台"],
+    "方数": ["方数", "出库体积", "体积", "CBM"],
+}
 TRANSFER_STATION_COST_COLUMNS = ["仓点分摊调拨成本", "仓点调拨成本", "分摊调拨成本"]
 TRANSFER_UNIT_COST_COLUMNS = ["仓点调拨成本/方", "调拨成本/方", "调拨每方成本", "每方调拨成本", "每方成本"]
 TRANSFER_BATCH_COST_COLUMNS = ["批次总调拨成本", "批次调拨成本", "批次总成本", "总调拨成本", "调拨成本"]
@@ -70,6 +79,56 @@ def _read_optional_sheet(excel_file, sheet_name):
     frame = pd.read_excel(excel_file, sheet_name=sheet_name, dtype=object)
     frame.columns = [str(col).strip() for col in frame.columns]
     return frame
+
+
+def _canonicalize_columns(frame, column_aliases=None):
+    frame = frame.copy()
+    frame.columns = [str(col).strip() for col in frame.columns]
+    if not column_aliases:
+        return frame
+    normalized = {str(col).strip().lower(): col for col in frame.columns}
+    rename = {}
+    for canonical, aliases in column_aliases.items():
+        if canonical in frame.columns:
+            continue
+        for alias in aliases:
+            source = normalized.get(str(alias).strip().lower())
+            if source is not None:
+                rename[source] = canonical
+                break
+    return frame.rename(columns=rename)
+
+
+def _read_matching_sheet(excel_file, aliases, required_columns, logical_name, optional=False, column_aliases=None):
+    """Prefer known names, then identify a sheet by its required columns."""
+    if hasattr(excel_file, "seek"):
+        excel_file.seek(0)
+    xls = pd.ExcelFile(excel_file)
+    normalized_names = {str(name).strip().lower(): name for name in xls.sheet_names}
+    selected = None
+    for alias in aliases:
+        selected = normalized_names.get(str(alias).strip().lower())
+        if selected is not None:
+            break
+    if selected is None:
+        for name in xls.sheet_names:
+            header = pd.read_excel(xls, sheet_name=name, nrows=0)
+            header = _canonicalize_columns(header, column_aliases)
+            columns = set(header.columns)
+            if set(required_columns).issubset(columns):
+                selected = name
+                break
+    if selected is None:
+        if optional:
+            return pd.DataFrame()
+        available = "、".join(str(name) for name in xls.sheet_names)
+        required = "、".join(required_columns)
+        raise ValueError(
+            f"未识别到{logical_name}。现有工作表：{available or '无'}；"
+            f"目标工作表至少需要字段：{required}。"
+        )
+    frame = pd.read_excel(xls, sheet_name=selected, dtype=object)
+    return _canonicalize_columns(frame, column_aliases)
 
 
 def _parse_allocations(value):
@@ -444,8 +503,20 @@ def _non_fba_summary(all_transfer):
 def build_delivery3_reports(stage2_file, transfer_file, warehouse="全部"):
     warehouse = _normalize_origin(warehouse) if warehouse != "全部" else "全部"
     stage2 = _read_sheet(stage2_file, STAGE2_DETAIL_SHEET)
-    transfer = _read_sheet(transfer_file, TRANSFER_DETAIL_SHEET)
-    transfer_batches = _read_optional_sheet(transfer_file, TRANSFER_BATCH_SHEET)
+    transfer = _read_matching_sheet(
+        transfer_file,
+        TRANSFER_DETAIL_SHEET_ALIASES,
+        ["调拨线路", "出库批次号", "仓点", "平台", "方数"],
+        "调拨SO明细工作表",
+        column_aliases=TRANSFER_DETAIL_COLUMN_ALIASES,
+    )
+    transfer_batches = _read_matching_sheet(
+        transfer_file,
+        TRANSFER_BATCH_SHEET_ALIASES,
+        ["出库批次号", "SO数", "方数"],
+        "调拨批次汇总工作表",
+        optional=True,
+    )
     direct = build_direct_facts(stage2, warehouse)
     transfer_fba, all_transfer = build_transfer_facts(transfer, stage2, transfer_batches, warehouse)
     facts = pd.concat([direct, transfer_fba], ignore_index=True, sort=False)
