@@ -949,8 +949,8 @@ def _format_delivery_business_sheet(ws):
         header = str(cell.value or "")
         if "总成本÷总方数" in header:
             cell.comment = Comment("沿用原价格参考的有效成本样本，按对应总成本÷总方数计算；不等于批次单价的算术平均。", "美盈数据工具")
-        elif "单批次整车" in header:
-            cell.comment = Comment("沿用原分类价格参考的单批次整车样本；FBA派送方式分析允许同目的地多批次合车，两者样本不同。", "美盈数据工具")
+        elif "同目的地完整整车" in header:
+            cell.comment = Comment("同一发货仓和真实车次号合成物理车；仅同一最终目的地且车份额完整的车辆进入整车价格。同目的地主单与补单合成一辆，多卸不进入。", "美盈数据工具")
         elif "供应商" in header and "成本" in header:
             cell.comment = Comment("优先采用原始承运商成本，不含仓内地板装车费。", "美盈数据工具")
         elif header in {"平均派送时效", "P80派送时效", "P90派送时效"}:
