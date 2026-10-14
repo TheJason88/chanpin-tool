@@ -26,13 +26,15 @@ LINEHAUL_TARGET_NAMES = {
     "LA-SAV": "SAV干线商圈",
 }
 LINEHAUL_SHEET_COLUMNS = [
-    "发货仓", "干线目标区域", "专线线路", "统计周期", "车次数",
-    "总出库体积", "总出库卡板数", "总派送成本", "平均整车价", "P80整车价", "P90整车价",
+    "发货仓", "干线目标区域", "专线线路", "统计周期", "车次数", "完整干线车次数",
+    "多卸/非完整车次数", "混合目的地折算车份额",
+    "总出库体积", "总出库卡板数", "总派送成本", "每方干线成本（总成本÷总方数）",
+    "平均整车价", "P80整车价", "P90整车价",
     "每方平均价", "P80每方平均价", "P90每方平均价",
     "平均每车出库体积", "P80每车出库体积", "P90每车出库体积",
     "平均派送时效", "P80派送时效", "P90派送时效",
     "平均整车价有效车次数", "平均每方价有效批次数", "平均装载有效车次数",
-    "平均装载口径", "时效口径",
+    "平均装载口径", "时效口径", "车次口径",
     "供应商平均整车成本", "供应商使用比例",
 ]
 
@@ -223,12 +225,67 @@ def apply_linehaul_market_rules():
     return delivery_workflow
 
 
+def _linehaul_vehicle_scope(group):
+    """Split one route slice into physical trucks and valid whole-truck samples.
+
+    A physical truck can appear in more than one route when it has several
+    destinations.  It remains part of each route's total volume/cost, but it is
+    a whole-truck sample only when the rows in this route represent the full
+    vehicle and the complete-trip destination evidence confirms one stop.
+    """
+    if group is None or group.empty:
+        return 0, group.copy(), 0, 0, 0.0
+
+    out = group.copy()
+    warehouse = out.get("仓库", pd.Series("", index=out.index)).fillna("").astype(str).str.upper().str.strip()
+    trip_no = out.get("车次号", pd.Series("", index=out.index)).fillna("").astype(str).str.strip()
+    valid = trip_no.ne("")
+    if "是否有真实车次号" in out.columns:
+        valid &= out["是否有真实车次号"].apply(_truthy)
+    out = out.loc[valid].copy()
+    if out.empty:
+        return 0, out, 0, 0, 0.0
+
+    out["_干线车次键"] = warehouse.loc[out.index] + "||" + trip_no.loc[out.index]
+    batch_count = pd.to_numeric(
+        out.get("整车批次数", pd.Series(1, index=out.index)), errors="coerce",
+    ).fillna(1)
+    share = pd.to_numeric(
+        out.get("批次车份额", pd.Series(pd.NA, index=out.index)), errors="coerce",
+    )
+    share = share.where(share.notna(), batch_count.le(1).astype(float)).clip(lower=0, upper=1)
+    out["_干线车份额"] = share
+    trip_shares = out.groupby("_干线车次键", sort=False)["_干线车份额"].sum(min_count=1).clip(upper=1)
+
+    eligibility = out.get(
+        processors.WHOLE_TRUCK_COST_ELIGIBLE_COLUMN,
+        pd.Series(False, index=out.index),
+    ).apply(_truthy)
+    eligible_by_trip = out.assign(_整车资格=eligibility).groupby(
+        "_干线车次键", sort=False,
+    )["_整车资格"].all()
+    eligible_by_trip = eligible_by_trip.reindex(trip_shares.index).fillna(False)
+    complete_keys = set(
+        trip_shares[trip_shares.ge(1 - 1e-6) & eligible_by_trip].index
+    )
+    complete_rows = out[out["_干线车次键"].isin(complete_keys)].copy()
+    excluded_shares = trip_shares[~trip_shares.index.isin(complete_keys)]
+    return (
+        int(len(trip_shares)),
+        complete_rows,
+        int(len(complete_keys)),
+        int(len(excluded_shares)),
+        float(excluded_shares.sum()) if not excluded_shares.empty else 0.0,
+    )
+
+
 def _build_linehaul_sheet(matched):
     """
     生成LA四条干线的独立结果表，字段丰富度与调拨数据保持一致：
     - 每个统计周期固定输出 LA-NJ / LA-DAL / LA-CHI / LA-SAV 四行；
-    - 全部指标按FTL车次汇总，LTL不计入干线车次、成本及货量；
-    - 同时输出体积、板数、成本、均价、平均装载、平均/P80/P90时效、批次和车次信息。
+    - 总货量、总成本和时效保留全部有效FTL干线批次，LTL不计入干线；
+    - 整车价和平均装载只使用单一目的地的完整物理车，多卸/非完整车不进入整车样本；
+    - 同车次同目的地的多个批次（含补单）合成一辆物理车并汇总为一个整车价格样本。
     """
     if matched is None or getattr(matched, "empty", True):
         return pd.DataFrame(columns=LINEHAUL_SHEET_COLUMNS)
@@ -270,7 +327,7 @@ def _build_linehaul_sheet(matched):
 
             import delivery_workflow
 
-            trip_count = processors.unique_real_trip_count(group)
+            trip_count, complete_rows, complete_trip_count, excluded_trip_count, excluded_share = _linehaul_vehicle_scope(group)
             total_volume = float(group["出库体积"].sum(min_count=1)) if not group.empty and group["出库体积"].notna().any() else 0.0
             total_pallets = float(group["出库卡板数"].sum(min_count=1)) if not group.empty and group["出库卡板数"].notna().any() else 0.0
             total_cost = float(group["派送成本"].sum(min_count=1)) if not group.empty and group["派送成本"].notna().any() else 0.0
@@ -279,14 +336,18 @@ def _build_linehaul_sheet(matched):
                 average_source["批次出库体积"] = average_source["出库体积"]
                 average_source["出库体积"] = pd.to_numeric(average_source["整车出库体积"], errors="coerce")
             average_group = processors.average_sample_rows(average_source)
-            cost_group = processors.whole_truck_cost_sample_rows(average_group)
+            # Reuse the same physical-trip cost reconstruction as transfer:
+            # repeated full prices count once, different batch costs add up,
+            # and a zero-cost supplemental batch remains part of the vehicle.
+            import delivery_runtime
+
+            cost_group = delivery_runtime._full_transfer_trip_cost_samples(complete_rows)
             timing_group = delivery_workflow.timing_sample_rows(average_group)
-            trip_loads = average_group.drop_duplicates(["仓库", "车次号"]).copy()
             whole_truck_prices = pd.to_numeric(cost_group["派送成本"], errors="coerce").dropna()
             whole_truck_prices = whole_truck_prices[whole_truck_prices.gt(0)]
             denominator_col = "批次出库体积" if "批次出库体积" in average_group.columns else "出库体积"
             detail_prices = processors.detail_ratio_values(average_group, "派送成本", denominator_col)
-            trip_loads = processors.full_trip_load_sample_rows(group)
+            trip_loads = processors.full_trip_load_sample_rows(complete_rows)
             supplier_costs, supplier_usage = processors.supplier_whole_truck_cost_summary(cost_group)
 
             rows.append({
@@ -295,9 +356,13 @@ def _build_linehaul_sheet(matched):
                 "专线线路": line,
                 "统计周期": period,
                 "车次数": trip_count,
+                "完整干线车次数": complete_trip_count,
+                "多卸/非完整车次数": excluded_trip_count,
+                "混合目的地折算车份额": round(excluded_share, 2),
                 "总出库体积": total_volume,
                 "总出库卡板数": total_pallets,
                 "总派送成本": total_cost,
+                "每方干线成本（总成本÷总方数）": total_cost / total_volume if total_volume > 0 else pd.NA,
                 "平均整车价": whole_truck_prices.mean() if not whole_truck_prices.empty else pd.NA,
                 "P80整车价": processors.safe_p80(whole_truck_prices),
                 "P90整车价": processors.safe_p90(whole_truck_prices),
@@ -315,15 +380,18 @@ def _build_linehaul_sheet(matched):
                 "平均装载有效车次数": int(len(trip_loads)),
                 "平均装载口径": "按真实车次去重后取完整整车方数的有效样本算术平均",
                 "时效口径": "有效批次按出库方数加权平均、P80及P90",
+                "车次口径": "同一发货仓+真实车次号合成一辆物理车；同目的地且该线路车份额完整才进入整车价和平均装载；多卸或目的地证据不完整仅保留货量、成本、每方成本和分线路时效",
                 "供应商平均整车成本": supplier_costs,
                 "供应商使用比例": supplier_usage,
             })
 
     result = pd.DataFrame(rows, columns=LINEHAUL_SHEET_COLUMNS)
-    result["车次数"] = pd.to_numeric(result["车次数"], errors="coerce").fillna(0).round(0).astype("Int64")
+    for col in ["车次数", "完整干线车次数", "多卸/非完整车次数"]:
+        result[col] = pd.to_numeric(result[col], errors="coerce").fillna(0).round(0).astype("Int64")
     result["总出库卡板数"] = pd.to_numeric(result["总出库卡板数"], errors="coerce").fillna(0).round(0).astype("Int64")
     for col in [
-        "总出库体积", "总派送成本", "平均整车价", "P80整车价", "P90整车价", "每方平均价", "P80每方平均价", "P90每方平均价",
+        "混合目的地折算车份额", "总出库体积", "总派送成本", "每方干线成本（总成本÷总方数）",
+        "平均整车价", "P80整车价", "P90整车价", "每方平均价", "P80每方平均价", "P90每方平均价",
         "平均每车出库体积", "P80每车出库体积", "P90每车出库体积", "平均派送时效", "P80派送时效", "P90派送时效",
     ]:
         result[col] = pd.to_numeric(result[col], errors="coerce").round(2)

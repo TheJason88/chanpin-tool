@@ -180,7 +180,11 @@ class DestinationAnalysisTests(unittest.TestCase):
         before_linehaul = delivery_audit_backfill._build_linehaul_sheet(before)
         marked_linehaul = delivery_audit_backfill._build_linehaul_sheet(marked)
         self.assertEqual(before_linehaul.iloc[0]["平均整车价"], 500)
-        self.assertEqual(marked_linehaul.iloc[0]["平均整车价"], 750)
+        self.assertEqual(before_linehaul.iloc[0]["平均整车价有效车次数"], 1)
+        self.assertEqual(marked_linehaul.iloc[0]["平均整车价有效车次数"], 2)
+        # 两个批次上重复记录的同一整车价只计一次；标记目的地后，
+        # T车次从待确认样本变成第二个有效完整整车样本。
+        self.assertEqual(marked_linehaul.iloc[0]["平均整车价"], 500)
         pd.testing.assert_frame_equal(rows, before)
 
     def test_timing_only_recognized_destinations_preserves_weighted_valid_samples(self):
