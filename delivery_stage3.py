@@ -4,6 +4,8 @@ import re
 
 import pandas as pd
 
+import excel_compat
+
 
 STAGE2_DETAIL_SHEET = "派送二_匹配后批次数据"
 TRANSFER_DETAIL_SHEET = "SO明细"
@@ -60,12 +62,10 @@ def _truthy(value):
 def _read_sheet(excel_file, sheet_name):
     if hasattr(excel_file, "seek"):
         excel_file.seek(0)
-    xls = pd.ExcelFile(excel_file)
+    xls = excel_compat.open_excel(excel_file)
     if sheet_name not in xls.sheet_names:
         raise ValueError(f"文件中缺少工作表“{sheet_name}”。")
-    if hasattr(excel_file, "seek"):
-        excel_file.seek(0)
-    frame = pd.read_excel(excel_file, sheet_name=sheet_name, dtype=object)
+    frame = pd.read_excel(xls, sheet_name=sheet_name, dtype=object)
     frame.columns = [str(col).strip() for col in frame.columns]
     return frame
 
@@ -73,12 +73,10 @@ def _read_sheet(excel_file, sheet_name):
 def _read_optional_sheet(excel_file, sheet_name):
     if hasattr(excel_file, "seek"):
         excel_file.seek(0)
-    xls = pd.ExcelFile(excel_file)
+    xls = excel_compat.open_excel(excel_file)
     if sheet_name not in xls.sheet_names:
         return pd.DataFrame()
-    if hasattr(excel_file, "seek"):
-        excel_file.seek(0)
-    frame = pd.read_excel(excel_file, sheet_name=sheet_name, dtype=object)
+    frame = pd.read_excel(xls, sheet_name=sheet_name, dtype=object)
     frame.columns = [str(col).strip() for col in frame.columns]
     return frame
 
@@ -105,7 +103,7 @@ def _read_matching_sheet(excel_file, aliases, required_columns, logical_name, op
     """Prefer known names, then identify a sheet by its required columns."""
     if hasattr(excel_file, "seek"):
         excel_file.seek(0)
-    xls = pd.ExcelFile(excel_file)
+    xls = excel_compat.open_excel(excel_file)
     normalized_names = {str(name).strip().lower(): name for name in xls.sheet_names}
     selected = None
     for alias in aliases:

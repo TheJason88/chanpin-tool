@@ -2,6 +2,7 @@ import re
 
 import pandas as pd
 
+import excel_compat
 import processors
 
 
@@ -489,8 +490,7 @@ def read_stage1_or_stage2_with_audit_updates(excel_file):
     apply_linehaul_market_rules()
     apply_stage2_linehaul_sheet_patch()
 
-    excel_file.seek(0)
-    xls = pd.ExcelFile(excel_file)
+    xls = excel_compat.open_excel(excel_file)
     if "派送总览" in xls.sheet_names and not any(name in xls.sheet_names for name in MAIN_SHEET_CANDIDATES):
         raise ValueError("这是精简业务报告，不含批次明细。请上传同次生成的‘审核明细’文件，或原派送一结果。")
     sheet_name = xls.sheet_names[0]
@@ -499,12 +499,10 @@ def read_stage1_or_stage2_with_audit_updates(excel_file):
             sheet_name = candidate
             break
 
-    excel_file.seek(0)
-    df = pd.read_excel(excel_file, sheet_name=sheet_name, dtype=str)
+    df = pd.read_excel(xls, sheet_name=sheet_name, dtype=str)
 
     if AUDIT_SHEET_NAME in xls.sheet_names:
-        excel_file.seek(0)
-        audit_df = pd.read_excel(excel_file, sheet_name=AUDIT_SHEET_NAME, dtype=str)
+        audit_df = pd.read_excel(xls, sheet_name=AUDIT_SHEET_NAME, dtype=str)
         df = apply_zip_audit_updates(df, audit_df)
     return df
 

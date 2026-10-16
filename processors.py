@@ -2,6 +2,8 @@ import re
 import numpy as np
 import pandas as pd
 
+import excel_compat
+
 
 # =========================
 # 1. 基础配置
@@ -699,10 +701,9 @@ def combine_container_uploaded_files(uploaded_files):
     signatures = []
     for file_index, uploaded_file in enumerate(files, start=1):
         uploaded_file.seek(0)
-        excel_file = pd.ExcelFile(uploaded_file)
+        excel_file = excel_compat.open_excel(uploaded_file)
         sheet_name = excel_file.sheet_names[0]
-        uploaded_file.seek(0)
-        frame = pd.read_excel(uploaded_file, sheet_name=sheet_name, dtype=str)
+        frame = pd.read_excel(excel_file, sheet_name=sheet_name, dtype=str)
         frame = normalize_columns(frame)
         signatures.append(tuple(frame.columns))
         source_name = getattr(uploaded_file, "name", f"柜类数据文件{file_index}")
@@ -1657,9 +1658,9 @@ def process_delivery_stage1_from_files(file_dfs, warehouse, period_type="按周�
 
 def read_stage1_sheet(excel_file):
     excel_file.seek(0)
-    xls = pd.ExcelFile(excel_file)
+    xls = excel_compat.open_excel(excel_file)
     sheet_name = "派送一_清洗明细" if "派送一_清洗明细" in xls.sheet_names else xls.sheet_names[0]
-    return pd.read_excel(excel_file, sheet_name=sheet_name, dtype=str)
+    return pd.read_excel(xls, sheet_name=sheet_name, dtype=str)
 
 
 def prepare_match_file(match_df):
@@ -2100,7 +2101,7 @@ def process_uploaded_file(
         df, _ = combine_container_uploaded_files(uploaded_file)
     else:
         uploaded_file.seek(0)
-        df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+        df = excel_compat.read_excel(uploaded_file, sheet_name=sheet_name)
 
     if analysis_module == "柜量及提拆柜分析":
         detail_df, result_df = process_container_analysis(

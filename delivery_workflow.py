@@ -4,6 +4,7 @@ import re
 import numpy as np
 import pandas as pd
 
+import excel_compat
 import processors
 import delivery_reference
 import tool_common
@@ -804,11 +805,9 @@ def build_trip_audit(cleaned_batches):
 
 
 def read_stage1_cleaned_batches(excel_file):
-    excel_file.seek(0)
-    xls = pd.ExcelFile(excel_file)
+    xls = excel_compat.open_excel(excel_file)
     sheet_name = "清洗后数据" if "清洗后数据" in xls.sheet_names else ("派送一_清洗合并数据" if "派送一_清洗合并数据" in xls.sheet_names else xls.sheet_names[0])
-    excel_file.seek(0)
-    return pd.read_excel(excel_file, sheet_name=sheet_name, dtype=str)
+    return pd.read_excel(xls, sheet_name=sheet_name, dtype=str)
 
 
 def prepare_manual_match(match_df):

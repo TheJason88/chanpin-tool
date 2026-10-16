@@ -12,6 +12,7 @@ st.divider()
 # 页面先稳定打开；业务模块导入失败时在页面内显示具体错误。
 _dependency_error = None
 try:
+    import excel_compat
     import processors
     import delivery_reference
     import delivery_workflow
@@ -26,11 +27,12 @@ try:
 except Exception as exc:
     _dependency_error = exc
 
-EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-10-12-delivery3-fusion-v36"
+EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION = "2026-10-16-excel-xml-compat-v37"
 if _dependency_error is None and getattr(delivery_runtime, "RUNTIME_SCHEMA_VERSION", None) != EXPECTED_DELIVERY_RUNTIME_SCHEMA_VERSION:
     try:
         # Streamlit Community Cloud 更新源码后可能只 rerun app.py，保留旧业务模块缓存。
         # 仅当运行时版本不一致时重新加载，保证新表结构与新统计规则同步生效。
+        excel_compat = importlib.reload(excel_compat)
         processors = importlib.reload(processors)
         delivery_reference = importlib.reload(delivery_reference)
         tool_common = importlib.reload(tool_common)
@@ -244,16 +246,17 @@ def validate_uploaded_warehouse_for_df(df, selected_warehouse):
 
 def validate_uploaded_warehouse(uploaded_file, sheet_name, selected_warehouse):
     uploaded_file.seek(0)
-    preview_df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+    preview_df = excel_compat.read_excel(uploaded_file, sheet_name=sheet_name)
     validate_uploaded_warehouse_for_df(preview_df, selected_warehouse)
 
 
 def read_first_sheet(uploaded_file):
     uploaded_file.seek(0)
-    xls = pd.ExcelFile(uploaded_file)
+    xls = excel_compat.open_excel(uploaded_file)
     sheet_name = xls.sheet_names[0]
-    uploaded_file.seek(0)
-    return pd.read_excel(uploaded_file, sheet_name=sheet_name, dtype=str)
+    frame = pd.read_excel(xls, sheet_name=sheet_name, dtype=str)
+    frame.attrs["excel_xml_repair_count"] = getattr(xls, "xml_repair_count", 0)
+    return frame
 
 
 def combine_uploaded_match_files(match_files):
@@ -261,8 +264,12 @@ def combine_uploaded_match_files(match_files):
         return pd.DataFrame(), "未上传6B匹配文件"
     frames = []
     signatures = []
+    repaired_files = []
     for file in match_files:
         df = read_first_sheet(file)
+        repaired_count = int(df.attrs.get("excel_xml_repair_count", 0) or 0)
+        if repaired_count:
+            repaired_files.append((getattr(file, "name", "匹配文件"), repaired_count))
         df = processors.normalize_columns(df.copy())
         df["来源匹配文件"] = getattr(file, "name", "匹配文件")
         frames.append(df)
@@ -273,6 +280,9 @@ def combine_uploaded_match_files(match_files):
         message = f"已合并 {len(match_files)} 个6B匹配文件；文件结构完全一致，已按行纵向合并。"
     else:
         message = f"已合并 {len(match_files)} 个6B匹配文件；文件结构不完全一致，已按字段并集合并，并保留来源匹配文件列。"
+    if repaired_files:
+        repaired_text = "、".join(f"{name}（{count}个字符）" for name, count in repaired_files)
+        message += f" 已自动清理Excel内部非法字符：{repaired_text}。"
     return combined, message
 
 
@@ -367,10 +377,9 @@ if analysis_module == DELIVERY_STAGE1_MODULE:
                 file_dfs = []
                 for file in raw_files:
                     file.seek(0)
-                    xls = pd.ExcelFile(file)
+                    xls = excel_compat.open_excel(file)
                     sheet_name = xls.sheet_names[0]
-                    file.seek(0)
-                    df = pd.read_excel(file, sheet_name=sheet_name)
+                    df = pd.read_excel(xls, sheet_name=sheet_name)
                     validate_uploaded_warehouse_for_df(df, warehouse)
                     file_dfs.append((file.name, df))
                 warehouse_for_processing = "四仓合并" if warehouse == "全部" else warehouse

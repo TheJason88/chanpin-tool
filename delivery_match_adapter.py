@@ -3,6 +3,7 @@ import re
 
 import pandas as pd
 
+import excel_compat
 import processors
 import tool_common
 import delivery_reference
@@ -474,8 +475,7 @@ def _apply_zip_audit_updates(main_df, audit_df):
 
 
 def read_stage1_or_stage2_with_audit_updates(excel_file):
-    excel_file.seek(0)
-    xls = pd.ExcelFile(excel_file)
+    xls = excel_compat.open_excel(excel_file)
     if "派送二_匹配后批次数据" in xls.sheet_names:
         sheet_name = "派送二_匹配后批次数据"
     elif "派送二_匹配后合并数据" in xls.sheet_names:
@@ -488,11 +488,9 @@ def read_stage1_or_stage2_with_audit_updates(excel_file):
         sheet_name = "派送二_批次车次聚合"
     else:
         sheet_name = xls.sheet_names[0]
-    excel_file.seek(0)
-    df = pd.read_excel(excel_file, sheet_name=sheet_name, dtype=str)
+    df = pd.read_excel(xls, sheet_name=sheet_name, dtype=str)
     if "邮编异常审核" in xls.sheet_names:
-        excel_file.seek(0)
-        audit_df = pd.read_excel(excel_file, sheet_name="邮编异常审核", dtype=str)
+        audit_df = pd.read_excel(xls, sheet_name="邮编异常审核", dtype=str)
         df = _apply_zip_audit_updates(df, audit_df)
     return df
 
